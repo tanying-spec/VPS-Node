@@ -47,6 +47,11 @@ jobs:
           grep -Fq 'tested_script_sha256=' tests/isolated_acceptance.sh
           grep -Fq 'formal_sensitive_state_digests_unchanged=yes' tests/isolated_acceptance.sh
           grep -Fq 'formal_process_images_and_cmdlines_unchanged=yes' tests/isolated_acceptance.sh
+          grep -Fq 'VP_MEMORY_EVIDENCE_DIR=' tests/run_authorized_host.ps1
+          grep -Fq 'memory.max' tests/memory_profiles.sh
+          grep -Fq 'memory.peak' tests/memory_profiles.sh
+          grep -Fq 'oom_kill' tests/memory_profiles.sh
+          grep -Fq 'speed.cloudflare.com/__down?bytes=1048576' tests/memory_profiles.sh
           ! grep -Eqi 'sshpass|plink|PreferredAuthentications=password|PasswordAuthentication=yes' tests/run_authorized_host.ps1
           ! grep -Eq '(^|[^A-Za-z])TunnelToken[[:space:]]*=' tests/run_authorized_host.ps1
           ! grep -Eq '^[[:space:]]*\[(string|int)\]\$Authorized(Host|Port)' tests/run_authorized_host.ps1

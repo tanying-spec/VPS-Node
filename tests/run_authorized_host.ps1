@@ -136,6 +136,62 @@ function Assert-AcceptanceEvidence([string]$Directory, [bool]$TunnelRequested) {
     }
 }
 
+function Assert-MemoryEvidence([string]$Directory) {
+    $summaryFiles = @(Get-ChildItem -LiteralPath $Directory -Filter 'memory-profiles-summary.txt' -File)
+    $csvFiles = @(Get-ChildItem -LiteralPath $Directory -Filter 'memory-profiles.csv' -File)
+    if ($summaryFiles.Count -ne 1 -or $csvFiles.Count -ne 1) {
+        throw 'Expected exactly one memory summary and one memory profile CSV.'
+    }
+    $summary = @{}
+    foreach ($line in Get-Content -LiteralPath $summaryFiles[0].FullName) {
+        if ($line -notmatch '^([a-z0-9_]+)=(.*)$') { throw 'Memory evidence summary contains a malformed line.' }
+        if ($summary.ContainsKey($Matches[1])) { throw "Memory evidence contains a duplicate key: $($Matches[1])" }
+        $summary[$Matches[1]] = $Matches[2]
+    }
+    $versionMatch = Select-String -LiteralPath (Join-Path $RepoRoot 'vp.sh') -Pattern '^VP_VERSION="([^"]+)"$' | Select-Object -First 1
+    if (-not $versionMatch) { throw 'Unable to determine the local VPS-Node version.' }
+    $expectedScriptHash = (Get-FileHash -LiteralPath (Join-Path $RepoRoot 'vp.sh') -Algorithm SHA256).Hash.ToLowerInvariant()
+    $requiredSummary = @{
+        vps_node_version = $versionMatch.Matches[0].Groups[1].Value
+        tested_script_sha256 = $expectedScriptHash
+        authorized_host = $AuthorizedHost
+        cgroup_version = '2'
+        memory_limits_tested = '64,96,128,192,256,512,1024,2048'
+        profile_count = '8'
+        real_core_startups = '8'
+        functional_proxy_checks = '8'
+        traffic_survival_checks = '8'
+        oom_kill_total = '0'
+        formal_services_and_sensitive_state_unchanged = 'yes'
+    }
+    foreach ($key in $requiredSummary.Keys) {
+        if (-not $summary.ContainsKey($key) -or $summary[$key] -ne $requiredSummary[$key]) {
+            throw "Memory evidence did not prove required result: $key"
+        }
+    }
+    $rows = @(Import-Csv -LiteralPath $csvFiles[0].FullName)
+    $limits = @(64, 96, 128, 192, 256, 512, 1024, 2048)
+    $budgets = @(38, 57, 76, 115, 153, 307, 512, 512)
+    $profiles = @('ultra-compact', 'ultra-compact', 'compact', 'balanced', 'balanced', 'standard', 'performance', 'performance')
+    $gogc = @(50, 50, 60, 80, 80, 100, 100, 100)
+    $gomaxprocs = @(1, 1, 1, 2, 2, 2, 4, 4)
+    if ($rows.Count -ne $limits.Count) { throw "Expected eight memory profile rows; found $($rows.Count)." }
+    $maximumPeak = 0
+    for ($index = 0; $index -lt $limits.Count; $index++) {
+        $row = $rows[$index]
+        if ([int]$row.limit_mib -ne $limits[$index] -or [int]$row.budget_mib -ne $budgets[$index]) { throw "Unexpected memory budget at row $index." }
+        if ($row.profile -ne $profiles[$index] -or $row.gomemlimit -ne "$($budgets[$index])MiB") { throw "Unexpected memory profile at row $index." }
+        if ([int]$row.gogc -ne $gogc[$index] -or [int]$row.gomaxprocs -ne $gomaxprocs[$index]) { throw "Unexpected Go runtime tuning at row $index." }
+        $peak = [int]$row.peak_mib
+        if ($peak -lt 1 -or $peak -gt $limits[$index]) { throw "Invalid observed memory peak at row $index." }
+        if ([int]$row.oom_kill -ne 0 -or $row.proxy_result -ne 'passed') { throw "Memory profile runtime failed at row $index." }
+        if ($peak -gt $maximumPeak) { $maximumPeak = $peak }
+    }
+    if (-not $summary.ContainsKey('max_observed_peak_mib') -or [int]$summary.max_observed_peak_mib -ne $maximumPeak) {
+        throw 'Memory evidence maximum peak does not match the profile rows.'
+    }
+}
+
 $TunnelInputCount = 0
 foreach ($tunnelInputPresent in @(
     -not [string]::IsNullOrWhiteSpace($TunnelTokenFile),
@@ -205,7 +261,52 @@ if ($SelfTestEvidence) {
         $metadataRejected = $false
         try { Assert-AcceptanceEvidence $selfTestDirectory $false } catch { $metadataRejected = $true }
         if (-not $metadataRejected) { throw 'Evidence self-test failed to reject mismatched source metadata.' }
-        Write-Host 'Acceptance evidence verification self-test passed; no network connection was attempted.'
+
+        $validLines | Set-Content -LiteralPath $evidencePath -Encoding ascii
+        $hash = (Get-FileHash -LiteralPath $evidencePath -Algorithm SHA256).Hash.ToLowerInvariant()
+        "$hash  $evidenceName" | Set-Content -LiteralPath $sidecarPath -Encoding ascii
+        $memorySummary = Join-Path $selfTestDirectory 'memory-profiles-summary.txt'
+        @(
+            "vps_node_version=$expectedVersion",
+            "tested_script_sha256=$expectedScriptHash",
+            "authorized_host=$AuthorizedHost",
+            'cgroup_version=2',
+            'memory_limits_tested=64,96,128,192,256,512,1024,2048',
+            'profile_count=8',
+            'real_core_startups=8',
+            'functional_proxy_checks=8',
+            'traffic_survival_checks=8',
+            'oom_kill_total=0',
+            'max_observed_peak_mib=48',
+            'formal_services_and_sensitive_state_unchanged=yes'
+        ) | Set-Content -LiteralPath $memorySummary -Encoding ascii
+        $memoryCsv = Join-Path $selfTestDirectory 'memory-profiles.csv'
+        @(
+            'limit_mib,budget_mib,profile,gomemlimit,gogc,gomaxprocs,peak_mib,oom_kill,proxy_result',
+            '64,38,ultra-compact,38MiB,50,1,31,0,passed',
+            '96,57,ultra-compact,57MiB,50,1,32,0,passed',
+            '128,76,compact,76MiB,60,1,33,0,passed',
+            '192,115,balanced,115MiB,80,2,35,0,passed',
+            '256,153,balanced,153MiB,80,2,36,0,passed',
+            '512,307,standard,307MiB,100,2,40,0,passed',
+            '1024,512,performance,512MiB,100,4,45,0,passed',
+            '2048,512,performance,512MiB,100,4,48,0,passed'
+        ) | Set-Content -LiteralPath $memoryCsv -Encoding ascii
+        foreach ($memoryFile in @($memorySummary, $memoryCsv)) {
+            $memoryHash = (Get-FileHash -LiteralPath $memoryFile -Algorithm SHA256).Hash.ToLowerInvariant()
+            $memoryName = [IO.Path]::GetFileName($memoryFile)
+            "$memoryHash  $memoryName" | Set-Content -LiteralPath "$memoryFile.sha256" -Encoding ascii
+        }
+        Assert-EvidenceChecksums $selfTestDirectory
+        Assert-MemoryEvidence $selfTestDirectory
+        (Get-Content -LiteralPath $memoryCsv) -replace ',0,passed$', ',1,passed' | Set-Content -LiteralPath $memoryCsv -Encoding ascii
+        $memoryHash = (Get-FileHash -LiteralPath $memoryCsv -Algorithm SHA256).Hash.ToLowerInvariant()
+        "$memoryHash  memory-profiles.csv" | Set-Content -LiteralPath "$memoryCsv.sha256" -Encoding ascii
+        Assert-EvidenceChecksums $selfTestDirectory
+        $memoryMetadataRejected = $false
+        try { Assert-MemoryEvidence $selfTestDirectory } catch { $memoryMetadataRejected = $true }
+        if (-not $memoryMetadataRejected) { throw 'Evidence self-test failed to reject a memory profile reporting an OOM kill.' }
+        Write-Host 'Acceptance and memory evidence verification self-test passed; no network connection was attempted.'
         return
     }
     finally {
@@ -300,9 +401,9 @@ exit 1
 
     if (-not $SkipMemoryProfiles) {
         $memoryCommand = "set -eu; cd $(Quote-Sh "$RemoteRoot/source"); " +
-            "VP_TEST_MIHOMO_BIN=$(Quote-Sh $MihomoPath) sh tests/memory_profiles.sh " +
-            "> $(Quote-Sh "$RemoteRoot/evidence/memory-profiles.txt"); " +
-            "cd $(Quote-Sh "$RemoteRoot/evidence"); sha256sum memory-profiles.txt > memory-profiles.txt.sha256"
+            "VP_TEST_MIHOMO_BIN=$(Quote-Sh $MihomoPath) " +
+            "VP_MEMORY_EVIDENCE_DIR=$(Quote-Sh "$RemoteRoot/evidence") " +
+            "sh tests/memory_profiles.sh"
         Invoke-AuthorizedSsh $memoryCommand | Out-Null
     }
 
@@ -311,6 +412,7 @@ exit 1
     if ($LASTEXITCODE -ne 0) { throw 'Failed to download redacted acceptance evidence.' }
     Assert-EvidenceChecksums $EvidenceDirectory
     Assert-AcceptanceEvidence $EvidenceDirectory ($TunnelInputCount -eq 4)
+    if (-not $SkipMemoryProfiles) { Assert-MemoryEvidence $EvidenceDirectory }
     Write-Host "Acceptance complete; downloaded evidence passed SHA-256 verification: $EvidenceDirectory"
 }
 finally {

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.0-dev.40
+
+- Replaced configuration-only memory profile checks with eight real Mihomo runs under isolated cgroup v2 hard limits from 64 through 2048 MiB.
+- Every profile validates the generated budget and Go runtime settings, starts the real core, proves proxy egress, transfers 1 MiB, records `memory.peak`, requires zero `oom_kill`, then destroys its cgroup.
+- Memory acceptance snapshots formal Mihomo/cloudflared state, PIDs, executable/cmdline digests, config, init scripts, databases and Tunnel token before and after the complete profile matrix.
+- Added source-bound summary/CSV evidence and local semantic verification for exact limits, budgets, profiles, runtime tuning, observed peaks and formal-service invariants; offline tests reject a re-signed row reporting OOM.
+
 ## 0.2.0-dev.39
 
 - Isolated acceptance now verifies the uploaded `vp.sh` against its 64-character SHA-256 before execution and binds both exact version and script digest into evidence.
