@@ -2,7 +2,7 @@
 
 set -u
 
-VP_VERSION="0.2.0-dev.86"
+VP_VERSION="0.2.0-dev.87"
 VP_CONFIG_DIR="${VP_CONFIG_DIR:-/etc/vps-node}"
 VP_DATA_DIR="${VP_DATA_DIR:-/var/lib/vps-node}"
 VP_LOG_DIR="${VP_LOG_DIR:-/var/log/vps-node}"
@@ -45,6 +45,9 @@ VP_STABILITY_LOG="${VP_STABILITY_LOG:-$VP_LOG_DIR/stability.log}"
 VP_SELF_HEAL_LOCK="${VP_SELF_HEAL_LOCK:-$VP_DATA_DIR/self-heal.lock}"
 VP_WATCHDOG_RUNNER="${VP_WATCHDOG_RUNNER:-$VP_LIB_DIR/bin/watchdog-run}"
 VP_WATCHDOG_SERVICE="${VP_WATCHDOG_SERVICE:-vps-node-watchdog}"
+VP_WATCHDOG_SYSTEMD_SERVICE="${VP_WATCHDOG_SYSTEMD_SERVICE:-/etc/systemd/system/${VP_WATCHDOG_SERVICE}.service}"
+VP_WATCHDOG_SYSTEMD_TIMER="${VP_WATCHDOG_SYSTEMD_TIMER:-/etc/systemd/system/${VP_WATCHDOG_SERVICE}.timer}"
+VP_WATCHDOG_PERIODIC="${VP_WATCHDOG_PERIODIC:-/etc/periodic/15min/$VP_WATCHDOG_SERVICE}"
 VP_CLI_PATH="${VP_CLI_PATH:-/usr/local/bin/vp}"
 VP_CLI_BACKUP_PATH="${VP_CLI_BACKUP_PATH:-$VP_CLI_PATH.previous}"
 VP_CLI_BACKUP_SHA256="${VP_CLI_BACKUP_SHA256:-$VP_CLI_BACKUP_PATH.sha256}"
@@ -575,6 +578,11 @@ service_state() {
 }
 
 service_manager() {
+  if [ "${VP_ALLOW_TEST_HOOKS:-0}" = 1 ]; then
+    case "${VP_SERVICE_MANAGER_OVERRIDE:-}" in
+      systemd|openrc|none) printf '%s' "$VP_SERVICE_MANAGER_OVERRIDE"; return 0 ;;
+    esac
+  fi
   if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
     printf 'systemd'
   elif command -v rc-service >/dev/null 2>&1; then
@@ -3623,58 +3631,135 @@ self_heal_once() {
   [ "$failures" -eq 0 ]
 }
 
+watchdog_file_owned() {
+  watchdog_owned_path="$1"
+  [ -f "$watchdog_owned_path" ] && [ ! -L "$watchdog_owned_path" ] && [ -r "$watchdog_owned_path" ] || return 1
+  grep -Fqx '# Managed by VPS-Node watchdog' "$watchdog_owned_path" 2>/dev/null
+}
+
 install_stability_monitor() {
   need_root || return 1
   init_layout >/dev/null || return 1
-  mkdir -p "$(dirname "$VP_WATCHDOG_RUNNER")"
-  cat > "$VP_WATCHDOG_RUNNER" <<EOF
-#!/bin/sh
-exec "$VP_CLI_PATH" self-heal --quiet
-EOF
-  chmod 700 "$VP_WATCHDOG_RUNNER"
   if [ "${VP_SKIP_SERVICE:-0}" = "1" ]; then
-    ok "后台自愈运行器已在隔离模式生成。"
-    return 0
+    monitor_manager=isolated
+    monitor_secondary=""
+    monitor_tertiary=""
+    monitor_interval="仅生成隔离运行器，不注册系统定时任务"
+  else
+    monitor_manager="$(service_manager)"
+    case "$monitor_manager" in
+      systemd)
+        monitor_secondary="$VP_WATCHDOG_SYSTEMD_SERVICE"
+        monitor_tertiary="$VP_WATCHDOG_SYSTEMD_TIMER"
+        monitor_interval="每 5 分钟"
+        ;;
+      openrc)
+        monitor_secondary="$VP_WATCHDOG_PERIODIC"
+        monitor_tertiary=""
+        monitor_interval="每 15 分钟"
+        ;;
+      *) error "当前系统无法安装定时自愈。"; return 1 ;;
+    esac
   fi
-  case "$(service_manager)" in
-    systemd)
-      cat > "/etc/systemd/system/${VP_WATCHDOG_SERVICE}.service" <<EOF
-[Unit]
-Description=VPS-Node low-overhead self-heal check
+  for monitor_target in "$VP_WATCHDOG_RUNNER" "$monitor_secondary" "$monitor_tertiary"; do
+    [ -n "$monitor_target" ] || continue
+    if [ -e "$monitor_target" ] || [ -L "$monitor_target" ]; then
+      watchdog_file_owned "$monitor_target" || { error "监测安装目标已被其他任务占用，拒绝覆盖：$monitor_target"; return 1; }
+    fi
+  done
+  approved_monitor_runner_state="$(managed_file_state "$VP_WATCHDOG_RUNNER")"
+  approved_monitor_secondary_state="$(managed_file_state "$monitor_secondary")"
+  approved_monitor_tertiary_state="$(managed_file_state "$monitor_tertiary")"
+  printf '后台稳定性监测安装预览：\n'
+  printf '  调度方式：%s\n' "$monitor_manager"
+  printf '  检查频率：%s\n' "$monitor_interval"
+  printf '  行为：只读检查网络状态；服务/配置异常仍按现有安全自愈规则处理\n'
+  printf '  运行器：%s\n' "$VP_WATCHDOG_RUNNER"
+  [ -z "$monitor_secondary" ] || printf '  定时定义：%s\n' "$monitor_secondary"
+  [ -z "$monitor_tertiary" ] || printf '  定时器定义：%s\n' "$monitor_tertiary"
+  if [ -n "${VP_MONITOR_INSTALL_CONFIRM:-}" ]; then
+    monitor_confirm="$VP_MONITOR_INSTALL_CONFIRM"
+  else
+    printf '输入 ENABLE 确认启用后台监测：'
+    read -r monitor_confirm || true
+  fi
+  [ "$monitor_confirm" = ENABLE ] || { warn "已取消后台监测安装，未修改文件或服务。"; return 2; }
 
-[Service]
-Type=oneshot
-ExecStart=$VP_WATCHDOG_RUNNER
-EOF
-      cat > "/etc/systemd/system/${VP_WATCHDOG_SERVICE}.timer" <<EOF
-[Unit]
-Description=Run VPS-Node self-heal every 5 minutes
+  [ "$(managed_file_state "$VP_WATCHDOG_RUNNER")" = "$approved_monitor_runner_state" ] || { error "监测运行器在确认期间发生变化，已中止。"; return 1; }
+  [ "$(managed_file_state "$monitor_secondary")" = "$approved_monitor_secondary_state" ] || { error "监测定时定义在确认期间发生变化，已中止。"; return 1; }
+  [ "$(managed_file_state "$monitor_tertiary")" = "$approved_monitor_tertiary_state" ] || { error "监测定时器定义在确认期间发生变化，已中止。"; return 1; }
 
-[Timer]
-OnBootSec=2min
-OnUnitActiveSec=5min
-Persistent=true
-
-[Install]
-WantedBy=timers.target
-EOF
-      systemctl daemon-reload
-      systemctl enable --now "${VP_WATCHDOG_SERVICE}.timer" >/dev/null || return 1
-      ;;
-    openrc)
-      mkdir -p /etc/periodic/15min
-      cat > "/etc/periodic/15min/$VP_WATCHDOG_SERVICE" <<EOF
-#!/bin/sh
-exec "$VP_WATCHDOG_RUNNER"
-EOF
-      chmod 700 "/etc/periodic/15min/$VP_WATCHDOG_SERVICE"
-      rc-service crond start >/dev/null 2>&1 || true
-      rc-update add crond default >/dev/null 2>&1 || true
-      ;;
-    *) error "当前系统无法安装定时自愈。"; return 1 ;;
-  esac
+  monitor_tx="$(mktemp -d /tmp/vp-monitor-install.XXXXXX)" || return 1
+  monitor_runner_existed=0; monitor_secondary_existed=0; monitor_tertiary_existed=0
+  [ "$approved_monitor_runner_state" = missing ] || { cp -p "$VP_WATCHDOG_RUNNER" "$monitor_tx/runner.before" || { rm -rf "$monitor_tx"; return 1; }; monitor_runner_existed=1; }
+  [ -z "$monitor_secondary" ] || [ "$approved_monitor_secondary_state" = missing ] || { cp -p "$monitor_secondary" "$monitor_tx/secondary.before" || { rm -rf "$monitor_tx"; return 1; }; monitor_secondary_existed=1; }
+  [ -z "$monitor_tertiary" ] || [ "$approved_monitor_tertiary_state" = missing ] || { cp -p "$monitor_tertiary" "$monitor_tx/tertiary.before" || { rm -rf "$monitor_tx"; return 1; }; monitor_tertiary_existed=1; }
+  monitor_timer_was_active=0
+  [ "$monitor_manager" != systemd ] || ! systemctl is-active --quiet "${VP_WATCHDOG_SERVICE}.timer" >/dev/null 2>&1 || monitor_timer_was_active=1
+  monitor_committed=0
+  restore_monitor_install() {
+    if [ "$monitor_committed" -eq 1 ]; then
+      rm -rf "$monitor_tx"
+      return 0
+    fi
+    if [ "$monitor_runner_existed" -eq 1 ]; then cp -p "$monitor_tx/runner.before" "$VP_WATCHDOG_RUNNER" >/dev/null 2>&1 || true; else rm -f "$VP_WATCHDOG_RUNNER"; fi
+    if [ -n "$monitor_secondary" ]; then
+      if [ "$monitor_secondary_existed" -eq 1 ]; then cp -p "$monitor_tx/secondary.before" "$monitor_secondary" >/dev/null 2>&1 || true; else rm -f "$monitor_secondary"; fi
+    fi
+    if [ -n "$monitor_tertiary" ]; then
+      if [ "$monitor_tertiary_existed" -eq 1 ]; then cp -p "$monitor_tx/tertiary.before" "$monitor_tertiary" >/dev/null 2>&1 || true; else rm -f "$monitor_tertiary"; fi
+    fi
+    if [ "$monitor_manager" = systemd ]; then
+      systemctl daemon-reload >/dev/null 2>&1 || true
+      if [ "$monitor_timer_was_active" -eq 1 ]; then systemctl start "${VP_WATCHDOG_SERVICE}.timer" >/dev/null 2>&1 || true; else systemctl disable --now "${VP_WATCHDOG_SERVICE}.timer" >/dev/null 2>&1 || true; fi
+    fi
+    rm -rf "$monitor_tx"
+  }
+  trap restore_monitor_install EXIT
+  trap 'restore_monitor_install; exit 130' HUP INT TERM
+  mkdir -p "$(dirname "$VP_WATCHDOG_RUNNER")" || { restore_monitor_install; trap - EXIT HUP INT TERM; return 1; }
+  monitor_runner_stage="$(mktemp "$(dirname "$VP_WATCHDOG_RUNNER")/.watchdog-run.XXXXXX")" || { restore_monitor_install; trap - EXIT HUP INT TERM; return 1; }
+  {
+    printf '#!/bin/sh\n'
+    printf '# Managed by VPS-Node watchdog\n'
+    printf 'exec "%s" self-heal --quiet\n' "$VP_CLI_PATH"
+  } > "$monitor_runner_stage" && chmod 700 "$monitor_runner_stage" || { rm -f "$monitor_runner_stage"; restore_monitor_install; trap - EXIT HUP INT TERM; return 1; }
+  monitor_secondary_stage=""; monitor_tertiary_stage=""
+  if [ "$monitor_manager" = systemd ]; then
+    mkdir -p "$(dirname "$monitor_secondary")" "$(dirname "$monitor_tertiary")" || { rm -f "$monitor_runner_stage"; restore_monitor_install; trap - EXIT HUP INT TERM; return 1; }
+    monitor_secondary_stage="$(mktemp "$(dirname "$monitor_secondary")/.watchdog-service.XXXXXX")" || { rm -f "$monitor_runner_stage"; restore_monitor_install; trap - EXIT HUP INT TERM; return 1; }
+    {
+      printf '# Managed by VPS-Node watchdog\n[Unit]\nDescription=VPS-Node low-overhead self-heal check\n\n[Service]\nType=oneshot\nExecStart=%s\n' "$VP_WATCHDOG_RUNNER"
+    } > "$monitor_secondary_stage" || { rm -f "$monitor_runner_stage" "$monitor_secondary_stage"; restore_monitor_install; trap - EXIT HUP INT TERM; return 1; }
+    monitor_tertiary_stage="$(mktemp "$(dirname "$monitor_tertiary")/.watchdog-timer.XXXXXX")" || { rm -f "$monitor_runner_stage" "$monitor_secondary_stage"; restore_monitor_install; trap - EXIT HUP INT TERM; return 1; }
+    {
+      printf '# Managed by VPS-Node watchdog\n[Unit]\nDescription=Run VPS-Node self-heal every 5 minutes\n\n[Timer]\nOnBootSec=2min\nOnUnitActiveSec=5min\nPersistent=true\n\n[Install]\nWantedBy=timers.target\n'
+    } > "$monitor_tertiary_stage" || { rm -f "$monitor_runner_stage" "$monitor_secondary_stage" "$monitor_tertiary_stage"; restore_monitor_install; trap - EXIT HUP INT TERM; return 1; }
+    chmod 600 "$monitor_secondary_stage" "$monitor_tertiary_stage" || { rm -f "$monitor_runner_stage" "$monitor_secondary_stage" "$monitor_tertiary_stage"; restore_monitor_install; trap - EXIT HUP INT TERM; return 1; }
+  elif [ "$monitor_manager" = openrc ]; then
+    mkdir -p "$(dirname "$monitor_secondary")" || { rm -f "$monitor_runner_stage"; restore_monitor_install; trap - EXIT HUP INT TERM; return 1; }
+    monitor_secondary_stage="$(mktemp "$(dirname "$monitor_secondary")/.watchdog-periodic.XXXXXX")" || { rm -f "$monitor_runner_stage"; restore_monitor_install; trap - EXIT HUP INT TERM; return 1; }
+    {
+      printf '#!/bin/sh\n# Managed by VPS-Node watchdog\nexec "%s"\n' "$VP_WATCHDOG_RUNNER"
+    } > "$monitor_secondary_stage" && chmod 700 "$monitor_secondary_stage" || { rm -f "$monitor_runner_stage" "$monitor_secondary_stage"; restore_monitor_install; trap - EXIT HUP INT TERM; return 1; }
+  fi
+  [ "$(managed_file_state "$VP_WATCHDOG_RUNNER")" = "$approved_monitor_runner_state" ] || { rm -f "$monitor_runner_stage" "$monitor_secondary_stage" "$monitor_tertiary_stage"; restore_monitor_install; trap - EXIT HUP INT TERM; error "监测运行器在提交前发生变化，已中止。"; return 1; }
+  [ "$(managed_file_state "$monitor_secondary")" = "$approved_monitor_secondary_state" ] || { rm -f "$monitor_runner_stage" "$monitor_secondary_stage" "$monitor_tertiary_stage"; restore_monitor_install; trap - EXIT HUP INT TERM; error "监测定时定义在提交前发生变化，已中止。"; return 1; }
+  [ "$(managed_file_state "$monitor_tertiary")" = "$approved_monitor_tertiary_state" ] || { rm -f "$monitor_runner_stage" "$monitor_secondary_stage" "$monitor_tertiary_stage"; restore_monitor_install; trap - EXIT HUP INT TERM; error "监测定时器定义在提交前发生变化，已中止。"; return 1; }
+  mv "$monitor_runner_stage" "$VP_WATCHDOG_RUNNER" || { restore_monitor_install; trap - EXIT HUP INT TERM; return 1; }
+  [ -z "$monitor_secondary_stage" ] || mv "$monitor_secondary_stage" "$monitor_secondary" || { restore_monitor_install; trap - EXIT HUP INT TERM; return 1; }
+  [ -z "$monitor_tertiary_stage" ] || mv "$monitor_tertiary_stage" "$monitor_tertiary" || { restore_monitor_install; trap - EXIT HUP INT TERM; return 1; }
+  if [ "$monitor_manager" = systemd ]; then
+    systemctl daemon-reload >/dev/null 2>&1 && systemctl enable --now "${VP_WATCHDOG_SERVICE}.timer" >/dev/null || { restore_monitor_install; trap - EXIT HUP INT TERM; error "systemd 定时监测启用失败，已恢复安装前文件和状态。"; return 1; }
+  elif [ "$monitor_manager" = openrc ]; then
+    rc-service crond start >/dev/null 2>&1 || true
+    rc-update add crond default >/dev/null 2>&1 || true
+  fi
+  monitor_committed=1
+  restore_monitor_install
+  trap - EXIT HUP INT TERM
   stability_event enabled monitor "periodic self-heal installed"
-  ok "低开销后台自愈已启用。"
+  [ "$monitor_manager" = isolated ] && ok "后台自愈运行器已在隔离模式生成。" || ok "低开销后台自愈已启用。"
 }
 
 show_stability() {
@@ -4772,7 +4857,7 @@ uninstall_path_contains() {
 }
 
 uninstall_plan() {
-  printf '将停止并移除服务：%s、%s、%s\n' "$VP_CORE_SERVICE" "$VP_TUNNEL_SERVICE" "$VP_WATCHDOG_SERVICE"
+  printf '将停止并移除服务：%s、%s，以及可证明属于 VPS-Node 的 %s 监测定义\n' "$VP_CORE_SERVICE" "$VP_TUNNEL_SERVICE" "$VP_WATCHDOG_SERVICE"
   printf '将删除项目路径：\n'
   printf '  %s\n' "$VP_CONFIG_DIR" "$VP_DATA_DIR" "$VP_LOG_DIR" "$VP_LIB_DIR" "$VP_CLI_PATH" "$VP_CLI_BACKUP_PATH" "$VP_CLI_BACKUP_SHA256"
 }
@@ -4785,7 +4870,7 @@ uninstall_restore_services() {
     service_action restart "$VP_TUNNEL_SERVICE" >/dev/null 2>&1 || true
   fi
   if [ -n "${uninstall_watchdog_hold:-}" ] && [ -e "$uninstall_watchdog_hold" ]; then
-    mv "$uninstall_watchdog_hold" "/etc/periodic/15min/$VP_WATCHDOG_SERVICE" >/dev/null 2>&1 || true
+    mv "$uninstall_watchdog_hold" "$VP_WATCHDOG_PERIODIC" >/dev/null 2>&1 || true
     uninstall_watchdog_hold=""
   fi
   if [ "${uninstall_timer_was_running:-0}" -eq 1 ]; then
@@ -4806,15 +4891,17 @@ uninstall_stop_services() {
   fi
   case "$uninstall_manager" in
     systemd)
-      systemctl is-active --quiet "${VP_WATCHDOG_SERVICE}.timer" >/dev/null 2>&1 && uninstall_timer_was_running=1
-      systemctl stop "${VP_WATCHDOG_SERVICE}.timer" >/dev/null 2>&1 || [ "$uninstall_timer_was_running" -eq 0 ] || return 1
+      if [ "${uninstall_watchdog_timer_owned:-0}" -eq 1 ]; then
+        systemctl is-active --quiet "${VP_WATCHDOG_SERVICE}.timer" >/dev/null 2>&1 && uninstall_timer_was_running=1
+        systemctl stop "${VP_WATCHDOG_SERVICE}.timer" >/dev/null 2>&1 || [ "$uninstall_timer_was_running" -eq 0 ] || return 1
+      fi
       service_action stop "$VP_TUNNEL_SERVICE" >/dev/null 2>&1 || [ "$uninstall_tunnel_was_running" -eq 0 ] || { uninstall_restore_services; return 1; }
       service_action stop "$VP_CORE_SERVICE" >/dev/null 2>&1 || [ "$uninstall_core_was_running" -eq 0 ] || { uninstall_restore_services; return 1; }
       ;;
     openrc)
-      if [ -e "/etc/periodic/15min/$VP_WATCHDOG_SERVICE" ]; then
-        uninstall_watchdog_hold="/etc/periodic/15min/.${VP_WATCHDOG_SERVICE}.uninstall.$$"
-        mv "/etc/periodic/15min/$VP_WATCHDOG_SERVICE" "$uninstall_watchdog_hold" || return 1
+      if [ "${uninstall_watchdog_periodic_owned:-0}" -eq 1 ] && [ -e "$VP_WATCHDOG_PERIODIC" ]; then
+        uninstall_watchdog_hold="$(dirname "$VP_WATCHDOG_PERIODIC")/.${VP_WATCHDOG_SERVICE}.uninstall.$$"
+        mv "$VP_WATCHDOG_PERIODIC" "$uninstall_watchdog_hold" || return 1
       fi
       service_action stop "$VP_TUNNEL_SERVICE" >/dev/null 2>&1 || [ "$uninstall_tunnel_was_running" -eq 0 ] || { uninstall_restore_services; return 1; }
       service_action stop "$VP_CORE_SERVICE" >/dev/null 2>&1 || [ "$uninstall_core_was_running" -eq 0 ] || { uninstall_restore_services; return 1; }
@@ -4851,25 +4938,31 @@ uninstall_report_residuals() {
   done
   case "${uninstall_manager:-skip}" in
     systemd)
-      for residual_path in "/etc/systemd/system/${VP_WATCHDOG_SERVICE}.timer" \
-        "/etc/systemd/system/${VP_WATCHDOG_SERVICE}.service" \
-        "/etc/systemd/system/${VP_TUNNEL_SERVICE}.service" \
+      for residual_path in "/etc/systemd/system/${VP_TUNNEL_SERVICE}.service" \
         "/etc/systemd/system/${VP_CORE_SERVICE}.service"; do
         if [ -e "$residual_path" ] || [ -L "$residual_path" ]; then
           printf '  残留：%s\n' "$residual_path" >&2
           residual_count=$((residual_count + 1))
         fi
       done
+      if [ "${uninstall_watchdog_timer_owned:-0}" -eq 1 ] && { [ -e "$VP_WATCHDOG_SYSTEMD_TIMER" ] || [ -L "$VP_WATCHDOG_SYSTEMD_TIMER" ]; }; then
+        printf '  残留：%s\n' "$VP_WATCHDOG_SYSTEMD_TIMER" >&2; residual_count=$((residual_count + 1))
+      fi
+      if [ "${uninstall_watchdog_service_owned:-0}" -eq 1 ] && { [ -e "$VP_WATCHDOG_SYSTEMD_SERVICE" ] || [ -L "$VP_WATCHDOG_SYSTEMD_SERVICE" ]; }; then
+        printf '  残留：%s\n' "$VP_WATCHDOG_SYSTEMD_SERVICE" >&2; residual_count=$((residual_count + 1))
+      fi
       ;;
     openrc)
-      for residual_path in "/etc/init.d/$VP_TUNNEL_SERVICE" "/etc/init.d/$VP_CORE_SERVICE" \
-        "/etc/periodic/15min/$VP_WATCHDOG_SERVICE" "${uninstall_watchdog_hold:-}"; do
+      for residual_path in "/etc/init.d/$VP_TUNNEL_SERVICE" "/etc/init.d/$VP_CORE_SERVICE" "${uninstall_watchdog_hold:-}"; do
         [ -n "$residual_path" ] || continue
         if [ -e "$residual_path" ] || [ -L "$residual_path" ]; then
           printf '  残留：%s\n' "$residual_path" >&2
           residual_count=$((residual_count + 1))
         fi
       done
+      if [ "${uninstall_watchdog_periodic_owned:-0}" -eq 1 ] && { [ -e "$VP_WATCHDOG_PERIODIC" ] || [ -L "$VP_WATCHDOG_PERIODIC" ]; }; then
+        printf '  残留：%s\n' "$VP_WATCHDOG_PERIODIC" >&2; residual_count=$((residual_count + 1))
+      fi
       ;;
   esac
   [ "$residual_count" -eq 0 ]
@@ -4905,8 +4998,26 @@ uninstall_project() {
   actual_backup_hash="$(sha256_file "$backup_archive" 2>/dev/null | tr 'A-F' 'a-f')"
   [ -n "$actual_backup_hash" ] && [ "$expected_backup_hash" = "$actual_backup_hash" ] || { error "卸载备份校验失败，已中止卸载。"; return 1; }
   uninstall_manager=skip
+  uninstall_watchdog_service_owned=0
+  uninstall_watchdog_timer_owned=0
+  uninstall_watchdog_periodic_owned=0
   if [ "${VP_SKIP_SERVICE:-0}" != "1" ]; then
     uninstall_manager="$(service_manager)"
+    case "$uninstall_manager" in
+      systemd)
+        if [ -e "$VP_WATCHDOG_SYSTEMD_SERVICE" ] || [ -L "$VP_WATCHDOG_SYSTEMD_SERVICE" ]; then
+          if watchdog_file_owned "$VP_WATCHDOG_SYSTEMD_SERVICE"; then uninstall_watchdog_service_owned=1; else warn "保留非 VPS-Node 所有的同名监测服务：$VP_WATCHDOG_SYSTEMD_SERVICE"; fi
+        fi
+        if [ -e "$VP_WATCHDOG_SYSTEMD_TIMER" ] || [ -L "$VP_WATCHDOG_SYSTEMD_TIMER" ]; then
+          if watchdog_file_owned "$VP_WATCHDOG_SYSTEMD_TIMER"; then uninstall_watchdog_timer_owned=1; else warn "保留非 VPS-Node 所有的同名监测定时器：$VP_WATCHDOG_SYSTEMD_TIMER"; fi
+        fi
+        ;;
+      openrc)
+        if [ -e "$VP_WATCHDOG_PERIODIC" ] || [ -L "$VP_WATCHDOG_PERIODIC" ]; then
+          if watchdog_file_owned "$VP_WATCHDOG_PERIODIC"; then uninstall_watchdog_periodic_owned=1; else warn "保留非 VPS-Node 所有的同名周期任务：$VP_WATCHDOG_PERIODIC"; fi
+        fi
+        ;;
+    esac
     if ! uninstall_stop_services "$uninstall_manager"; then
       error "项目服务未能全部停止，已恢复原运行状态；未回滚网络或删除文件。"
       return 1
@@ -4920,18 +5031,19 @@ uninstall_project() {
   if [ "$uninstall_manager" != skip ]; then
     case "$uninstall_manager" in
       systemd)
-        systemctl disable --now "${VP_WATCHDOG_SERVICE}.timer" >/dev/null 2>&1 || true
+        [ "$uninstall_watchdog_timer_owned" -eq 0 ] || systemctl disable --now "${VP_WATCHDOG_SERVICE}.timer" >/dev/null 2>&1 || true
         systemctl disable --now "$VP_TUNNEL_SERVICE" >/dev/null 2>&1 || true
         systemctl disable --now "$VP_CORE_SERVICE" >/dev/null 2>&1 || true
-        rm -f "/etc/systemd/system/${VP_WATCHDOG_SERVICE}.timer" "/etc/systemd/system/${VP_WATCHDOG_SERVICE}.service" \
-          "/etc/systemd/system/${VP_TUNNEL_SERVICE}.service" "/etc/systemd/system/${VP_CORE_SERVICE}.service"
+        [ "$uninstall_watchdog_timer_owned" -eq 0 ] || rm -f "$VP_WATCHDOG_SYSTEMD_TIMER"
+        [ "$uninstall_watchdog_service_owned" -eq 0 ] || rm -f "$VP_WATCHDOG_SYSTEMD_SERVICE"
+        rm -f "/etc/systemd/system/${VP_TUNNEL_SERVICE}.service" "/etc/systemd/system/${VP_CORE_SERVICE}.service"
         systemctl daemon-reload >/dev/null 2>&1 || true
         ;;
       openrc)
         rc-update del "$VP_TUNNEL_SERVICE" default >/dev/null 2>&1 || true
         rc-update del "$VP_CORE_SERVICE" default >/dev/null 2>&1 || true
         rm -f "/etc/init.d/$VP_TUNNEL_SERVICE" "/etc/init.d/$VP_CORE_SERVICE"
-        rm -f "/etc/periodic/15min/$VP_WATCHDOG_SERVICE"
+        [ "$uninstall_watchdog_periodic_owned" -eq 0 ] || rm -f "$VP_WATCHDOG_PERIODIC"
         [ -z "$uninstall_watchdog_hold" ] || rm -f "$uninstall_watchdog_hold"
         ;;
     esac

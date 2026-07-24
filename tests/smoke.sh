@@ -1401,12 +1401,89 @@ run_network_monitor
 [ "$(sha256sum "$network_monitor_config" | awk '{print $1}')" = "$active_monitor_config_hash" ]
 [ "$(sha256sum "$network_monitor_snapshot" | awk '{print $1}')" = "$active_monitor_snapshot_hash" ]
 [ "$(sha256sum "$network_monitor_sysctl_state" | awk '{print $1}')" = "$active_monitor_sysctl_hash" ]
+monitor_runner="$TMP/dns-usr/bin/watchdog-run"
+cancelled_monitor_install="$(VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log" \
+  VP_LIB_DIR="$TMP/dns-usr" VP_CLI_PATH="$ROOT/vp.sh" VP_SKIP_SERVICE=1 \
+  VP_MONITOR_INSTALL_CONFIRM=CANCEL sh "$ROOT/vp.sh" monitor-install 2>&1 || true)"
+printf '%s\n' "$cancelled_monitor_install" | grep -q '已取消后台监测安装'
+[ ! -e "$monitor_runner" ]
+mkdir -p "$(dirname "$monitor_runner")"
+printf '#!/bin/sh\n# external watchdog\n' > "$monitor_runner"
+external_monitor_hash="$(sha256sum "$monitor_runner" | awk '{print $1}')"
+if VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log" \
+  VP_LIB_DIR="$TMP/dns-usr" VP_CLI_PATH="$ROOT/vp.sh" VP_SKIP_SERVICE=1 \
+  VP_MONITOR_INSTALL_CONFIRM=ENABLE sh "$ROOT/vp.sh" monitor-install >/dev/null 2>&1; then
+  printf 'external watchdog runner was unexpectedly overwritten\n' >&2
+  exit 1
+fi
+[ "$(sha256sum "$monitor_runner" | awk '{print $1}')" = "$external_monitor_hash" ]
+rm -f "$monitor_runner"
 VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log" \
 VP_LIB_DIR="$TMP/dns-usr" VP_CORE_BIN="$TMP/dns-usr/bin/mihomo" \
 VP_CORE_BACKUP_BIN="$TMP/dns-usr/bin/mihomo.previous" VP_CLI_PATH="$ROOT/vp.sh" VP_SKIP_SERVICE=1 \
-sh "$ROOT/vp.sh" monitor-install >/dev/null
+VP_MONITOR_INSTALL_CONFIRM=ENABLE sh "$ROOT/vp.sh" monitor-install >/dev/null
 [ -x "$TMP/dns-usr/bin/watchdog-run" ]
+grep -Fqx '# Managed by VPS-Node watchdog' "$TMP/dns-usr/bin/watchdog-run"
 grep -Fq "exec \"$ROOT/vp.sh\" self-heal --quiet" "$TMP/dns-usr/bin/watchdog-run"
+
+monitor_systemd_root="$TMP/monitor-systemd"
+monitor_systemd_runner="$monitor_systemd_root/usr/watchdog-run"
+monitor_systemd_service="$monitor_systemd_root/systemd/vps-node-watchdog.service"
+monitor_systemd_timer="$monitor_systemd_root/systemd/vps-node-watchdog.timer"
+mkdir -p "$monitor_systemd_root/bin"
+cat > "$monitor_systemd_root/bin/systemctl" <<'FAKE_MONITOR_SYSTEMCTL'
+#!/bin/sh
+case "$*" in
+  'is-active --quiet '*) exit 3 ;;
+  'daemon-reload') exit 0 ;;
+  'enable --now '*) [ "${VP_FAKE_MONITOR_ENABLE_FAIL:-0}" = 1 ] && exit 1; exit 0 ;;
+  'disable --now '*) exit 0 ;;
+  'start '*) exit 0 ;;
+  *) exit 0 ;;
+esac
+FAKE_MONITOR_SYSTEMCTL
+chmod 755 "$monitor_systemd_root/bin/systemctl"
+PATH="$monitor_systemd_root/bin:$PATH" VP_CONFIG_DIR="$monitor_systemd_root/etc" \
+VP_DATA_DIR="$monitor_systemd_root/lib" VP_LOG_DIR="$monitor_systemd_root/log" \
+VP_LIB_DIR="$monitor_systemd_root/usr-lib" VP_WATCHDOG_RUNNER="$monitor_systemd_runner" \
+VP_WATCHDOG_SYSTEMD_SERVICE="$monitor_systemd_service" VP_WATCHDOG_SYSTEMD_TIMER="$monitor_systemd_timer" \
+VP_CLI_PATH="$ROOT/vp.sh" VP_ALLOW_TEST_HOOKS=1 VP_SERVICE_MANAGER_OVERRIDE=systemd \
+VP_MONITOR_INSTALL_CONFIRM=ENABLE sh "$ROOT/vp.sh" monitor-install >/dev/null
+grep -Fqx '# Managed by VPS-Node watchdog' "$monitor_systemd_runner"
+grep -Fqx '# Managed by VPS-Node watchdog' "$monitor_systemd_service"
+grep -Fqx '# Managed by VPS-Node watchdog' "$monitor_systemd_timer"
+[ "$(stat -c '%a' "$monitor_systemd_runner")" = 700 ]
+[ "$(stat -c '%a' "$monitor_systemd_service")" = 600 ]
+[ "$(stat -c '%a' "$monitor_systemd_timer")" = 600 ]
+monitor_systemd_runner_hash="$(sha256sum "$monitor_systemd_runner" | awk '{print $1}')"
+monitor_systemd_service_hash="$(sha256sum "$monitor_systemd_service" | awk '{print $1}')"
+monitor_systemd_timer_hash="$(sha256sum "$monitor_systemd_timer" | awk '{print $1}')"
+if PATH="$monitor_systemd_root/bin:$PATH" VP_CONFIG_DIR="$monitor_systemd_root/etc" \
+  VP_DATA_DIR="$monitor_systemd_root/lib" VP_LOG_DIR="$monitor_systemd_root/log" \
+  VP_LIB_DIR="$monitor_systemd_root/usr-lib" VP_WATCHDOG_RUNNER="$monitor_systemd_runner" \
+  VP_WATCHDOG_SYSTEMD_SERVICE="$monitor_systemd_service" VP_WATCHDOG_SYSTEMD_TIMER="$monitor_systemd_timer" \
+  VP_CLI_PATH="$monitor_systemd_root/changed-vp" VP_ALLOW_TEST_HOOKS=1 VP_SERVICE_MANAGER_OVERRIDE=systemd \
+  VP_FAKE_MONITOR_ENABLE_FAIL=1 VP_MONITOR_INSTALL_CONFIRM=ENABLE \
+  sh "$ROOT/vp.sh" monitor-install >/dev/null 2>&1; then
+  printf 'failed systemd monitor enable unexpectedly succeeded\n' >&2
+  exit 1
+fi
+[ "$(sha256sum "$monitor_systemd_runner" | awk '{print $1}')" = "$monitor_systemd_runner_hash" ]
+[ "$(sha256sum "$monitor_systemd_service" | awk '{print $1}')" = "$monitor_systemd_service_hash" ]
+[ "$(sha256sum "$monitor_systemd_timer" | awk '{print $1}')" = "$monitor_systemd_timer_hash" ]
+printf '# external timer\n' > "$monitor_systemd_timer"
+external_timer_hash="$(sha256sum "$monitor_systemd_timer" | awk '{print $1}')"
+if PATH="$monitor_systemd_root/bin:$PATH" VP_CONFIG_DIR="$monitor_systemd_root/etc" \
+  VP_DATA_DIR="$monitor_systemd_root/lib" VP_LOG_DIR="$monitor_systemd_root/log" \
+  VP_LIB_DIR="$monitor_systemd_root/usr-lib" VP_WATCHDOG_RUNNER="$monitor_systemd_runner" \
+  VP_WATCHDOG_SYSTEMD_SERVICE="$monitor_systemd_service" VP_WATCHDOG_SYSTEMD_TIMER="$monitor_systemd_timer" \
+  VP_CLI_PATH="$ROOT/vp.sh" VP_ALLOW_TEST_HOOKS=1 VP_SERVICE_MANAGER_OVERRIDE=systemd \
+  VP_MONITOR_INSTALL_CONFIRM=ENABLE sh "$ROOT/vp.sh" monitor-install >/dev/null 2>&1; then
+  printf 'external systemd timer was unexpectedly overwritten\n' >&2
+  exit 1
+fi
+[ "$(sha256sum "$monitor_systemd_timer" | awk '{print $1}')" = "$external_timer_hash" ]
+! find "$monitor_systemd_root" -name '.watchdog-*' -type f | grep -q .
 
 delete_race_root="$TMP/delete-race"
 VP_CONFIG_DIR="$delete_race_root/etc" VP_DATA_DIR="$delete_race_root/lib" \

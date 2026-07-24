@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.0-dev.87
+
+- Monitor installation now previews scheduler, cadence, behavior and target definitions and requires explicit `ENABLE` confirmation.
+- Runner, systemd service/timer and OpenRC periodic definitions carry a VPS-Node ownership marker; any external same-name file or symlink is refused before writes.
+- Installation binds all targets across confirmation, stages replacements in their destination directories and restores prior files plus timer activity when systemd enablement fails or the process is interrupted.
+- Reinstallation safely updates owned definitions while preserving the previous verified set on failure.
+- Uninstall only stops, moves, removes and audits watchdog definitions whose ownership marker is present; external same-name systemd/OpenRC tasks are preserved.
+- Regression tests cover cancellation, external runner/timer preservation, modes and markers, successful systemd installation and full rollback after enable failure.
+
 ## 0.2.0-dev.86
 
 - Periodic self-heal now observes network runtime drift, invalid persistence, orphan rollback snapshots and configurations lacking rollback snapshots.
