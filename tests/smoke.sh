@@ -894,6 +894,10 @@ sh "$ROOT/vp.sh" report "$diagnostic" >/dev/null
 (cd "$TMP" && sha256sum -c "$(basename "$diagnostic").sha256" >/dev/null)
 grep -q '^redacted_nodes:' "$diagnostic"
 grep -q 'credentials=<redacted>' "$diagnostic"
+grep -q '^network_optimization_state=none$' "$diagnostic"
+grep -q '^network_target_cc=not-managed$' "$diagnostic"
+grep -q '^network_target_qdisc=not-managed$' "$diagnostic"
+grep -q '^network_recommended_action=none$' "$diagnostic"
 ! grep -Fq 'sensitive-test-token-should-not-leak' "$diagnostic"
 ! grep -Fq 'www.microsoft.com' "$diagnostic"
 ! grep -Fq 'new.example.com' "$diagnostic"
@@ -909,6 +913,70 @@ if VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-
 fi
 [ "$(sha256sum "$diagnostic" | awk '{print $1}')" = "$diagnostic_hash_before" ]
 [ "$(sha256sum "$diagnostic.sha256" | awk '{print $1}')" = "$diagnostic_sidecar_hash_before" ]
+
+run_network_diagnostic() {
+  network_diagnostic_destination="$1"
+  VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log" \
+  VP_LIB_DIR="$TMP/dns-usr" VP_CORE_BIN="$TMP/dns-usr/bin/mihomo" \
+  VP_CORE_BACKUP_BIN="$TMP/dns-usr/bin/mihomo.previous" VP_SKIP_SERVICE=1 \
+  VP_SYSCTL_BIN="$fake_sysctl" VP_FAKE_SYSCTL_STATE="$sysctl_state" \
+  VP_SYSCTL_CONFIG="$network_config" VP_NETWORK_SNAPSHOT="$network_snapshot" \
+  sh "$ROOT/vp.sh" report "$network_diagnostic_destination" >/dev/null
+  [ -s "$network_diagnostic_destination.sha256" ]
+  (cd "$TMP" && sha256sum -c "$(basename "$network_diagnostic_destination").sha256" >/dev/null)
+}
+
+printf 'BEFORE_CC=cubic\nBEFORE_QDISC=pfifo_fast\n' > "$network_snapshot"
+printf '# Managed by VPS-Node after verified before/after benchmark\nnet.ipv4.tcp_congestion_control=bbr\nnet.core.default_qdisc=fq\n' > "$network_config"
+printf 'CC=bbr\nQDISC=fq\n' > "$sysctl_state"
+active_network_diagnostic="$TMP/network-active-diagnostic.txt"
+run_network_diagnostic "$active_network_diagnostic"
+grep -q '^network_optimization_state=active$' "$active_network_diagnostic"
+grep -q '^network_live_cc=bbr$' "$active_network_diagnostic"
+grep -q '^network_target_cc=bbr$' "$active_network_diagnostic"
+grep -q '^network_target_qdisc=fq$' "$active_network_diagnostic"
+grep -q '^network_recommended_action=none$' "$active_network_diagnostic"
+
+printf 'CC=cubic\nQDISC=fq\n' > "$sysctl_state"
+drift_network_diagnostic="$TMP/network-drift-diagnostic.txt"
+run_network_diagnostic "$drift_network_diagnostic"
+grep -q '^network_optimization_state=runtime-drift$' "$drift_network_diagnostic"
+grep -q '^network_live_cc=cubic$' "$drift_network_diagnostic"
+grep -q '^network_target_cc=bbr$' "$drift_network_diagnostic"
+grep -q '^network_recommended_action=inspect-repair-or-rollback$' "$drift_network_diagnostic"
+
+printf '# external network task\nnet.ipv4.tcp_congestion_control=bbr\nnet.core.default_qdisc=fq\n' > "$network_config"
+invalid_network_diagnostic="$TMP/network-invalid-diagnostic.txt"
+run_network_diagnostic "$invalid_network_diagnostic"
+grep -q '^network_optimization_state=persistence-invalid$' "$invalid_network_diagnostic"
+grep -q '^network_target_cc=not-managed$' "$invalid_network_diagnostic"
+grep -q '^network_recommended_action=manual-review-no-auto-write$' "$invalid_network_diagnostic"
+
+rm -f "$network_config"
+orphan_snapshot_diagnostic="$TMP/network-orphan-snapshot-diagnostic.txt"
+run_network_diagnostic "$orphan_snapshot_diagnostic"
+grep -q '^network_optimization_state=orphan-snapshot$' "$orphan_snapshot_diagnostic"
+grep -q '^network_recommended_action=inspect-interrupted-operation$' "$orphan_snapshot_diagnostic"
+
+printf '# Managed by VPS-Node after verified before/after benchmark\nnet.ipv4.tcp_congestion_control=bbr\nnet.core.default_qdisc=fq\n' > "$network_config"
+rm -f "$network_snapshot"
+orphan_config_diagnostic="$TMP/network-orphan-config-diagnostic.txt"
+run_network_diagnostic "$orphan_config_diagnostic"
+grep -q '^network_optimization_state=orphan-config$' "$orphan_config_diagnostic"
+grep -q '^network_recommended_action=manual-review-no-safe-rollback$' "$orphan_config_diagnostic"
+
+for network_diagnostic_file in "$active_network_diagnostic" "$drift_network_diagnostic" \
+  "$invalid_network_diagnostic" "$orphan_snapshot_diagnostic" "$orphan_config_diagnostic"; do
+  [ "$(stat -c '%a' "$network_diagnostic_file")" = 600 ]
+  ! grep -Fq 'sensitive-test-token-should-not-leak' "$network_diagnostic_file"
+  ! grep -Fq 'www.microsoft.com' "$network_diagnostic_file"
+  ! grep -Fq 'new.example.com' "$network_diagnostic_file"
+  ! grep -Fq "$node_uuid" "$network_diagnostic_file"
+  ! grep -Fq "$network_config" "$network_diagnostic_file"
+  ! grep -Fq "$network_snapshot" "$network_diagnostic_file"
+done
+rm -f "$network_config" "$network_snapshot"
+printf 'CC=cubic\nQDISC=pfifo_fast\n' > "$sysctl_state"
 
 tunnel_tx="$TMP/tunnel-transaction"
 mkdir -p "$tunnel_tx/usr/bin" "$tunnel_tx/etc/secrets"

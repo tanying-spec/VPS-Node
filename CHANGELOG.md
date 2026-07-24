@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.0-dev.85
+
+- Redacted diagnostics now include the shared six-state network optimization verdict, live congestion control/qdisc, verified targets only when strict persistence is valid, and a machine-readable recommended action.
+- Invalid and orphan persistence never exposes file contents, file paths or rollback-before values and is reported with `not-managed` targets.
+- Network evidence remains free of public addresses, node endpoints, UUIDs, Tunnel tokens and complete links.
+- Regression tests generate and SHA-256-verify reports for none, active, runtime drift, invalid persistence, orphan snapshot and orphan configuration states.
+- Every state-specific report is checked for mode `600` and for absence of known sensitive fixtures and managed file paths.
+
 ## 0.2.0-dev.84
 
 - The dashboard's overall verdict now consumes the same network consistency inspection used by `vp network` and the applied-optimization summary.

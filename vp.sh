@@ -2,7 +2,7 @@
 
 set -u
 
-VP_VERSION="0.2.0-dev.84"
+VP_VERSION="0.2.0-dev.85"
 VP_CONFIG_DIR="${VP_CONFIG_DIR:-/etc/vps-node}"
 VP_DATA_DIR="${VP_DATA_DIR:-/var/lib/vps-node}"
 VP_LOG_DIR="${VP_LOG_DIR:-/var/log/vps-node}"
@@ -3692,6 +3692,25 @@ diagnostic_report() {
   fi
   ipv4_result=unavailable; public_ipv4 >/dev/null 2>&1 && ipv4_result=available
   ipv6_result=unavailable; public_ipv6 >/dev/null 2>&1 && ipv6_result=available
+  inspect_network_optimization
+  diagnostic_network_target_cc=not-managed
+  diagnostic_network_target_qdisc=not-managed
+  case "$NETWORK_OPT_STATE" in
+    active)
+      diagnostic_network_action=none
+      diagnostic_network_target_cc="$NETWORK_OPT_EXPECTED_CC"
+      diagnostic_network_target_qdisc="$NETWORK_OPT_EXPECTED_QDISC"
+      ;;
+    runtime-drift)
+      diagnostic_network_action=inspect-repair-or-rollback
+      diagnostic_network_target_cc="$NETWORK_OPT_EXPECTED_CC"
+      diagnostic_network_target_qdisc="$NETWORK_OPT_EXPECTED_QDISC"
+      ;;
+    persistence-invalid) diagnostic_network_action=manual-review-no-auto-write ;;
+    orphan-snapshot) diagnostic_network_action=inspect-interrupted-operation ;;
+    orphan-config) diagnostic_network_action=manual-review-no-safe-rollback ;;
+    *) diagnostic_network_action=none ;;
+  esac
   umask 077
   {
     printf 'VPS-Node redacted diagnostic report\n'
@@ -3705,6 +3724,12 @@ diagnostic_report() {
     printf 'dns_probe=%s\n' "$dns_result"
     printf 'public_ipv4=%s\n' "$ipv4_result"
     printf 'public_ipv6=%s\n' "$ipv6_result"
+    printf 'network_optimization_state=%s\n' "$NETWORK_OPT_STATE"
+    printf 'network_live_cc=%s\n' "$NETWORK_OPT_LIVE_CC"
+    printf 'network_live_qdisc=%s\n' "$NETWORK_OPT_LIVE_QDISC"
+    printf 'network_target_cc=%s\n' "$diagnostic_network_target_cc"
+    printf 'network_target_qdisc=%s\n' "$diagnostic_network_target_qdisc"
+    printf 'network_recommended_action=%s\n' "$diagnostic_network_action"
     printf 'transaction=%s\n' "$([ -d "$VP_TX_ACTIVE" ] && printf interrupted || printf clean)"
     printf 'memory_source=%s\n' "$MEM_SOURCE"
     printf 'memory_working_mib=%s\n' "$(bytes_to_mib "$MEM_WORKING_BYTES")"
