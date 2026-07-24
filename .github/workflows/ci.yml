@@ -31,13 +31,14 @@ jobs:
           test ! -e tests/system_pressure_test.sh
           grep -Fq 'ACCEPT_HOST="134.209.180.134"' tests/isolated_acceptance.sh
           grep -Fq 'ACCEPT_HOST="134.209.180.134"' tests/memory_profiles.sh
+          grep -Fq 'ACCEPT_HOST="134.209.180.134"' tests/cpu_profiles.sh
           ! grep -R 'VP_ACCEPT_HOST' tests
           grep -Fq "\$AuthorizedHost = '134.209.180.134'" tests/run_authorized_host.ps1
           grep -Fq "\$AuthorizedPort = 18750" tests/run_authorized_host.ps1
           grep -Fq "'BatchMode=yes'" tests/run_authorized_host.ps1
           grep -Fq "'PasswordAuthentication=no'" tests/run_authorized_host.ps1
           grep -Fq "'PreferredAuthentications=publickey'" tests/run_authorized_host.ps1
-          grep -Fq "vp.sh vp.sh.sha256 tests/isolated_acceptance.sh tests/memory_profiles.sh" tests/run_authorized_host.ps1
+          grep -Fq "vp.sh vp.sh.sha256 tests/isolated_acceptance.sh tests/memory_profiles.sh tests/cpu_profiles.sh" tests/run_authorized_host.ps1
           grep -Fq '[string]$TunnelTokenFile' tests/run_authorized_host.ps1
           grep -Fq '[string]$TunnelHost' tests/run_authorized_host.ps1
           grep -Fq '[string]$TunnelPath' tests/run_authorized_host.ps1
@@ -56,6 +57,9 @@ jobs:
           grep -Fq 'speed.cloudflare.com/__down?bytes=1048576' tests/memory_profiles.sh
           grep -Fq 'concurrent_transfer_checks=' tests/memory_profiles.sh
           grep -Fq 'verified_transfer_bytes=' tests/memory_profiles.sh
+          grep -Fq 'cpu.max' tests/cpu_profiles.sh
+          grep -Fq 'nr_throttled' tests/cpu_profiles.sh
+          grep -Fq 'VP_CPU_EVIDENCE_DIR=' tests/run_authorized_host.ps1
           ! grep -Eqi 'sshpass|plink|PreferredAuthentications=password|PasswordAuthentication=yes' tests/run_authorized_host.ps1
           ! grep -Eq '(^|[^A-Za-z])TunnelToken[[:space:]]*=' tests/run_authorized_host.ps1
           ! grep -Eq '^[[:space:]]*\[(string|int)\]\$Authorized(Host|Port)' tests/run_authorized_host.ps1

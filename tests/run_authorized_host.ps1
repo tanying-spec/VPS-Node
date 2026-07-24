@@ -9,6 +9,7 @@ param(
     [switch]$SelfTestEvidence,
     [switch]$ValidateOnly,
     [switch]$PreflightOnly,
+    [switch]$SkipCpuProfiles,
     [switch]$SkipMemoryProfiles
 )
 
@@ -196,7 +197,52 @@ function Assert-MemoryEvidence([string]$Directory) {
     }
 }
 
-function Assert-PreflightResult([string[]]$Output, [bool]$MemoryRequested, [bool]$TunnelRequested) {
+function Assert-CpuEvidence([string]$Directory) {
+    $summaryFile = Get-Item -LiteralPath (Join-Path $Directory 'cpu-profiles-summary.txt') -ErrorAction Stop
+    $csvFile = Get-Item -LiteralPath (Join-Path $Directory 'cpu-profiles.csv') -ErrorAction Stop
+    $summary = @{}
+    foreach ($line in Get-Content -LiteralPath $summaryFile.FullName) {
+        if ($line -notmatch '^([a-z0-9_]+)=(.*)$') { throw 'CPU evidence summary contains a malformed line.' }
+        if ($summary.ContainsKey($Matches[1])) { throw "CPU evidence contains a duplicate key: $($Matches[1])" }
+        $summary[$Matches[1]] = $Matches[2]
+    }
+    $versionMatch = Select-String -LiteralPath (Join-Path $RepoRoot 'vp.sh') -Pattern '^VP_VERSION="([^"]+)"$' | Select-Object -First 1
+    $expectedHash = (Get-FileHash -LiteralPath (Join-Path $RepoRoot 'vp.sh') -Algorithm SHA256).Hash.ToLowerInvariant()
+    if (-not $versionMatch -or $summary.vps_node_version -ne $versionMatch.Matches[0].Groups[1].Value -or $summary.tested_script_sha256 -ne $expectedHash) {
+        throw 'CPU evidence does not match the current source.'
+    }
+    if ($summary.authorized_host -ne $AuthorizedHost -or $summary.cgroup_version -ne '2' -or $summary.formal_services_and_sensitive_state_unchanged -ne 'yes') {
+        throw 'CPU evidence did not prove the fixed host, cgroup v2 and formal-service invariants.'
+    }
+    $hostCpus = [int]$summary.host_cpu_count
+    if ($hostCpus -lt 1) { throw 'CPU evidence contains an invalid host CPU count.' }
+    $expectedQuotas = @(500, 999, 1000)
+    if ($hostCpus -ge 2) { $expectedQuotas += @(1001, 1500, 2000) }
+    if ($hostCpus -ge 4) { $expectedQuotas += @(2001, 4000) }
+    if ($summary.cpu_quotas_tested -ne ($expectedQuotas -join ',')) { throw 'CPU evidence quota matrix is incomplete.' }
+    $rows = @(Import-Csv -LiteralPath $csvFile.FullName)
+    if ($rows.Count -ne $expectedQuotas.Count) { throw 'CPU evidence row count is incomplete.' }
+    for ($index = 0; $index -lt $expectedQuotas.Count; $index++) {
+        $quota = $expectedQuotas[$index]
+        $effective = [Math]::Ceiling($quota / 1000.0)
+        if ($effective -gt $hostCpus) { $effective = $hostCpus }
+        if ($effective -gt 4) { $effective = 4 }
+        $row = $rows[$index]
+        if ([int]$row.quota_milli -ne $quota -or [int]$row.effective_count -ne $effective -or [int]$row.gomaxprocs -ne $effective) { throw "CPU quota detection failed at row $index." }
+        $expectedGogc = $(if ($quota -lt 1000) { 120 } else { 100 })
+        $expectedProfile = $(if ($quota -lt 1000) { 'performance-cpu-limited' } else { 'performance' })
+        if ([int]$row.gogc -ne $expectedGogc -or $row.profile -ne $expectedProfile) { throw "CPU runtime profile failed at row $index." }
+        if ($row.proxy_result -ne 'passed' -or [int]$row.concurrent_success -ne 4 -or [int64]$row.total_bytes -ne 4194304) { throw "CPU runtime transfer failed at row $index." }
+        if ([int64]$row.throttled_events -lt 0) { throw "CPU throttling evidence is invalid at row $index." }
+    }
+    $expectedCount = $expectedQuotas.Count
+    if ([int]$summary.profile_count -ne $expectedCount -or [int]$summary.real_core_startups -ne $expectedCount -or
+        [int]$summary.concurrent_transfer_checks -ne ($expectedCount * 4) -or [int64]$summary.verified_transfer_bytes -ne ($expectedCount * 4194304)) {
+        throw 'CPU evidence summary totals do not match the quota rows.'
+    }
+}
+
+function Assert-PreflightResult([string[]]$Output, [bool]$MemoryRequested, [bool]$CpuRequested, [bool]$TunnelRequested) {
     $values = @{}
     foreach ($line in $Output) {
         if ($line -notmatch '^preflight_([a-z0-9_]+)=(.*)$') { continue }
@@ -214,12 +260,16 @@ function Assert-PreflightResult([string[]]$Output, [bool]$MemoryRequested, [bool
         speed_endpoint = 'yes'
         formal_snapshot = 'yes'
         memory_mode = $(if ($MemoryRequested) { 'required' } else { 'skipped' })
+        cpu_mode = $(if ($CpuRequested) { 'required' } else { 'skipped' })
         tunnel_mode = $(if ($TunnelRequested) { 'required' } else { 'skipped' })
     }
     if ($MemoryRequested) {
         $required.cgroup_v2 = 'yes'
         $required.memory_controller = 'yes'
         $required.cgroup_root_writable = 'yes'
+    }
+    if ($CpuRequested) {
+        $required.cpu_controller = 'yes'
     }
     if ($TunnelRequested) {
         $required.cloudflared = 'yes'
@@ -385,14 +435,58 @@ if ($SelfTestEvidence) {
             'preflight_cgroup_v2=yes',
             'preflight_memory_controller=yes',
             'preflight_cgroup_root_writable=yes',
+            'preflight_cpu_mode=required',
+            'preflight_cpu_controller=yes',
             'preflight_tunnel_mode=skipped'
         )
-        Assert-PreflightResult $validPreflight $true $false | Out-Null
+        Assert-PreflightResult $validPreflight $true $true $false | Out-Null
         $badPreflight = $validPreflight -replace 'preflight_speed_endpoint=yes', 'preflight_speed_endpoint=no'
         $preflightRejected = $false
-        try { Assert-PreflightResult $badPreflight $true $false | Out-Null } catch { $preflightRejected = $true }
+        try { Assert-PreflightResult $badPreflight $true $true $false | Out-Null } catch { $preflightRejected = $true }
         if (-not $preflightRejected) { throw 'Evidence self-test failed to reject an unavailable transfer endpoint.' }
-        Write-Host 'Acceptance, memory and preflight verification self-test passed; no network connection was attempted.'
+
+        $cpuSummary = Join-Path $selfTestDirectory 'cpu-profiles-summary.txt'
+        @(
+            "vps_node_version=$expectedVersion",
+            "tested_script_sha256=$expectedScriptHash",
+            "authorized_host=$AuthorizedHost",
+            'cgroup_version=2',
+            'host_cpu_count=4',
+            'cpu_quotas_tested=500,999,1000,1001,1500,2000,2001,4000',
+            'profile_count=8',
+            'real_core_startups=8',
+            'concurrent_transfer_checks=32',
+            'verified_transfer_bytes=33554432',
+            'formal_services_and_sensitive_state_unchanged=yes'
+        ) | Set-Content -LiteralPath $cpuSummary -Encoding ascii
+        $cpuCsv = Join-Path $selfTestDirectory 'cpu-profiles.csv'
+        $validCpuRows = @(
+            'quota_milli,effective_count,gomaxprocs,gogc,profile,proxy_result,concurrent_success,total_bytes,throttled_events',
+            '500,1,1,120,performance-cpu-limited,passed,4,4194304,3',
+            '999,1,1,120,performance-cpu-limited,passed,4,4194304,2',
+            '1000,1,1,100,performance,passed,4,4194304,0',
+            '1001,2,2,100,performance,passed,4,4194304,1',
+            '1500,2,2,100,performance,passed,4,4194304,1',
+            '2000,2,2,100,performance,passed,4,4194304,0',
+            '2001,3,3,100,performance,passed,4,4194304,1',
+            '4000,4,4,100,performance,passed,4,4194304,0'
+        )
+        $validCpuRows | Set-Content -LiteralPath $cpuCsv -Encoding ascii
+        foreach ($cpuFile in @($cpuSummary, $cpuCsv)) {
+            $cpuHash = (Get-FileHash -LiteralPath $cpuFile -Algorithm SHA256).Hash.ToLowerInvariant()
+            $cpuName = [IO.Path]::GetFileName($cpuFile)
+            "$cpuHash  $cpuName" | Set-Content -LiteralPath "$cpuFile.sha256" -Encoding ascii
+        }
+        Assert-EvidenceChecksums $selfTestDirectory
+        Assert-CpuEvidence $selfTestDirectory
+        $validCpuRows -replace '^1001,2,2,', '1001,1,1,' | Set-Content -LiteralPath $cpuCsv -Encoding ascii
+        $cpuHash = (Get-FileHash -LiteralPath $cpuCsv -Algorithm SHA256).Hash.ToLowerInvariant()
+        "$cpuHash  cpu-profiles.csv" | Set-Content -LiteralPath "$cpuCsv.sha256" -Encoding ascii
+        Assert-EvidenceChecksums $selfTestDirectory
+        $cpuQuotaRejected = $false
+        try { Assert-CpuEvidence $selfTestDirectory } catch { $cpuQuotaRejected = $true }
+        if (-not $cpuQuotaRejected) { throw 'Evidence self-test failed to reject an incorrect CPU quota transition.' }
+        Write-Host 'Acceptance, memory, CPU and preflight verification self-test passed; no network connection was attempted.'
         return
     }
     finally {
@@ -411,7 +505,7 @@ foreach ($commandName in @('ssh', 'scp', 'tar')) {
         throw "Required local command is missing: $commandName"
     }
 }
-foreach ($required in @('vp.sh', 'vp.sh.sha256', 'tests\isolated_acceptance.sh', 'tests\memory_profiles.sh')) {
+foreach ($required in @('vp.sh', 'vp.sh.sha256', 'tests\isolated_acceptance.sh', 'tests\memory_profiles.sh', 'tests\cpu_profiles.sh')) {
     if (-not (Test-Path -LiteralPath (Join-Path $RepoRoot $required) -PathType Leaf)) {
         throw "Required local acceptance file is missing: $required"
     }
@@ -467,6 +561,11 @@ if [ "$PREFLIGHT_MEMORY" = 1 ]; then
   grep -qw memory /sys/fs/cgroup/cgroup.controllers || fail memory-controller-unavailable
   [ -w /sys/fs/cgroup ] || fail cgroup-root-not-writable
 fi
+if [ "$PREFLIGHT_CPU" = 1 ]; then
+  [ -f /sys/fs/cgroup/cgroup.controllers ] || fail cgroup-v2-required
+  grep -qw cpu /sys/fs/cgroup/cgroup.controllers || fail cpu-controller-unavailable
+  [ -w /sys/fs/cgroup ] || fail cgroup-root-not-writable
+fi
 if [ "$PREFLIGHT_TUNNEL" = 1 ]; then
   [ -r "$PREFLIGHT_TOKEN_FILE" ] || fail independent-token-unreadable
   if [ -r /etc/cloudflared/token ] && [ "$(sha256sum "$PREFLIGHT_TOKEN_FILE" | awk '{print $1}')" = "$(sha256sum /etc/cloudflared/token | awk '{print $1}')" ]; then
@@ -503,6 +602,11 @@ if [ "$PREFLIGHT_MEMORY" = 1 ]; then
 else
   printf 'preflight_memory_mode=skipped\n'
 fi
+if [ "$PREFLIGHT_CPU" = 1 ]; then
+  printf 'preflight_cpu_mode=required\npreflight_cpu_controller=yes\n'
+else
+  printf 'preflight_cpu_mode=skipped\n'
+fi
 if [ "$PREFLIGHT_TUNNEL" = 1 ]; then
   printf 'preflight_tunnel_mode=required\npreflight_cloudflared=yes\npreflight_independent_tunnel_inputs=yes\npreflight_tunnel_edge=reachable\n'
 else
@@ -510,15 +614,16 @@ else
 fi
 '@
 $preflightCommand = "PREFLIGHT_MEMORY=$(if ($SkipMemoryProfiles) { '0' } else { '1' }); " +
+    "PREFLIGHT_CPU=$(if ($SkipCpuProfiles) { '0' } else { '1' }); " +
     "PREFLIGHT_TUNNEL=$(if ($TunnelInputCount -eq 4) { '1' } else { '0' }); " +
     "PREFLIGHT_TOKEN_FILE=$(Quote-Sh $TunnelTokenFile); " +
     "PREFLIGHT_HOST=$(Quote-Sh $TunnelHost); " +
     "PREFLIGHT_PATH=$(Quote-Sh $TunnelPath); " +
     "PREFLIGHT_PORT=$(Quote-Sh ([string]$TunnelOriginPort)); " +
-    "export PREFLIGHT_MEMORY PREFLIGHT_TUNNEL PREFLIGHT_TOKEN_FILE PREFLIGHT_HOST PREFLIGHT_PATH PREFLIGHT_PORT; " +
+    "export PREFLIGHT_MEMORY PREFLIGHT_CPU PREFLIGHT_TUNNEL PREFLIGHT_TOKEN_FILE PREFLIGHT_HOST PREFLIGHT_PATH PREFLIGHT_PORT; " +
     $preflightScript
 $preflight = Invoke-AuthorizedSsh $preflightCommand
-$PreflightLines = Assert-PreflightResult $preflight.Output (-not $SkipMemoryProfiles) ($TunnelInputCount -eq 4)
+$PreflightLines = Assert-PreflightResult $preflight.Output (-not $SkipMemoryProfiles) (-not $SkipCpuProfiles) ($TunnelInputCount -eq 4)
 $PreflightLines | ForEach-Object { Write-Host $_ }
 if ($PreflightOnly) {
     Write-Host 'Authorized-host preflight passed; no files were uploaded and no test was started.'
@@ -526,7 +631,7 @@ if ($PreflightOnly) {
 }
 
 try {
-    & tar -czf $LocalArchive -C $RepoRoot vp.sh vp.sh.sha256 tests/isolated_acceptance.sh tests/memory_profiles.sh
+    & tar -czf $LocalArchive -C $RepoRoot vp.sh vp.sh.sha256 tests/isolated_acceptance.sh tests/memory_profiles.sh tests/cpu_profiles.sh
     if ($LASTEXITCODE -ne 0) { throw 'Failed to package the current acceptance source.' }
 
     Invoke-AuthorizedSsh "set -eu; umask 077; mkdir -p $(Quote-Sh $RemoteRoot)/source $(Quote-Sh $RemoteRoot)/evidence" | Out-Null
@@ -591,6 +696,13 @@ exit 1
             "sh tests/memory_profiles.sh"
         Invoke-AuthorizedSsh $memoryCommand | Out-Null
     }
+    if (-not $SkipCpuProfiles) {
+        $cpuCommand = "set -eu; cd $(Quote-Sh "$RemoteRoot/source"); " +
+            "VP_TEST_MIHOMO_BIN=$(Quote-Sh $MihomoPath) " +
+            "VP_CPU_EVIDENCE_DIR=$(Quote-Sh "$RemoteRoot/evidence") " +
+            "sh tests/cpu_profiles.sh"
+        Invoke-AuthorizedSsh $cpuCommand | Out-Null
+    }
 
     New-Item -ItemType Directory -Force -Path $EvidenceDirectory | Out-Null
     & scp @ScpOptions "$AuthorizedUser@$AuthorizedHost`:$RemoteRoot/evidence/*" "$EvidenceDirectory\"
@@ -600,9 +712,10 @@ exit 1
     $preflightHash = (Get-FileHash -LiteralPath $preflightEvidence -Algorithm SHA256).Hash.ToLowerInvariant()
     "$preflightHash  authorized-host-preflight.txt" | Set-Content -LiteralPath "$preflightEvidence.sha256" -Encoding ascii
     Assert-EvidenceChecksums $EvidenceDirectory
-    Assert-PreflightResult (Get-Content -LiteralPath $preflightEvidence) (-not $SkipMemoryProfiles) ($TunnelInputCount -eq 4) | Out-Null
+    Assert-PreflightResult (Get-Content -LiteralPath $preflightEvidence) (-not $SkipMemoryProfiles) (-not $SkipCpuProfiles) ($TunnelInputCount -eq 4) | Out-Null
     Assert-AcceptanceEvidence $EvidenceDirectory ($TunnelInputCount -eq 4)
     if (-not $SkipMemoryProfiles) { Assert-MemoryEvidence $EvidenceDirectory }
+    if (-not $SkipCpuProfiles) { Assert-CpuEvidence $EvidenceDirectory }
     Write-Host "Acceptance complete; downloaded evidence passed SHA-256 verification: $EvidenceDirectory"
 }
 finally {

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.0-dev.44
+
+- Added real cgroup v2 CPU quota acceptance with both configuration generation and the real Mihomo process executed inside the same isolated quota.
+- Every host tests 0.5, 0.999 and 1 CPU; hosts with at least two or four online CPUs extend the matrix through 1.001/1.5/2 and 2.001/4 CPUs without pretending unavailable hardware exists.
+- Evidence proves exact quota detection, effective CPU count, GOMAXPROCS, sub-one-CPU profile/GOGC behavior, four-client complete transfers, cgroup throttling counters and unchanged formal services.
+- Added source-bound CPU summary/CSV verification and an offline negative test rejecting a forged quota transition.
+
 ## 0.2.0-dev.43
 
 - Expanded real-core memory acceptance from eight representative limits to fifteen limits covering both sides of every 96/160/320/640 MiB profile boundary.
