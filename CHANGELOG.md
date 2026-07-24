@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.0-dev.51
+
+- Non-root installation now gives an actionable `su -` path and explicitly states that sudo is not required.
+- A fresh install preserves an existing orphaned `vp.previous` and its checksum instead of deleting the user's last rollback asset.
+- Reinstallation stages the new rollback script and checksum separately, then restores the original pair if either commit phase fails.
+- Installer smoke tests inject failure after each rollback-point commit and prove the current CLI and prior rollback assets remain unchanged.
+
 ## 0.2.0-dev.50
 
 - Portable backups no longer include host-bound runtime data such as network rollback snapshots, OOM baselines, self-heal locks or nested managed backups.

@@ -202,7 +202,7 @@ if [ "$MODE" = dry-run ]; then
   exit 0
 fi
 
-[ "$(id -u)" = "0" ] || die "请切换到 root 后重新执行安装命令。"
+[ "$(id -u)" = "0" ] || die "正式安装需要 root。请先输入 su -，再重新执行原安装命令；本脚本不要求系统必须安装 sudo。"
 [ "$PREFLIGHT_ERRORS" -eq 0 ] || die "安装前检查未通过，未修改系统。"
 show_install_plan
 
@@ -303,24 +303,49 @@ cp "$tmp" "$install_stage" || { rm -f "$install_stage"; die "无法暂存管理�
 chmod 755 "$install_stage"
 prior_backup_tmp="$(mktemp /tmp/vp-prior-backup.XXXXXX)" || { rm -f "$install_stage"; die "无法创建回滚快照。"; }
 prior_sidecar_tmp="$(mktemp /tmp/vp-prior-sidecar.XXXXXX)" || { rm -f "$install_stage" "$prior_backup_tmp"; die "无法创建校验快照。"; }
-trap 'rm -f "$tmp" "$checksum_tmp" "$install_stage" "$prior_backup_tmp" "$prior_sidecar_tmp"' EXIT HUP INT TERM
+new_backup_stage=""
+new_sidecar_stage=""
+trap 'rm -f "$tmp" "$checksum_tmp" "$install_stage" "$prior_backup_tmp" "$prior_sidecar_tmp" "$new_backup_stage" "$new_sidecar_stage"' EXIT HUP INT TERM
 prior_backup_present=0
 prior_sidecar_present=0
 [ -f "$INSTALL_BACKUP_PATH" ] && { cp -p "$INSTALL_BACKUP_PATH" "$prior_backup_tmp" || die "无法保存原回滚脚本。"; prior_backup_present=1; }
 [ -f "$INSTALL_BACKUP_SHA256" ] && { cp -p "$INSTALL_BACKUP_SHA256" "$prior_sidecar_tmp" || die "无法保存原回滚校验。"; prior_sidecar_present=1; }
 restore_prior_rollback_files() {
-  if [ "$prior_backup_present" = 1 ]; then cp -p "$prior_backup_tmp" "$INSTALL_BACKUP_PATH"; else rm -f "$INSTALL_BACKUP_PATH"; fi
-  if [ "$prior_sidecar_present" = 1 ]; then cp -p "$prior_sidecar_tmp" "$INSTALL_BACKUP_SHA256"; else rm -f "$INSTALL_BACKUP_SHA256"; fi
+  if [ "$prior_backup_present" = 1 ]; then
+    restore_backup_stage="$(mktemp "$(dirname "$INSTALL_BACKUP_PATH")/.vp-install-backup-restore.XXXXXX")" || return 1
+    cp -p "$prior_backup_tmp" "$restore_backup_stage" && mv "$restore_backup_stage" "$INSTALL_BACKUP_PATH" || return 1
+  else
+    rm -f "$INSTALL_BACKUP_PATH" || return 1
+  fi
+  if [ "$prior_sidecar_present" = 1 ]; then
+    restore_sidecar_stage="$(mktemp "$(dirname "$INSTALL_BACKUP_SHA256")/.vp-install-sidecar-restore.XXXXXX")" || return 1
+    cp -p "$prior_sidecar_tmp" "$restore_sidecar_stage" && mv "$restore_sidecar_stage" "$INSTALL_BACKUP_SHA256" || return 1
+  else
+    rm -f "$INSTALL_BACKUP_SHA256" || return 1
+  fi
 }
 had_current=0
 if [ -f "$INSTALL_PATH" ]; then
   had_current=1
-  cp "$INSTALL_PATH" "$INSTALL_BACKUP_PATH" || { restore_prior_rollback_files; die "无法备份现有管理脚本。"; }
-  backup_hash="$(sha256_file "$INSTALL_BACKUP_PATH")" || { restore_prior_rollback_files; die "无法校验现有管理脚本备份。"; }
-  printf '%s  %s\n' "$backup_hash" "$(basename "$INSTALL_BACKUP_PATH")" > "$INSTALL_BACKUP_SHA256" || { restore_prior_rollback_files; die "无法写入回滚校验。"; }
-  chmod 600 "$INSTALL_BACKUP_SHA256" || { restore_prior_rollback_files; die "无法保护回滚校验。"; }
-else
-  rm -f "$INSTALL_BACKUP_PATH" "$INSTALL_BACKUP_SHA256"
+  mkdir -p "$(dirname "$INSTALL_BACKUP_PATH")" "$(dirname "$INSTALL_BACKUP_SHA256")" || die "无法创建回滚目录。"
+  new_backup_stage="$(mktemp "$(dirname "$INSTALL_BACKUP_PATH")/.vp-install-previous.XXXXXX")" || die "无法暂存现有管理脚本。"
+  cp -p "$INSTALL_PATH" "$new_backup_stage" || die "无法暂存现有管理脚本。"
+  backup_hash="$(sha256_file "$new_backup_stage")" || die "无法校验现有管理脚本备份。"
+  new_sidecar_stage="$(mktemp "$(dirname "$INSTALL_BACKUP_SHA256")/.vp-install-previous-sha.XXXXXX")" || die "无法暂存回滚校验。"
+  printf '%s  %s\n' "$backup_hash" "$(basename "$INSTALL_BACKUP_PATH")" > "$new_sidecar_stage" || die "无法写入回滚校验暂存文件。"
+  chmod 600 "$new_sidecar_stage" || die "无法保护回滚校验暂存文件。"
+  mv "$new_backup_stage" "$INSTALL_BACKUP_PATH" || { restore_prior_rollback_files || true; die "无法提交现有管理脚本备份。"; }
+  new_backup_stage=""
+  if [ "${VP_ALLOW_TEST_HOOKS:-0}" = 1 ] && [ "${VP_TEST_INSTALL_FAIL_PHASE:-}" = after-backup ]; then
+    restore_prior_rollback_files || true
+    die "测试注入：回滚脚本提交后中断。"
+  fi
+  mv "$new_sidecar_stage" "$INSTALL_BACKUP_SHA256" || { restore_prior_rollback_files || true; die "无法提交回滚校验。"; }
+  new_sidecar_stage=""
+  if [ "${VP_ALLOW_TEST_HOOKS:-0}" = 1 ] && [ "${VP_TEST_INSTALL_FAIL_PHASE:-}" = after-sidecar ]; then
+    restore_prior_rollback_files || true
+    die "测试注入：回滚校验提交后中断。"
+  fi
 fi
 mv "$install_stage" "$INSTALL_PATH" || { restore_prior_rollback_files; die "无法原子替换管理脚本。"; }
 rm -f "$tmp"

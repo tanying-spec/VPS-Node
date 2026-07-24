@@ -41,6 +41,20 @@ printf '%s\n' "$dry_output" | grep -q '明确不会执行'
 printf '%s\n' "$dry_output" | grep -q '不停止现有 Mihomo、Xray、sing-box 或 cloudflared'
 [ ! -e "$TMP/install/vp" ]
 
+orphan_root="$TMP/orphan"
+mkdir -p "$orphan_root/install"
+cp "$ROOT/vp.sh" "$orphan_root/install/vp.previous"
+printf '%s  vp.previous\n' "$(sha256sum "$orphan_root/install/vp.previous" | awk '{print $1}')" > "$orphan_root/install/vp.previous.sha256"
+orphan_backup_hash="$(sha256sum "$orphan_root/install/vp.previous" | awk '{print $1}')"
+orphan_sidecar_hash="$(sha256sum "$orphan_root/install/vp.previous.sha256" | awk '{print $1}')"
+(cd "$ROOT" && PATH="$TMP/bin:$PATH" VP_LOCAL_SOURCE=1 VP_ALLOW_TEST_HOOKS=1 \
+  VP_INSTALL_PATH="$orphan_root/install/vp" VP_CONFIG_DIR="$orphan_root/etc" \
+  VP_DATA_DIR="$orphan_root/lib" VP_LOG_DIR="$orphan_root/log" VP_LIB_DIR="$orphan_root/usr" \
+  sh ./install.sh >/dev/null)
+[ -x "$orphan_root/install/vp" ]
+[ "$(sha256sum "$orphan_root/install/vp.previous" | awk '{print $1}')" = "$orphan_backup_hash" ]
+[ "$(sha256sum "$orphan_root/install/vp.previous.sha256" | awk '{print $1}')" = "$orphan_sidecar_hash" ]
+
 cd "$ROOT"
 PATH="$TMP/bin:$PATH" VP_LOCAL_SOURCE=1 VP_ALLOW_TEST_HOOKS=1 VP_INSTALL_PATH="$TMP/install/vp" \
 VP_CONFIG_DIR="$TMP/etc" VP_DATA_DIR="$TMP/lib" VP_LOG_DIR="$TMP/log" VP_LIB_DIR="$TMP/usr" \
@@ -50,6 +64,18 @@ sh ./install.sh >/dev/null
 "$TMP/install/vp" version | grep -Eq '^0\.'
 
 first_install_hash="$(sha256sum "$TMP/install/vp" | awk '{print $1}')"
+for install_fail_phase in after-backup after-sidecar; do
+  if PATH="$TMP/bin:$PATH" VP_LOCAL_SOURCE=1 VP_ALLOW_TEST_HOOKS=1 \
+    VP_TEST_INSTALL_FAIL_PHASE="$install_fail_phase" VP_INSTALL_PATH="$TMP/install/vp" \
+    VP_CONFIG_DIR="$TMP/etc" VP_DATA_DIR="$TMP/lib" VP_LOG_DIR="$TMP/log" VP_LIB_DIR="$TMP/usr" \
+    sh ./install.sh >/dev/null 2>&1; then
+    printf 'injected installer rollback-point failure unexpectedly succeeded: %s\n' "$install_fail_phase" >&2
+    exit 1
+  fi
+  [ "$(sha256sum "$TMP/install/vp" | awk '{print $1}')" = "$first_install_hash" ]
+  [ ! -e "$TMP/install/vp.previous" ]
+  [ ! -e "$TMP/install/vp.previous.sha256" ]
+done
 PATH="$TMP/bin:$PATH" VP_LOCAL_SOURCE=1 VP_ALLOW_TEST_HOOKS=1 VP_INSTALL_PATH="$TMP/install/vp" \
 VP_CONFIG_DIR="$TMP/etc" VP_DATA_DIR="$TMP/lib" VP_LOG_DIR="$TMP/log" VP_LIB_DIR="$TMP/usr" \
 sh ./install.sh >/dev/null
