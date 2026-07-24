@@ -2,7 +2,7 @@
 
 set -u
 
-VP_VERSION="0.2.0-dev.56"
+VP_VERSION="0.2.0-dev.57"
 VP_CONFIG_DIR="${VP_CONFIG_DIR:-/etc/vps-node}"
 VP_DATA_DIR="${VP_DATA_DIR:-/var/lib/vps-node}"
 VP_LOG_DIR="${VP_LOG_DIR:-/var/log/vps-node}"
@@ -600,6 +600,19 @@ core_process_running() {
   else
     ps 2>/dev/null | grep -F "$VP_CORE_BIN" | grep -F "$VP_CORE_CONFIG" | grep -v grep >/dev/null 2>&1
   fi
+}
+
+binary_process_running() {
+  process_binary="$1"
+  if [ "${VP_ALLOW_TEST_HOOKS:-0}" = "1" ] && [ "${VP_TEST_TUNNEL_PROCESS_RUNNING:-0}" = "1" ] && [ "$process_binary" = "$VP_TUNNEL_BIN" ]; then
+    return 0
+  fi
+  for process_cmdline in /proc/[0-9]*/cmdline; do
+    [ -r "$process_cmdline" ] || continue
+    process_argv0="$(tr '\000' '\n' < "$process_cmdline" 2>/dev/null | sed -n '1p')"
+    [ "$process_argv0" = "$process_binary" ] && return 0
+  done
+  return 1
 }
 
 core_service_restart() {
@@ -3922,6 +3935,59 @@ uninstall_plan() {
   printf '  %s\n' "$VP_CONFIG_DIR" "$VP_DATA_DIR" "$VP_LOG_DIR" "$VP_LIB_DIR" "$VP_CLI_PATH" "$VP_CLI_BACKUP_PATH" "$VP_CLI_BACKUP_SHA256"
 }
 
+uninstall_restore_services() {
+  if [ "${uninstall_core_was_running:-0}" -eq 1 ]; then
+    service_action restart "$VP_CORE_SERVICE" >/dev/null 2>&1 || true
+  fi
+  if [ "${uninstall_tunnel_was_running:-0}" -eq 1 ]; then
+    service_action restart "$VP_TUNNEL_SERVICE" >/dev/null 2>&1 || true
+  fi
+  if [ -n "${uninstall_watchdog_hold:-}" ] && [ -e "$uninstall_watchdog_hold" ]; then
+    mv "$uninstall_watchdog_hold" "/etc/periodic/15min/$VP_WATCHDOG_SERVICE" >/dev/null 2>&1 || true
+    uninstall_watchdog_hold=""
+  fi
+  if [ "${uninstall_timer_was_running:-0}" -eq 1 ]; then
+    systemctl start "${VP_WATCHDOG_SERVICE}.timer" >/dev/null 2>&1 || true
+  fi
+}
+
+uninstall_stop_services() {
+  uninstall_manager="$1"
+  uninstall_core_was_running=0
+  uninstall_tunnel_was_running=0
+  uninstall_timer_was_running=0
+  uninstall_watchdog_hold=""
+  case "$(service_state "$VP_CORE_SERVICE")" in active|started) uninstall_core_was_running=1 ;; esac
+  case "$(service_state "$VP_TUNNEL_SERVICE")" in active|started) uninstall_tunnel_was_running=1 ;; esac
+  if [ "${VP_ALLOW_TEST_HOOKS:-0}" = 1 ] && [ "${VP_TEST_UNINSTALL_STOP_FAIL:-0}" = 1 ]; then
+    return 1
+  fi
+  case "$uninstall_manager" in
+    systemd)
+      systemctl is-active --quiet "${VP_WATCHDOG_SERVICE}.timer" >/dev/null 2>&1 && uninstall_timer_was_running=1
+      systemctl stop "${VP_WATCHDOG_SERVICE}.timer" >/dev/null 2>&1 || [ "$uninstall_timer_was_running" -eq 0 ] || return 1
+      service_action stop "$VP_TUNNEL_SERVICE" >/dev/null 2>&1 || [ "$uninstall_tunnel_was_running" -eq 0 ] || { uninstall_restore_services; return 1; }
+      service_action stop "$VP_CORE_SERVICE" >/dev/null 2>&1 || [ "$uninstall_core_was_running" -eq 0 ] || { uninstall_restore_services; return 1; }
+      ;;
+    openrc)
+      if [ -e "/etc/periodic/15min/$VP_WATCHDOG_SERVICE" ]; then
+        uninstall_watchdog_hold="/etc/periodic/15min/.${VP_WATCHDOG_SERVICE}.uninstall.$$"
+        mv "/etc/periodic/15min/$VP_WATCHDOG_SERVICE" "$uninstall_watchdog_hold" || return 1
+      fi
+      service_action stop "$VP_TUNNEL_SERVICE" >/dev/null 2>&1 || [ "$uninstall_tunnel_was_running" -eq 0 ] || { uninstall_restore_services; return 1; }
+      service_action stop "$VP_CORE_SERVICE" >/dev/null 2>&1 || [ "$uninstall_core_was_running" -eq 0 ] || { uninstall_restore_services; return 1; }
+      ;;
+    *)
+      [ "$uninstall_core_was_running" -eq 0 ] && [ "$uninstall_tunnel_was_running" -eq 0 ] || return 1
+      ;;
+  esac
+  case "$(service_state "$VP_CORE_SERVICE")" in active|started) uninstall_restore_services; return 1 ;; esac
+  case "$(service_state "$VP_TUNNEL_SERVICE")" in active|started) uninstall_restore_services; return 1 ;; esac
+  core_process_running && { uninstall_restore_services; return 1; }
+  binary_process_running "$VP_TUNNEL_BIN" && { uninstall_restore_services; return 1; }
+  return 0
+}
+
 uninstall_project() {
   need_root || return 1
   [ "$#" -le 1 ] || { error "卸载命令只接受 --dry-run 参数。"; return 2; }
@@ -3951,9 +4017,21 @@ uninstall_project() {
   expected_backup_hash="$(awk 'NR==1{print tolower($1)}' "$backup_archive.sha256" 2>/dev/null)"
   actual_backup_hash="$(sha256_file "$backup_archive" 2>/dev/null | tr 'A-F' 'a-f')"
   [ -n "$actual_backup_hash" ] && [ "$expected_backup_hash" = "$actual_backup_hash" ] || { error "卸载备份校验失败，已中止卸载。"; return 1; }
-  network_rollback --quiet || { error "无法恢复项目应用前的网络参数，已中止卸载。"; return 1; }
+  uninstall_manager=skip
   if [ "${VP_SKIP_SERVICE:-0}" != "1" ]; then
-    case "$(service_manager)" in
+    uninstall_manager="$(service_manager)"
+    if ! uninstall_stop_services "$uninstall_manager"; then
+      error "项目服务未能全部停止，已恢复原运行状态；未回滚网络或删除文件。"
+      return 1
+    fi
+  fi
+  if ! network_rollback --quiet; then
+    [ "$uninstall_manager" = skip ] || uninstall_restore_services
+    error "无法恢复项目应用前的网络参数，已恢复原服务并中止卸载。"
+    return 1
+  fi
+  if [ "$uninstall_manager" != skip ]; then
+    case "$uninstall_manager" in
       systemd)
         systemctl disable --now "${VP_WATCHDOG_SERVICE}.timer" >/dev/null 2>&1 || true
         systemctl disable --now "$VP_TUNNEL_SERVICE" >/dev/null 2>&1 || true
@@ -3963,12 +4041,11 @@ uninstall_project() {
         systemctl daemon-reload >/dev/null 2>&1 || true
         ;;
       openrc)
-        rc-service "$VP_TUNNEL_SERVICE" stop >/dev/null 2>&1 || true
-        rc-service "$VP_CORE_SERVICE" stop >/dev/null 2>&1 || true
         rc-update del "$VP_TUNNEL_SERVICE" default >/dev/null 2>&1 || true
         rc-update del "$VP_CORE_SERVICE" default >/dev/null 2>&1 || true
         rm -f "/etc/init.d/$VP_TUNNEL_SERVICE" "/etc/init.d/$VP_CORE_SERVICE"
         rm -f "/etc/periodic/15min/$VP_WATCHDOG_SERVICE"
+        [ -z "$uninstall_watchdog_hold" ] || rm -f "$uninstall_watchdog_hold"
         ;;
     esac
   fi

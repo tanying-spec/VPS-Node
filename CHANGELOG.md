@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.0-dev.57
+
+- Uninstall now creates and verifies its external recovery archive before stopping services, rolling back host networking or deleting project files.
+- Mihomo, cloudflared and the watchdog are stopped before destructive work; a failed stop restores the previous running state and leaves project and network state untouched.
+- Process-level checks reject uninstall when either the core or an orphaned cloudflared process remains alive, including hosts without a detectable service manager.
+- OpenRC watchdog jobs are held transactionally and restored on failure; regression tests prove stop-failure preservation, valid recovery evidence and orphan-Tunnel rejection.
+
 ## 0.2.0-dev.56
 
 - Mihomo-lite-argo migration now accepts only a readable regular source database and rejects symlinks or special files.

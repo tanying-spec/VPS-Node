@@ -859,6 +859,53 @@ sh "$ROOT/vp.sh" monitor-install >/dev/null
 [ -x "$TMP/dns-usr/bin/watchdog-run" ]
 grep -Fq "exec \"$ROOT/vp.sh\" self-heal --quiet" "$TMP/dns-usr/bin/watchdog-run"
 
+uninstall_fail_root="$TMP/uninstall-stop-failure"
+mkdir -p "$uninstall_fail_root"
+: > "$uninstall_fail_root/vp"
+: > "$uninstall_fail_root/vp.previous"
+printf '%064d  vp.previous\n' 0 > "$uninstall_fail_root/vp.previous.sha256"
+VP_CONFIG_DIR="$uninstall_fail_root/etc" VP_DATA_DIR="$uninstall_fail_root/lib" \
+VP_LOG_DIR="$uninstall_fail_root/log" VP_LIB_DIR="$uninstall_fail_root/usr" \
+VP_CLI_PATH="$uninstall_fail_root/vp" VP_CLI_BACKUP_PATH="$uninstall_fail_root/vp.previous" \
+VP_SKIP_SERVICE=1 sh "$ROOT/vp.sh" init >/dev/null
+printf 'UNINSTALL_FAILURE_MARKER=preserve\n' >> "$uninstall_fail_root/etc/state.env"
+printf 'BEFORE_CC=cubic\nBEFORE_QDISC=fq\n' > "$uninstall_fail_root/lib/network-before.env"
+printf 'net.core.default_qdisc=fq\n' > "$uninstall_fail_root/sysctl.conf"
+find "$uninstall_fail_root/etc" "$uninstall_fail_root/lib" "$uninstall_fail_root/log" "$uninstall_fail_root/usr" \
+  "$uninstall_fail_root/vp" "$uninstall_fail_root/vp.previous" "$uninstall_fail_root/vp.previous.sha256" \
+  "$uninstall_fail_root/sysctl.conf" -type f -exec sha256sum {} \; | sort > "$uninstall_fail_root/before.sha256"
+if uninstall_fail_output="$(VP_CONFIG_DIR="$uninstall_fail_root/etc" VP_DATA_DIR="$uninstall_fail_root/lib" \
+  VP_LOG_DIR="$uninstall_fail_root/log" VP_LIB_DIR="$uninstall_fail_root/usr" \
+  VP_CLI_PATH="$uninstall_fail_root/vp" VP_CLI_BACKUP_PATH="$uninstall_fail_root/vp.previous" \
+  VP_UNINSTALL_BACKUP_DIR="$uninstall_fail_root/recovery" \
+  VP_SYSCTL_CONFIG="$uninstall_fail_root/sysctl.conf" \
+  VP_NETWORK_SNAPSHOT="$uninstall_fail_root/lib/network-before.env" \
+  VP_UNINSTALL_CONFIRM=DELETE VP_ALLOW_TEST_HOOKS=1 VP_TEST_UNINSTALL_STOP_FAIL=1 \
+  sh "$ROOT/vp.sh" uninstall 2>&1)"; then
+  printf 'uninstall unexpectedly continued after service stop failure\n' >&2
+  exit 1
+fi
+printf '%s\n' "$uninstall_fail_output" | grep -q '未回滚网络或删除文件'
+find "$uninstall_fail_root/etc" "$uninstall_fail_root/lib" "$uninstall_fail_root/log" "$uninstall_fail_root/usr" \
+  "$uninstall_fail_root/vp" "$uninstall_fail_root/vp.previous" "$uninstall_fail_root/vp.previous.sha256" \
+  "$uninstall_fail_root/sysctl.conf" -type f -exec sha256sum {} \; | sort > "$uninstall_fail_root/after.sha256"
+cmp "$uninstall_fail_root/before.sha256" "$uninstall_fail_root/after.sha256"
+uninstall_fail_backup="$(find "$uninstall_fail_root/recovery" -name 'vps-node-uninstall-backup-*.tar.gz' -type f | head -n 1)"
+[ -s "$uninstall_fail_backup" ]
+[ -s "$uninstall_fail_backup.sha256" ]
+(cd "$(dirname "$uninstall_fail_backup")" && sha256sum -c "$(basename "$uninstall_fail_backup").sha256" >/dev/null)
+
+if VP_CONFIG_DIR="$uninstall_fail_root/etc" VP_DATA_DIR="$uninstall_fail_root/lib" \
+  VP_LOG_DIR="$uninstall_fail_root/log" VP_LIB_DIR="$uninstall_fail_root/usr" \
+  VP_CLI_PATH="$uninstall_fail_root/vp" VP_CLI_BACKUP_PATH="$uninstall_fail_root/vp.previous" \
+  VP_UNINSTALL_BACKUP_DIR="$uninstall_fail_root/recovery-orphan" VP_UNINSTALL_CONFIRM=DELETE \
+  VP_ALLOW_TEST_HOOKS=1 VP_TEST_TUNNEL_PROCESS_RUNNING=1 sh "$ROOT/vp.sh" uninstall >/dev/null 2>&1; then
+  printf 'uninstall unexpectedly continued while tunnel process was running\n' >&2
+  exit 1
+fi
+[ -e "$uninstall_fail_root/etc/state.env" ]
+[ -e "$uninstall_fail_root/vp" ]
+
 uninstall_root="$TMP/uninstall"
 mkdir -p "$uninstall_root"
 : > "$uninstall_root/vp"
