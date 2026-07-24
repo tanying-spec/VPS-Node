@@ -2,7 +2,7 @@
 
 set -u
 
-VP_VERSION="0.2.0-dev.51"
+VP_VERSION="0.2.0-dev.52"
 VP_CONFIG_DIR="${VP_CONFIG_DIR:-/etc/vps-node}"
 VP_DATA_DIR="${VP_DATA_DIR:-/var/lib/vps-node}"
 VP_LOG_DIR="${VP_LOG_DIR:-/var/log/vps-node}"
@@ -1696,6 +1696,26 @@ finalize_rotation() {
     match_count="$(awk -F'|' -v n="$target" '$1==n{c++}END{print c+0}' "$VP_ROTATIONS_DB" 2>/dev/null)"
   fi
   [ "$match_count" -gt 0 ] || { warn "没有需要完成的轮换。"; return 0; }
+  if [ "$target" != "--expired" ]; then
+    rotation_expires="$(awk -F'|' -v n="$target" '$1==n{print $5;exit}' "$VP_ROTATIONS_DB" 2>/dev/null)"
+    case "$rotation_expires" in ''|*[!0-9]*) error "凭据轮换记录中的到期时间无效，拒绝执行最终切换。"; return 1 ;; esac
+    [ "${#rotation_expires}" -le 12 ] || { error "凭据轮换记录中的到期时间超出安全范围。"; return 1; }
+    remaining_seconds=$((rotation_expires - now))
+    printf '凭据切换预览：节点=%s；将永久移除旧凭据，仅保留已生成的新凭据。\n' "$target"
+    if [ "$remaining_seconds" -gt 0 ]; then
+      remaining_minutes=$(((remaining_seconds + 59) / 60))
+      warn "当前仍有约 $remaining_minutes 分钟宽限期；提前完成会让尚未更新的客户端立即断线。"
+    else
+      warn "宽限期已经结束；旧凭据将在本次操作后从运行配置中清除。"
+    fi
+    if [ -n "${VP_ROTATION_FINALIZE_CONFIRM:-}" ]; then
+      finalize_confirm="$VP_ROTATION_FINALIZE_CONFIRM"
+    else
+      printf '确认新链接已经验证可用后，输入 FINALIZE：'
+      read -r finalize_confirm || true
+    fi
+    [ "$finalize_confirm" = FINALIZE ] || { warn "已取消最终切换，旧凭据仍按原宽限记录保留。"; return 2; }
+  fi
   begin_state_transaction credential-finalize || return 1
   candidate_root="$VP_TX_ACTIVE/candidate"
   if [ "$target" = "--expired" ]; then

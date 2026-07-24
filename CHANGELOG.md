@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.0-dev.52
+
+- Finalizing a named credential rotation now previews the permanent removal of the old credential and requires `FINALIZE` confirmation.
+- Active grace periods show the remaining time and warn that early finalization can disconnect clients that still use the old link.
+- Cancellation leaves both the rotation database and generated dual-credential configuration unchanged.
+- Regression tests prove cancellation, service-restart rollback and successful old-credential removal; automated `--expired` maintenance remains non-interactive and only removes expired records.
+
 ## 0.2.0-dev.51
 
 - Non-root installation now gives an actionable `su -` path and explicitly states that sudo is not required.

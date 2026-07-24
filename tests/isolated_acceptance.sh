@@ -198,7 +198,7 @@ expected_rotation_links=2
 [ "$ipv6_result" = loopback-passed ] && expected_rotation_links=3
 [ "$argo_result" = public-concurrency-and-respawn-passed ] && expected_rotation_links=$((expected_rotation_links + 1))
 [ "$(vp_env "$CLI" subscription plain | grep -c '^vless://')" -eq "$expected_rotation_links" ]
-vp_env "$CLI" rotate-finalize acceptance-reality >/dev/null
+vp_env env VP_ROTATION_FINALIZE_CONFIRM=FINALIZE "$CLI" rotate-finalize acceptance-reality >/dev/null
 expected_final_links=1
 [ "$ipv6_result" = loopback-passed ] && expected_final_links=2
 [ "$argo_result" = public-concurrency-and-respawn-passed ] && expected_final_links=$((expected_final_links + 1))

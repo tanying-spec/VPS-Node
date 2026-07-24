@@ -255,6 +255,41 @@ printf '%s\n' "$plain_subscription" | grep -Fq "vless://$old_uuid@"
 base64_subscription="$(VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log" \
   VP_LIB_DIR="$TMP/dns-usr" VP_PUBLIC_IPV6_OVERRIDE=2001:db8::10 sh "$ROOT/vp.sh" subscription base64)"
 [ "$(printf '%s' "$base64_subscription" | base64 -d | grep -c '^vless://')" -eq 4 ]
+rotation_db_before_finalize="$(sha256sum "$TMP/dns-etc/credential-rotations.db" | awk '{print $1}')"
+rotation_config_before_finalize="$(sha256sum "$TMP/dns-etc/generated/mihomo.yaml" | awk '{print $1}')"
+cp "$TMP/dns-etc/credential-rotations.db" "$TMP/rotations-before-invalid-finalize"
+awk -F'|' 'BEGIN{OFS="|"} $1=="renamed-node"{$5="invalid"}{print}' \
+  "$TMP/rotations-before-invalid-finalize" > "$TMP/dns-etc/credential-rotations.db"
+if VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log" \
+  VP_LIB_DIR="$TMP/dns-usr" VP_CORE_BIN="$TMP/dns-usr/bin/mihomo" VP_SKIP_SERVICE=1 \
+  VP_ROTATION_FINALIZE_CONFIRM=FINALIZE sh "$ROOT/vp.sh" rotate-finalize renamed-node >/dev/null 2>&1; then
+  printf 'invalid rotation expiry unexpectedly reached finalization\n' >&2
+  exit 1
+fi
+mv "$TMP/rotations-before-invalid-finalize" "$TMP/dns-etc/credential-rotations.db"
+[ "$(sha256sum "$TMP/dns-etc/generated/mihomo.yaml" | awk '{print $1}')" = "$rotation_config_before_finalize" ]
+if VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log" \
+  VP_LIB_DIR="$TMP/dns-usr" VP_CORE_BIN="$TMP/dns-usr/bin/mihomo" VP_SKIP_SERVICE=1 \
+  sh "$ROOT/vp.sh" rotate-finalize renamed-node </dev/null >/dev/null 2>&1; then
+  printf 'unconfirmed credential finalization unexpectedly succeeded\n' >&2
+  exit 1
+fi
+[ "$(sha256sum "$TMP/dns-etc/credential-rotations.db" | awk '{print $1}')" = "$rotation_db_before_finalize" ]
+[ "$(sha256sum "$TMP/dns-etc/generated/mihomo.yaml" | awk '{print $1}')" = "$rotation_config_before_finalize" ]
+if VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log" \
+  VP_LIB_DIR="$TMP/dns-usr" VP_CORE_BIN="$TMP/dns-usr/bin/mihomo" VP_SKIP_SERVICE=1 \
+  VP_ALLOW_TEST_HOOKS=1 VP_TEST_CORE_RESTART_FAIL=1 VP_ROTATION_FINALIZE_CONFIRM=FINALIZE \
+  sh "$ROOT/vp.sh" rotate-finalize renamed-node >/dev/null 2>&1; then
+  printf 'credential finalization unexpectedly survived restart failure\n' >&2
+  exit 1
+fi
+[ "$(sha256sum "$TMP/dns-etc/credential-rotations.db" | awk '{print $1}')" = "$rotation_db_before_finalize" ]
+[ "$(sha256sum "$TMP/dns-etc/generated/mihomo.yaml" | awk '{print $1}')" = "$rotation_config_before_finalize" ]
+VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log" \
+VP_LIB_DIR="$TMP/dns-usr" VP_CORE_BIN="$TMP/dns-usr/bin/mihomo" VP_SKIP_SERVICE=1 \
+VP_ROTATION_FINALIZE_CONFIRM=FINALIZE sh "$ROOT/vp.sh" rotate-finalize renamed-node >/dev/null
+! grep -q '^renamed-node|' "$TMP/dns-etc/credential-rotations.db"
+! grep -Fq "$old_uuid" "$TMP/dns-etc/generated/mihomo.yaml"
 printf '%s\n' 'argo|broken|25437|not-a-uuid|/broken|broken.example.com' >> "$TMP/dns-etc/nodes.db"
 if VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log" \
   VP_LIB_DIR="$TMP/dns-usr" sh "$ROOT/vp.sh" link broken >/dev/null 2>"$TMP/broken-link.err"; then
