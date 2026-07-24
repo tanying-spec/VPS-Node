@@ -2,7 +2,7 @@
 
 set -u
 
-VP_VERSION="0.2.0-dev.77"
+VP_VERSION="0.2.0-dev.78"
 VP_CONFIG_DIR="${VP_CONFIG_DIR:-/etc/vps-node}"
 VP_DATA_DIR="${VP_DATA_DIR:-/var/lib/vps-node}"
 VP_LOG_DIR="${VP_LOG_DIR:-/var/log/vps-node}"
@@ -1901,11 +1901,18 @@ delete_node() {
   [ -n "$record" ] || { error "未找到节点。"; return 1; }
   approved_delete_nodes_state="$(managed_file_state "$VP_NODES_DB")"
   approved_delete_rotations_state="$(managed_file_state "$VP_ROTATIONS_DB")"
-  if [ "${VP_DELETE_CONFIRM:-}" != "DELETE" ]; then
-    printf '删除节点 %s？请输入 DELETE：' "$target"
-    read -r answer || true
-    [ "$answer" = "DELETE" ] || { warn "已取消。"; return 0; }
-  fi
+  IFS='|' read -r delete_proto delete_name delete_port _delete_rest <<EOF
+$record
+EOF
+  delete_rotation_count="$(awk -F'|' -v n="$target" '$1==n{c++}END{print c+0}' "$VP_ROTATIONS_DB" 2>/dev/null)"
+  printf '节点删除预览：\n'
+  printf '  名称：%s\n' "$delete_name"
+  printf '  协议：%s\n' "$delete_proto"
+  printf '  监听端口：%s\n' "$delete_port"
+  printf '  关联轮换记录：%s 条（将同时删除）\n' "$delete_rotation_count"
+  printf '  影响范围：永久移除节点及其新旧凭据，并重启 Mihomo\n'
+  if [ -n "${VP_DELETE_CONFIRM:-}" ]; then answer="$VP_DELETE_CONFIRM"; else printf '输入 DELETE 确认永久删除：'; read -r answer || true; fi
+  [ "$answer" = DELETE ] || { warn "已取消节点删除，节点、轮换记录和生成配置未修改。"; return 2; }
   if [ "${VP_ALLOW_TEST_HOOKS:-0}" = 1 ] && [ "${VP_TEST_DELETE_NODE_RACE:-0}" = 1 ]; then
     printf '%s\n' 'argo|concurrent-node|29991|99999999-9999-4999-8999-999999999999|/concurrent|concurrent.example.com' >> "$VP_NODES_DB"
   fi

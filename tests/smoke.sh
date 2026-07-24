@@ -1089,8 +1089,23 @@ VP_LOG_DIR="$delete_race_root/log" VP_LIB_DIR="$delete_race_root/usr" \
 VP_SKIP_SERVICE=1 sh "$ROOT/vp.sh" init >/dev/null
 printf '%s\n' 'argo|delete-target|29990|88888888-8888-4888-8888-888888888888|/target|target.example.com' \
   > "$delete_race_root/etc/nodes.db"
+delete_rotation_now="$(date +%s)"
+printf '%s\n' "delete-target|argo|77777777-7777-4777-8777-777777777777|88888888-8888-4888-8888-888888888888|$((delete_rotation_now + 3600))|$delete_rotation_now" \
+  > "$delete_race_root/etc/credential-rotations.db"
 delete_race_state_hash="$(sha256sum "$delete_race_root/etc/state.env" | awk '{print $1}')"
 delete_race_rotations_hash="$(sha256sum "$delete_race_root/etc/credential-rotations.db" | awk '{print $1}')"
+delete_race_nodes_hash="$(sha256sum "$delete_race_root/etc/nodes.db" | awk '{print $1}')"
+delete_race_config_hash="$(sha256sum "$delete_race_root/etc/generated/mihomo.yaml" | awk '{print $1}')"
+cancelled_delete="$(VP_CONFIG_DIR="$delete_race_root/etc" VP_DATA_DIR="$delete_race_root/lib" \
+  VP_LOG_DIR="$delete_race_root/log" VP_LIB_DIR="$delete_race_root/usr" VP_SKIP_SERVICE=1 \
+  VP_DELETE_CONFIRM=CANCEL sh "$ROOT/vp.sh" delete delete-target 2>&1 || true)"
+printf '%s\n' "$cancelled_delete" | grep -q '关联轮换记录：1 条'
+printf '%s\n' "$cancelled_delete" | grep -q '已取消节点删除'
+[ "$(sha256sum "$delete_race_root/etc/nodes.db" | awk '{print $1}')" = "$delete_race_nodes_hash" ]
+[ "$(sha256sum "$delete_race_root/etc/credential-rotations.db" | awk '{print $1}')" = "$delete_race_rotations_hash" ]
+[ "$(sha256sum "$delete_race_root/etc/generated/mihomo.yaml" | awk '{print $1}')" = "$delete_race_config_hash" ]
+[ "$(sha256sum "$delete_race_root/etc/state.env" | awk '{print $1}')" = "$delete_race_state_hash" ]
+[ ! -e "$delete_race_root/etc/transactions/active" ]
 if VP_CONFIG_DIR="$delete_race_root/etc" VP_DATA_DIR="$delete_race_root/lib" \
   VP_LOG_DIR="$delete_race_root/log" VP_LIB_DIR="$delete_race_root/usr" VP_SKIP_SERVICE=1 \
   VP_DELETE_CONFIRM=DELETE VP_ALLOW_TEST_HOOKS=1 VP_TEST_DELETE_NODE_RACE=1 \

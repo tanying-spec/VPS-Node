@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.0-dev.78
+
+- Node deletion now previews name, protocol, listener port, associated credential-rotation count and the service-restart impact before `DELETE` confirmation.
+- The preview explicitly states that both current and grace-period credentials for the node are permanently removed.
+- Cancellation has a consistent non-applied result and leaves node, rotation, generated configuration and state files byte-identical.
+- Regression tests cover cancellation with an active rotation and retain the existing exact-state race rejection.
+
 ## 0.2.0-dev.77
 
 - Reality and Argo node creation now preview non-secret listener and endpoint settings plus service impact before requiring `CREATE`.
