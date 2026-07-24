@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.0-dev.23
+
+- Health checks now detect syntactically valid Mihomo configuration drift by rendering the expected configuration from authoritative node/rotation state and comparing it without exposing secrets.
+- Safe repair restarts the core whenever generated configuration changes, not only when the process is absent or runtime limits change.
+- Failed repaired-config startup restores both the pre-repair configuration and runtime environment; tests cover drift detection, repair and forced-restart rollback.
+
 ## 0.2.0-dev.22
 
 - Dashboard service status now consistently honors custom/isolated core and Tunnel service names instead of using a hard-coded Tunnel name.

@@ -2,7 +2,7 @@
 
 set -u
 
-VP_VERSION="0.2.0-dev.22"
+VP_VERSION="0.2.0-dev.23"
 VP_CONFIG_DIR="${VP_CONFIG_DIR:-/etc/vps-node}"
 VP_DATA_DIR="${VP_DATA_DIR:-/var/lib/vps-node}"
 VP_LOG_DIR="${VP_LOG_DIR:-/var/log/vps-node}"
@@ -591,6 +591,9 @@ core_process_running() {
 }
 
 core_service_restart() {
+  if [ "${VP_ALLOW_TEST_HOOKS:-0}" = "1" ] && [ "${VP_TEST_CORE_RESTART_FAIL:-0}" = "1" ]; then
+    return 1
+  fi
   [ "${VP_SKIP_SERVICE:-0}" = "1" ] && return 0
   service_action restart "$VP_CORE_SERVICE" >/dev/null 2>&1 || return 1
   attempts=0
@@ -769,6 +772,16 @@ render_mihomo_config() {
     printf 'proxies: []\nproxy-groups:\n  - name: Proxy\n    type: select\n    proxies:\n      - DIRECT\nrules:\n  - MATCH,DIRECT\n'
   } > "$output_file"
   chmod 600 "$output_file"
+}
+
+generated_config_matches_state() {
+  [ -r "$VP_NODES_DB" ] && [ -r "$VP_ROTATIONS_DB" ] && [ -r "$VP_CORE_CONFIG" ] || return 1
+  expected_config="$(mktemp /tmp/vp-expected-config.XXXXXX)" || return 1
+  render_mihomo_config "$VP_NODES_DB" "$expected_config" "$VP_ROTATIONS_DB"
+  cmp -s "$expected_config" "$VP_CORE_CONFIG"
+  matches=$?
+  rm -f "$expected_config"
+  return "$matches"
 }
 
 cloudflared_asset_record() {
@@ -2195,7 +2208,7 @@ maintenance_mode() {
   fi
 
   temp_removed=0
-  for temp_path in /tmp/vp-node-test.* /tmp/vp-benchmark.* /tmp/vp-network-verify.* /tmp/vp-subscription.* /tmp/vp-backup.* /tmp/vp-restore.* /tmp/vp-repair-config.* /tmp/vp-reality-key.*; do
+  for temp_path in /tmp/vp-node-test.* /tmp/vp-benchmark.* /tmp/vp-network-verify.* /tmp/vp-subscription.* /tmp/vp-backup.* /tmp/vp-restore.* /tmp/vp-repair-config.* /tmp/vp-repair-config-old.* /tmp/vp-expected-config.* /tmp/vp-reality-key.*; do
     [ -e "$temp_path" ] || continue
     if find "$temp_path" -maxdepth 0 -mmin +60 >/dev/null 2>&1 && [ -n "$(find "$temp_path" -maxdepth 0 -mmin +60 -print 2>/dev/null)" ]; then
       rm -rf "$temp_path"
@@ -2538,7 +2551,7 @@ show_dashboard_summary() {
   elif { [ -r "$VP_NODES_DB" ] && ! validate_nodes_database "$VP_NODES_DB" >/dev/null 2>&1; } ||
        { [ -r "$VP_ROTATIONS_DB" ] && ! validate_rotations_database "$VP_NODES_DB" "$VP_ROTATIONS_DB" >/dev/null 2>&1; }; then
     overall="状态数据异常"
-    next_action="节点或凭据轮换记录未通过完整性检查，请选择 5 导出诊断并安全修复。"
+    next_action="节点或轮换记录未通过完整性检查，请选择 5 导出诊断，再选择 7 从可信备份恢复。"
   elif [ ! -x "$VP_CORE_BIN" ]; then
     overall="尚未安装"
     next_action="请选择 1 创建 Reality 主节点，程序会引导安装内核。"
@@ -2745,7 +2758,11 @@ layered_health_check() {
 
   if [ -x "$VP_CORE_BIN" ]; then
     if [ -f "$VP_CORE_CONFIG" ] && "$VP_CORE_BIN" -t -d "$VP_CONFIG_DIR" -f "$VP_CORE_CONFIG" >/dev/null 2>&1; then
-      health_ok "内核配置层：Mihomo 配置有效。"
+      if generated_config_matches_state; then
+        health_ok "内核配置层：Mihomo 配置有效且与节点状态一致。"
+      else
+        health_error "内核配置层：配置语法有效但已偏离节点状态，执行 vp repair 可事务化重建。"
+      fi
     else
       health_error "内核配置层：Mihomo 配置无效或缺失。"
     fi
@@ -2852,6 +2869,7 @@ safe_repair() {
   need_root || return 1
   repaired=0
   runtime_changed=0
+  config_changed=0
   if [ -d "$VP_TX_ACTIVE" ]; then
     recover_state_transaction || return 1
     repaired=$((repaired + 1))
@@ -2863,7 +2881,13 @@ safe_repair() {
       repaired=$((repaired + 1))
     fi
   done
+  if [ -r "$VP_NODES_DB" ]; then
+    validate_nodes_database "$VP_NODES_DB" || { error "节点数据库无效，拒绝从损坏状态重建配置。"; return 1; }
+    validate_rotations_database "$VP_NODES_DB" "$VP_ROTATIONS_DB" || { error "凭据轮换数据库无效，拒绝重建配置。"; return 1; }
+  fi
   if [ -x "$VP_CORE_BIN" ]; then
+    runtime_existed=0
+    [ -f "$VP_CORE_ENV" ] && runtime_existed=1
     old_runtime="$(cat "$VP_CORE_ENV" 2>/dev/null || true)"
     write_core_runtime_env || return 1
     new_runtime="$(cat "$VP_CORE_ENV" 2>/dev/null || true)"
@@ -2877,16 +2901,47 @@ safe_repair() {
     render_mihomo_config "$VP_NODES_DB" "$repair_tmp"
     if "$VP_CORE_BIN" -t -d "$VP_CONFIG_DIR" -f "$repair_tmp" >/dev/null 2>&1; then
       if ! cmp -s "$repair_tmp" "$VP_CORE_CONFIG" 2>/dev/null; then
+        config_backup="$(mktemp /tmp/vp-repair-config-old.XXXXXX)" || { rm -f "$repair_tmp"; return 1; }
+        config_existed=0
+        if [ -f "$VP_CORE_CONFIG" ]; then
+          cp -p "$VP_CORE_CONFIG" "$config_backup" || { rm -f "$repair_tmp" "$config_backup"; return 1; }
+          config_existed=1
+        fi
         mkdir -p "$VP_GENERATED_DIR"
         mv "$repair_tmp" "$VP_CORE_CONFIG"
         chmod 600 "$VP_CORE_CONFIG"
+        config_changed=1
         repaired=$((repaired + 1))
       else
         rm -f "$repair_tmp"
       fi
-      if [ "${VP_SKIP_SERVICE:-0}" != "1" ] && { ! core_process_running || [ "$runtime_changed" = "1" ]; }; then
-        core_service_restart && repaired=$((repaired + 1))
+      if [ "${VP_SKIP_SERVICE:-0}" != "1" ] &&
+         { ! core_process_running || [ "$runtime_changed" = "1" ] || [ "$config_changed" = "1" ]; }; then
+        if core_service_restart; then
+          repaired=$((repaired + 1))
+        else
+          if [ "$config_changed" = "1" ]; then
+            if [ "$config_existed" = "1" ]; then
+              cp -p "$config_backup" "$VP_CORE_CONFIG"
+            else
+              rm -f "$VP_CORE_CONFIG"
+            fi
+          fi
+          if [ "$runtime_changed" = "1" ]; then
+            if [ "$runtime_existed" = "1" ]; then
+              printf '%s\n' "$old_runtime" > "$VP_CORE_ENV"
+              chmod 600 "$VP_CORE_ENV"
+            else
+              rm -f "$VP_CORE_ENV"
+            fi
+          fi
+          [ -z "${config_backup:-}" ] || rm -f "$config_backup"
+          core_service_restart >/dev/null 2>&1 || true
+          error "修复后的核心无法启动，已恢复修复前配置与运行参数。"
+          return 1
+        fi
       fi
+      [ -z "${config_backup:-}" ] || rm -f "$config_backup"
     else
       rm -f "$repair_tmp"
       error "根据节点数据库重新生成的配置仍然无效，未覆盖当前配置。"

@@ -155,6 +155,28 @@ invalid_dashboard="$(PATH="$TMP/status-bin:$PATH" VP_CONFIG_DIR="$TMP/dns-etc" V
   VP_TUNNEL_SERVICE=custom-tunnel sh "$ROOT/vp.sh" status)"
 printf '%s\n' "$invalid_dashboard" | grep -q '^总体状态：状态数据异常$'
 mv "$TMP/nodes-before-dashboard-check" "$TMP/dns-etc/nodes.db"
+clean_config_hash="$(sha256sum "$TMP/dns-etc/generated/mihomo.yaml" | awk '{print $1}')"
+printf '\n# syntactically-valid manual drift\n' >> "$TMP/dns-etc/generated/mihomo.yaml"
+drift_health="$(VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log" \
+  VP_LIB_DIR="$TMP/dns-usr" VP_CORE_BIN="$TMP/dns-usr/bin/mihomo" VP_SKIP_SERVICE=1 \
+  sh "$ROOT/vp.sh" health 2>&1 || true)"
+printf '%s\n' "$drift_health" | grep -q '配置语法有效但已偏离节点状态'
+VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log" \
+VP_LIB_DIR="$TMP/dns-usr" VP_CORE_BIN="$TMP/dns-usr/bin/mihomo" VP_SKIP_SERVICE=1 \
+sh "$ROOT/vp.sh" repair >/dev/null
+[ "$(sha256sum "$TMP/dns-etc/generated/mihomo.yaml" | awk '{print $1}')" = "$clean_config_hash" ]
+printf '\n# drift that must survive failed restart rollback\n' >> "$TMP/dns-etc/generated/mihomo.yaml"
+drifted_config_hash="$(sha256sum "$TMP/dns-etc/generated/mihomo.yaml" | awk '{print $1}')"
+if VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log" \
+  VP_LIB_DIR="$TMP/dns-usr" VP_CORE_BIN="$TMP/dns-usr/bin/mihomo" VP_ALLOW_TEST_HOOKS=1 \
+  VP_TEST_CORE_RESTART_FAIL=1 sh "$ROOT/vp.sh" repair >/dev/null 2>&1; then
+  printf 'repair unexpectedly succeeded despite forced restart failure\n' >&2
+  exit 1
+fi
+[ "$(sha256sum "$TMP/dns-etc/generated/mihomo.yaml" | awk '{print $1}')" = "$drifted_config_hash" ]
+VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log" \
+VP_LIB_DIR="$TMP/dns-usr" VP_CORE_BIN="$TMP/dns-usr/bin/mihomo" VP_SKIP_SERVICE=1 \
+sh "$ROOT/vp.sh" repair >/dev/null
 plain_subscription="$(VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log" \
   VP_LIB_DIR="$TMP/dns-usr" VP_PUBLIC_IPV6_OVERRIDE=2001:db8::10 sh "$ROOT/vp.sh" subscription plain)"
 [ "$(printf '%s\n' "$plain_subscription" | grep -c '^vless://')" -eq 4 ]
