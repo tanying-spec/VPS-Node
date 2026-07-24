@@ -2,7 +2,7 @@
 
 set -u
 
-VP_VERSION="0.2.0-dev.6"
+VP_VERSION="0.2.0-dev.7"
 VP_CONFIG_DIR="${VP_CONFIG_DIR:-/etc/vps-node}"
 VP_DATA_DIR="${VP_DATA_DIR:-/var/lib/vps-node}"
 VP_LOG_DIR="${VP_LOG_DIR:-/var/log/vps-node}"
@@ -990,6 +990,69 @@ resolve_node_selector() {
   awk -F'|' -v row="$selector" 'NR==row{print $2;exit}' "$VP_NODES_DB"
 }
 
+edit_node() {
+  need_root || return 1
+  target="${1:-}"
+  new_name="${2:-}"
+  requested_port="${3:-}"
+  endpoint="${4:-}"
+  new_path="${5:-}"
+  record="$(awk -F'|' -v n="$target" '$2==n{print;exit}' "$VP_NODES_DB" 2>/dev/null)"
+  [ -n "$record" ] || { error "未找到节点：$target。"; return 1; }
+  IFS='|' read -r proto old_name old_port f4 f5 f6 f7 f8 f9 <<EOF
+$record
+EOF
+  [ -n "$new_name" ] || new_name="$old_name"
+  [ -n "$requested_port" ] || requested_port="$old_port"
+  case "$new_name$endpoint$new_path" in *'|'*|*' '*|*\"*|*\'*) error "节点参数包含非法字符。"; return 1 ;; esac
+  if [ "$new_name" != "$old_name" ] && awk -F'|' -v n="$new_name" '$2==n{found=1} END{exit found?0:1}' "$VP_NODES_DB"; then
+    error "节点名称已存在：$new_name。"
+    return 1
+  fi
+  if [ "$requested_port" != "$old_port" ]; then
+    new_port="$(choose_port "$requested_port")" || { error "新端口不可用。"; return 1; }
+  else
+    new_port="$old_port"
+  fi
+  case "$proto" in
+    reality)
+      [ -n "$endpoint" ] || endpoint="$f5"
+      case "$endpoint" in *.*) ;; *) error "Reality SNI 格式无效。"; return 1 ;; esac
+      updated_record="reality|$new_name|$new_port|$f4|$endpoint|$endpoint:443|$f7|$f8|$f9"
+      ;;
+    argo)
+      [ -n "$endpoint" ] || endpoint="$f6"
+      [ -n "$new_path" ] || new_path="$f5"
+      case "$endpoint" in *.*) ;; *) error "Tunnel 公网域名格式无效。"; return 1 ;; esac
+      case "$new_path" in /*) ;; *) new_path="/$new_path" ;; esac
+      updated_record="argo|$new_name|$new_port|$f4|$new_path|$endpoint"
+      ;;
+    *) error "不支持修改的节点协议：$proto。"; return 1 ;;
+  esac
+  begin_state_transaction node-edit || return 1
+  candidate_root="$VP_TX_ACTIVE/candidate"
+  awk -F'|' -v n="$old_name" -v replacement="$updated_record" '$2==n{print replacement;next}{print}' \
+    "$candidate_root/nodes.db" > "$candidate_root/nodes.db.tmp"
+  mv "$candidate_root/nodes.db.tmp" "$candidate_root/nodes.db"
+  if [ "$new_name" != "$old_name" ]; then
+    awk -F'|' -v old="$old_name" -v new="$new_name" 'BEGIN{OFS="|"}$1==old{$1=new}{print}' \
+      "$candidate_root/credential-rotations.db" > "$candidate_root/credential-rotations.db.tmp"
+    mv "$candidate_root/credential-rotations.db.tmp" "$candidate_root/credential-rotations.db"
+  fi
+  render_mihomo_config "$candidate_root/nodes.db" "$candidate_root/generated/mihomo.yaml" "$candidate_root/credential-rotations.db"
+  if ! validate_state_candidate || ! "$VP_CORE_BIN" -t -d "$VP_CONFIG_DIR" -f "$candidate_root/generated/mihomo.yaml" >/dev/null 2>&1; then
+    abort_state_transaction; error "修改后的节点配置验证失败，未应用任何变更。"; return 1
+  fi
+  activate_state_candidate || { abort_state_transaction; return 1; }
+  if ! core_service_restart; then
+    abort_state_transaction; core_service_restart >/dev/null 2>&1 || true
+    error "修改后服务启动失败，已恢复原节点配置。"
+    return 1
+  fi
+  commit_state_transaction
+  ok "节点已更新：$old_name -> $new_name（端口 $new_port）。"
+}
+
 delete_node() {
   need_root || return 1
   target="${1:-}"
@@ -1491,10 +1554,51 @@ rotation_count() {
   esac
 }
 
+show_dashboard_summary() {
+  total_nodes="$(node_count)"
+  reality_nodes="$(awk -F'|' '$1=="reality"{n++}END{print n+0}' "$VP_NODES_DB" 2>/dev/null)"
+  argo_nodes="$(awk -F'|' '$1=="argo"{n++}END{print n+0}' "$VP_NODES_DB" 2>/dev/null)"
+  core_state="$(service_state "$VP_CORE_SERVICE")"
+  tunnel_state="$(service_state "$VP_TUNNEL_SERVICE")"
+  if [ -d "$VP_TX_ACTIVE" ]; then
+    overall="需要修复"
+    next_action="发现未完成的配置事务，请选择 5 执行健康检查与安全修复。"
+  elif [ ! -x "$VP_CORE_BIN" ]; then
+    overall="尚未安装"
+    next_action="请选择 1 创建 Reality 主节点，程序会引导安装内核。"
+  elif [ "$total_nodes" -eq 0 ]; then
+    overall="待创建节点"
+    next_action="请选择 1 创建 Reality 主节点。"
+  elif [ "$core_state" != "active" ] && [ "$core_state" != "started" ]; then
+    overall="需要修复"
+    next_action="代理内核未运行，请选择 5 检查并修复。"
+  elif [ "$reality_nodes" -eq 0 ]; then
+    overall="缺少主线路"
+    next_action="当前只有备用节点，请选择 1 创建 Reality 主节点。"
+  elif [ "$argo_nodes" -gt 0 ] && [ ! -s "$VP_TUNNEL_TOKEN_FILE" ]; then
+    overall="备用线路未完成"
+    next_action="已有 Cloudflare 备用节点但缺少 Tunnel 凭据，请选择 2 完成配置。"
+  elif [ -s "$VP_TUNNEL_TOKEN_FILE" ] && [ "$tunnel_state" != "active" ] && [ "$tunnel_state" != "started" ]; then
+    overall="主线路可用，备用异常"
+    next_action="Cloudflare 备用线路未运行，请选择 5 检查并修复。"
+  elif [ ! -s "$VP_TUNNEL_TOKEN_FILE" ]; then
+    overall="主线路已就绪"
+    next_action="可选择 2 增加 Cloudflare 备用节点，或选择 3 查看和测试节点。"
+  else
+    overall="主备线路已就绪"
+    next_action="请选择 3 查看链接或执行真实节点测试。"
+  fi
+  printf '总体状态：%s\n' "$overall"
+  printf '节点组成：Reality %s 个 / Cloudflare 备用 %s 个\n' "$reality_nodes" "$argo_nodes"
+  printf '下一步：%s\n' "$next_action"
+  printf '%s\n' '----------------------------------------'
+}
+
 show_status() {
   memory_snapshot
   printf '\nVPS-Node %s\n' "$VP_VERSION"
   printf '%s\n' '----------------------------------------'
+  show_dashboard_summary
   printf '代理核心：%s\n' "$(service_state "$VP_CORE_SERVICE")"
   printf 'Cloudflare Tunnel：%s\n' "$(service_state vps-node-tunnel)"
   printf '节点数量：%s\n' "$(node_count)"
@@ -1914,18 +2018,34 @@ interactive_node_action() {
   [ -n "$selector" ] || return 0
   target="$(resolve_node_selector "$selector")"
   [ -n "$target" ] || { error "未找到节点：$selector。"; return 1; }
-  printf '1. 显示链接\n2. 端到端测试\n3. 轮换凭据\n4. 完成凭据切换\n5. 删除节点\n0. 返回\n请选择：'
+  printf '1. 显示链接\n2. 端到端测试\n3. 修改节点\n4. 轮换凭据\n5. 完成凭据切换\n6. 删除节点\n0. 返回\n请选择：'
   read -r action || true
   case "$action" in
     1) show_node_link "$target" ;;
     2) test_node_end_to_end "$target" ;;
     3)
+      record="$(awk -F'|' -v n="$target" '$2==n{print;exit}' "$VP_NODES_DB")"
+      IFS='|' read -r proto old_name old_port f4 f5 f6 rest <<EOF
+$record
+EOF
+      printf '新名称（默认 %s）：' "$old_name"; read -r new_name || true
+      printf '新端口（默认 %s）：' "$old_port"; read -r new_port || true
+      if [ "$proto" = reality ]; then
+        printf '新 Reality SNI（默认 %s）：' "$f5"; read -r endpoint || true
+        edit_node "$target" "${new_name:-$old_name}" "${new_port:-$old_port}" "${endpoint:-$f5}"
+      else
+        printf '新 Tunnel 公网域名（默认 %s）：' "$f6"; read -r endpoint || true
+        printf '新 WebSocket 路径（默认 %s）：' "$f5"; read -r path || true
+        edit_node "$target" "${new_name:-$old_name}" "${new_port:-$old_port}" "${endpoint:-$f6}" "${path:-$f5}"
+      fi
+      ;;
+    4)
       printf '新旧凭据并存小时数（默认 24）：'
       read -r hours || true
       rotate_credential "$target" "${hours:-24}"
       ;;
-    4) finalize_rotation "$target" ;;
-    5) VP_DELETE_CONFIRM=DELETE delete_node "$target" ;;
+    5) finalize_rotation "$target" ;;
+    6) delete_node "$target" ;;
     0) return 0 ;;
     *) warn "无效选择。" ;;
   esac
@@ -2018,6 +2138,7 @@ case "${1:-}" in
   argo-add|add-argo) shift; argo_add "$@" ;;
   nodes|list) show_nodes ;;
   delete|remove) shift; delete_node "$@" ;;
+  edit|edit-node) shift; edit_node "$@" ;;
   link) shift; show_node_link "$@" ;;
   test-node|test) shift; test_node_end_to_end "$@" ;;
   rotate|rotate-credential) shift; rotate_credential "$@" ;;
@@ -2039,7 +2160,7 @@ case "${1:-}" in
   uninstall) shift; uninstall_project "$@" ;;
   debug-tx) shift; debug_transaction "$@" ;;
   help|-h|--help)
-    printf '用法：vp [status|doctor|health|repair|optimize|maintain|update|rollback|init|core-install|reality-add|tunnel-install|argo-add|nodes|delete|link|test-node|rotate|rotations|rotate-finalize|backup|restore|uninstall|version]\n'
+    printf '用法：vp [status|doctor|health|repair|optimize|maintain|update|rollback|init|core-install|reality-add|tunnel-install|argo-add|nodes|edit|delete|link|test-node|rotate|rotations|rotate-finalize|backup|restore|uninstall|version]\n'
     ;;
   '') menu ;;
   *) error "未知命令：$1"; exit 2 ;;

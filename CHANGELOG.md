@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.0-dev.7
+
+- Added an outcome-first home dashboard with overall readiness, node composition and a numbered next-step recommendation.
+- Added transactional Reality and Argo node editing for names, ports and public endpoints, including rollback when validation or restart fails.
+- Added an explicit edit entry to the numbered node-management menu; deletion once again requires typed confirmation.
+
 ## 0.2.0-dev.6
 
 - Added `vp uninstall --dry-run` to preview every service and path affected by uninstall.
