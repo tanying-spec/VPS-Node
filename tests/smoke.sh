@@ -580,6 +580,14 @@ run_network_status() {
   VP_CURL_BIN="$adaptive_curl" VP_SKIP_SERVICE=1 \
   sh "$ROOT/vp.sh" network 2>&1
 }
+run_network_dashboard() {
+  PATH="$TMP/status-bin:$PATH" VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log" \
+  VP_LIB_DIR="$TMP/dns-usr" VP_CORE_BIN="$TMP/dns-usr/bin/mihomo" \
+  VP_CORE_SERVICE=custom-core VP_TUNNEL_SERVICE=custom-tunnel \
+  VP_SYSCTL_BIN="$fake_sysctl" VP_FAKE_SYSCTL_STATE="$sysctl_state" \
+  VP_SYSCTL_CONFIG="$network_config" VP_NETWORK_SNAPSHOT="$network_snapshot" \
+  VP_CURL_BIN="$adaptive_curl" sh "$ROOT/vp.sh" status 2>&1
+}
 printf '%s\n' "$(run_network_status)" | grep -q 'VPS-Node 已验证优化：未应用'
 VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log" \
 VP_LIB_DIR="$TMP/dns-usr" VP_CORE_BIN="$TMP/dns-usr/bin/mihomo" \
@@ -673,17 +681,24 @@ grep -q '^QDISC=fq$' "$sysctl_state"
 [ -s "$network_snapshot" ]
 active_network_status="$(run_network_status)"
 printf '%s\n' "$active_network_status" | grep -q 'VPS-Node 已验证优化：已应用且运行一致（bbr / fq）'
+mkdir -p "$TMP/dns-etc/secrets"
+printf 'dashboard-network-token\n' > "$TMP/dns-etc/secrets/cloudflared.token"
 dashboard_network_status="$(VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log" \
   VP_LIB_DIR="$TMP/dns-usr" VP_SYSCTL_BIN="$fake_sysctl" VP_FAKE_SYSCTL_STATE="$sysctl_state" \
   VP_SYSCTL_CONFIG="$network_config" VP_NETWORK_SNAPSHOT="$network_snapshot" \
   VP_CURL_BIN="$adaptive_curl" VP_SKIP_SERVICE=1 sh "$ROOT/vp.sh" status 2>&1)"
 printf '%s\n' "$dashboard_network_status" | grep -q '网络验证优化：已应用且运行一致（bbr / fq）'
+active_network_dashboard="$(run_network_dashboard)"
+! printf '%s\n' "$active_network_dashboard" | grep -q '^总体状态：网络'
 
 printf 'CC=cubic\nQDISC=fq\n' > "$sysctl_state"
 drift_network_status="$(run_network_status)"
 printf '%s\n' "$drift_network_status" | grep -q 'VPS-Node 已验证优化：运行时漂移'
 printf '%s\n' "$drift_network_status" | grep -q '持久化目标：bbr / fq'
 printf '%s\n' "$drift_network_status" | grep -q '实时参数：cubic / fq'
+drift_network_dashboard="$(run_network_dashboard)"
+printf '%s\n' "$drift_network_dashboard" | grep -q '^总体状态：网络优化参数漂移$'
+printf '%s\n' "$drift_network_dashboard" | grep -q '下一步：先选择 4 → 2.*选择 4 → 5.*选择 4 → 6'
 repair_config_hash="$(sha256sum "$network_config" | awk '{print $1}')"
 repair_snapshot_hash="$(sha256sum "$network_snapshot" | awk '{print $1}')"
 cancelled_network_repair="$(VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log" \
@@ -721,6 +736,9 @@ grep -q '^QDISC=fq$' "$sysctl_state"
 
 printf '# external network task\nnet.ipv4.tcp_congestion_control=bbr\nnet.core.default_qdisc=fq\n' > "$network_config"
 printf '%s\n' "$(run_network_status)" | grep -q 'VPS-Node 已验证优化：持久化记录异常'
+invalid_network_dashboard="$(run_network_dashboard)"
+printf '%s\n' "$invalid_network_dashboard" | grep -q '^总体状态：网络优化记录异常$'
+printf '%s\n' "$invalid_network_dashboard" | grep -q '下一步：选择 4 → 2.*选择 5 → 3'
 printf '# Managed by VPS-Node after verified before/after benchmark\nnet.ipv4.tcp_congestion_control=bbr\n' > "$network_config"
 printf '%s\n' "$(run_network_status)" | grep -q 'VPS-Node 已验证优化：持久化记录异常'
 if VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log" \
@@ -748,12 +766,19 @@ printf '%s\n' "$(run_network_status)" | grep -q 'VPS-Node 已验证优化：持�
 printf '# Managed by VPS-Node after verified before/after benchmark\nnet.ipv4.tcp_congestion_control=bbr\nnet.core.default_qdisc=fq\n' > "$network_config"
 rm -f "$network_config"
 printf '%s\n' "$(run_network_status)" | grep -q 'VPS-Node 已验证优化：仅有回滚记录'
+orphan_snapshot_dashboard="$(run_network_dashboard)"
+printf '%s\n' "$orphan_snapshot_dashboard" | grep -q '^总体状态：网络回滚记录孤立$'
+printf '%s\n' "$orphan_snapshot_dashboard" | grep -q '下一步：选择 4 → 2'
 printf '# Managed by VPS-Node after verified before/after benchmark\nnet.ipv4.tcp_congestion_control=bbr\nnet.core.default_qdisc=fq\n' > "$network_config"
 rm -f "$network_snapshot"
 printf '%s\n' "$(run_network_status)" | grep -q 'VPS-Node 已验证优化：仅有持久化配置'
+orphan_config_dashboard="$(run_network_dashboard)"
+printf '%s\n' "$orphan_config_dashboard" | grep -q '^总体状态：网络配置缺少回滚点$'
+printf '%s\n' "$orphan_config_dashboard" | grep -q '下一步：选择 4 → 2.*选择 5 → 3'
 printf 'BEFORE_CC=cubic\nBEFORE_QDISC=pfifo_fast\n' > "$network_snapshot"
 printf 'CC=bbr\nQDISC=fq\n' > "$sysctl_state"
 printf '%s\n' "$(run_network_status)" | grep -q 'VPS-Node 已验证优化：已应用且运行一致（bbr / fq）'
+rm -f "$TMP/dns-etc/secrets/cloudflared.token"
 network_config_hash_before_cancel="$(sha256sum "$network_config" | awk '{print $1}')"
 network_snapshot_hash_before_cancel="$(sha256sum "$network_snapshot" | awk '{print $1}')"
 cancelled_network_rollback="$(VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log" \

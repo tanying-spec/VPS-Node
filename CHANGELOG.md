@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.0-dev.84
+
+- The dashboard's overall verdict now consumes the same network consistency inspection used by `vp network` and the applied-optimization summary.
+- Invalid persistence, an orphan configuration, an orphan rollback snapshot and live runtime drift each receive a distinct top-level status instead of being hidden by a generic ready verdict.
+- Every anomaly provides an exact numbered menu path to inspect, repair, roll back or export a redacted diagnostic report.
+- Core installation, corrupt node data and unavailable primary/backup services retain higher priority, while healthy or unapplied networking does not create false dashboard warnings.
+- Regression tests prove all network anomaly-to-dashboard mappings and the healthy-state non-warning case.
+
 ## 0.2.0-dev.83
 
 - Persistent network configuration now requires the exact VPS-Node ownership marker, exactly one congestion-control field, exactly one qdisc field and no unknown content.

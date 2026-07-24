@@ -2,7 +2,7 @@
 
 set -u
 
-VP_VERSION="0.2.0-dev.83"
+VP_VERSION="0.2.0-dev.84"
 VP_CONFIG_DIR="${VP_CONFIG_DIR:-/etc/vps-node}"
 VP_DATA_DIR="${VP_DATA_DIR:-/var/lib/vps-node}"
 VP_LOG_DIR="${VP_LOG_DIR:-/var/log/vps-node}"
@@ -4268,6 +4268,7 @@ show_dashboard_summary() {
   tunnel_state="$(service_state "$VP_TUNNEL_SERVICE")"
   active_rotations="$(rotation_count active)"
   expired_rotations="$(rotation_count expired)"
+  inspect_network_optimization
   if [ -d "$VP_TX_ACTIVE" ]; then
     overall="需要修复"
     next_action="发现未完成的配置事务，请依次选择 5 → 2（安全修复并复检）。"
@@ -4294,6 +4295,18 @@ show_dashboard_summary() {
        [ "$tunnel_state" != "active" ] && [ "$tunnel_state" != "started" ]; then
     overall="主线路可用，备用异常"
     next_action="Cloudflare 备用线路未运行，请依次选择 5 → 2（安全修复并复检）。"
+  elif [ "$NETWORK_OPT_STATE" = persistence-invalid ]; then
+    overall="网络优化记录异常"
+    next_action="选择 4 → 2 查看详情；再选择 5 → 3 导出脱敏诊断。不要直接覆盖或删除无法确认归属的文件。"
+  elif [ "$NETWORK_OPT_STATE" = orphan-config ]; then
+    overall="网络配置缺少回滚点"
+    next_action="选择 4 → 2 查看详情；当前不能安全自动修复或回滚，请先选择 5 → 3 导出脱敏诊断。"
+  elif [ "$NETWORK_OPT_STATE" = orphan-snapshot ]; then
+    overall="网络回滚记录孤立"
+    next_action="选择 4 → 2 查看详情；确认上次操作是否中断，不要在未核对实时参数前删除回滚记录。"
+  elif [ "$NETWORK_OPT_STATE" = runtime-drift ]; then
+    overall="网络优化参数漂移"
+    next_action="先选择 4 → 2 核对目标与实时值；确认恢复已验证目标请选择 4 → 5，撤销优化请选择 4 → 6。"
   elif [ "$expired_rotations" -gt 0 ]; then
     overall="凭据轮换已到期"
     next_action="有 $expired_rotations 个旧凭据等待移除：选择 3 → 选择节点 → 5，再输入 FINALIZE。"
