@@ -20,13 +20,13 @@ Windows 远程编排入口 `tests/run_authorized_host.ps1` 同样将主机和端
 | Alpine/OpenRC 服务生命周期 | `tests/isolated_acceptance.sh` | 待唯一测试机执行 |
 | 正式 Mihomo/cloudflared 前后不变 | 状态及配置/init 哈希对比 | 待唯一测试机执行 |
 | 64–2048 MiB 真实 Mihomo 档位 | 十五个 cgroup v2 硬上限覆盖 96/160/320/640 MiB 边界前后、十五次真实内核启动、代理出口、每档 4×1 MiB 并发完整传输、`memory.peak`、零 `oom_kill`、结构化证据（不可绕过主机锁） | 待唯一测试机执行 |
-| 真实 CPU quota 档位 | cgroup v2 中生成配置并运行真实内核；0.5/0.999/1 核必测，按真实在线核数扩展至 1.001/1.5/2/2.001/4 核；并发传输与 `cpu.stat` 结构化证据 | 待唯一测试机执行 |
+| 真实 CPU quota 档位 | cgroup v2 中生成配置并运行真实内核；0.5/0.999/1 核必测，按真实在线核数扩展至 1.001/1.5/2/2.001/4 核；饱和工作线程与四路传输并发，低于宿主容量时强制要求真实 `nr_throttled>0` | 待唯一测试机执行 |
 | Cloudflare Tunnel 独立公网入口 | 需要独立测试 Tunnel 凭据和域名 | 尚缺当前版本证据 |
 | IPv6 Reality 外部可达性 | 需要测试机公网 IPv6 与外部复核 | 尚缺当前版本证据 |
 
 ## 历史结果的处理
 
-早期开发阶段曾记录 Reality/VLESS-WS、Cloudflare Tunnel、4×10 MiB 压力和约 16 MiB/s Tunnel 吞吐结果。这些结果可以作为设计参考，但不是 `0.2.0-dev.44` 当前代码的验收证据，因此不用于宣称当前版本已通过。
+早期开发阶段曾记录 Reality/VLESS-WS、Cloudflare Tunnel、4×10 MiB 压力和约 16 MiB/s Tunnel 吞吐结果。这些结果可以作为设计参考，但不是 `0.2.0-dev.45` 当前代码的验收证据，因此不用于宣称当前版本已通过。
 
 旧的 `system_argo_test.sh` 和 `system_pressure_test.sh` 会正式安装管理脚本并停止已有服务，不符合“隔离且正式服务前后不变”的硬约束，已删除。后续实机证据只能由锁定主机的隔离验收入口产生。
 

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.0-dev.45
+
+- Every real CPU quota profile now runs a bounded multi-worker saturation load concurrently with the four-client Mihomo transfer.
+- Quotas below the host's actual online CPU capacity must produce at least one real `cpu.stat` throttling event; merely reading back `cpu.max` no longer counts as proof of enforcement.
+- CPU evidence records whether throttling is required and the observed event count, while summary totals prove every profile received a saturation check.
+- Offline evidence tests reject a re-signed quota row that claims throttling is required but records zero events.
+
 ## 0.2.0-dev.44
 
 - Added real cgroup v2 CPU quota acceptance with both configuration generation and the real Mihomo process executed inside the same isolated quota.

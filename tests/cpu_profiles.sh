@@ -9,6 +9,7 @@ ACCEPT_HOST="134.209.180.134"
 TMP="$(mktemp -d /tmp/vps-node-cpu.XXXXXX)"
 CGROUP_BASE="/sys/fs/cgroup/vps-node-cpu-$$"
 ACTIVE_PID=""
+ACTIVE_LOAD_PID=""
 ACTIVE_CGROUP=""
 
 file_digest() { [ -f "$1" ] && sha256sum "$1" | awk '{print $1}' || printf absent; }
@@ -17,6 +18,7 @@ process_ids() {
   printf '%s' "${ids:-none}"
 }
 cleanup_case() {
+  if [ -n "$ACTIVE_LOAD_PID" ]; then kill "$ACTIVE_LOAD_PID" >/dev/null 2>&1 || true; wait "$ACTIVE_LOAD_PID" 2>/dev/null || true; ACTIVE_LOAD_PID=""; fi
   if [ -n "$ACTIVE_PID" ]; then kill "$ACTIVE_PID" >/dev/null 2>&1 || true; wait "$ACTIVE_PID" 2>/dev/null || true; ACTIVE_PID=""; fi
   if [ -n "$ACTIVE_CGROUP" ] && [ -d "$ACTIVE_CGROUP" ]; then
     [ -w "$ACTIVE_CGROUP/cgroup.kill" ] && printf '1\n' > "$ACTIVE_CGROUP/cgroup.kill" 2>/dev/null || true
@@ -66,7 +68,7 @@ formal_mihomo_binary_before="$(file_digest "$MIHOMO_BIN")"
 mkdir -p "$EVIDENCE_DIR"
 csv_file="$EVIDENCE_DIR/cpu-profiles.csv"
 summary_file="$EVIDENCE_DIR/cpu-profiles-summary.txt"
-printf 'quota_milli,effective_count,gomaxprocs,gogc,profile,proxy_result,concurrent_success,total_bytes,throttled_events\n' > "$csv_file"
+printf 'quota_milli,effective_count,gomaxprocs,gogc,profile,proxy_result,concurrent_success,total_bytes,throttling_required,throttled_events\n' > "$csv_file"
 
 profile_count=0
 tested_quotas=""
@@ -125,6 +127,11 @@ EOF
     attempts=$((attempts + 1))
   done
   [ "$proxy_result" = "$ACCEPT_HOST" ]
+  load_workers=$((expected_effective + 1))
+  [ "$load_workers" -le 5 ] || load_workers=5
+  sh -c 'printf "%s\n" "$$" > "$1/cgroup.procs"; workers=$2; worker=0; while [ "$worker" -lt "$workers" ]; do awk '\''BEGIN{end=systime()+4;while(systime()<end){for(i=0;i<100000;i++)x+=i}}'\'' & worker=$((worker+1)); done; wait' \
+    sh "$ACTIVE_CGROUP" "$load_workers" >/dev/null 2>&1 &
+  ACTIVE_LOAD_PID=$!
   transfer_pids=""
   transfer_index=1
   while [ "$transfer_index" -le 4 ]; do
@@ -137,12 +144,19 @@ EOF
   for transfer_pid in $transfer_pids; do if wait "$transfer_pid"; then concurrent_success=$((concurrent_success + 1)); fi; done
   total_bytes="$(wc -c "$case_dir"/payload-*.bin | awk 'END{print $1}')"
   [ "$concurrent_success" -eq 4 ] && [ "$total_bytes" -eq 4194304 ]
+  wait "$ACTIVE_LOAD_PID"
+  ACTIVE_LOAD_PID=""
   kill -0 "$ACTIVE_PID" 2>/dev/null
   throttled_events="$(awk '$1=="nr_throttled"{print $2;exit}' "$ACTIVE_CGROUP/cpu.stat")"
   case "${throttled_events:-0}" in *[!0-9]*) exit 1 ;; esac
-  printf '%s,%s,%s,%s,%s,passed,%s,%s,%s\n' \
+  throttling_required=no
+  if [ "$quota_milli" -lt $((host_cpus * 1000)) ]; then
+    throttling_required=yes
+    [ "${throttled_events:-0}" -gt 0 ] || { printf 'cpu quota did not produce throttling at %s milli-CPU\n' "$quota_milli" >&2; exit 1; }
+  fi
+  printf '%s,%s,%s,%s,%s,passed,%s,%s,%s,%s\n' \
     "$quota_milli" "$effective_count" "$gomaxprocs" "$gogc" "$profile" \
-    "$concurrent_success" "$total_bytes" "${throttled_events:-0}" >> "$csv_file"
+    "$concurrent_success" "$total_bytes" "$throttling_required" "${throttled_events:-0}" >> "$csv_file"
   tested_quotas="${tested_quotas}${tested_quotas:+,}$quota_milli"
   profile_count=$((profile_count + 1))
   cleanup_case
@@ -170,6 +184,7 @@ done
   printf 'profile_count=%s\n' "$profile_count"
   printf 'real_core_startups=%s\n' "$profile_count"
   printf 'concurrent_transfer_checks=%s\n' $((profile_count * 4))
+  printf 'saturated_quota_checks=%s\n' "$profile_count"
   printf 'verified_transfer_bytes=%s\n' $((profile_count * 4194304))
   printf 'formal_services_and_sensitive_state_unchanged=yes\n'
 } > "$summary_file"

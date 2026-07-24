@@ -234,10 +234,14 @@ function Assert-CpuEvidence([string]$Directory) {
         if ([int]$row.gogc -ne $expectedGogc -or $row.profile -ne $expectedProfile) { throw "CPU runtime profile failed at row $index." }
         if ($row.proxy_result -ne 'passed' -or [int]$row.concurrent_success -ne 4 -or [int64]$row.total_bytes -ne 4194304) { throw "CPU runtime transfer failed at row $index." }
         if ([int64]$row.throttled_events -lt 0) { throw "CPU throttling evidence is invalid at row $index." }
+        $throttlingRequired = $quota -lt ($hostCpus * 1000)
+        if ($row.throttling_required -ne $(if ($throttlingRequired) { 'yes' } else { 'no' })) { throw "CPU throttling requirement is wrong at row $index." }
+        if ($throttlingRequired -and [int64]$row.throttled_events -lt 1) { throw "CPU quota was not proven to throttle at row $index." }
     }
     $expectedCount = $expectedQuotas.Count
     if ([int]$summary.profile_count -ne $expectedCount -or [int]$summary.real_core_startups -ne $expectedCount -or
-        [int]$summary.concurrent_transfer_checks -ne ($expectedCount * 4) -or [int64]$summary.verified_transfer_bytes -ne ($expectedCount * 4194304)) {
+        [int]$summary.concurrent_transfer_checks -ne ($expectedCount * 4) -or [int]$summary.saturated_quota_checks -ne $expectedCount -or
+        [int64]$summary.verified_transfer_bytes -ne ($expectedCount * 4194304)) {
         throw 'CPU evidence summary totals do not match the quota rows.'
     }
 }
@@ -456,20 +460,21 @@ if ($SelfTestEvidence) {
             'profile_count=8',
             'real_core_startups=8',
             'concurrent_transfer_checks=32',
+            'saturated_quota_checks=8',
             'verified_transfer_bytes=33554432',
             'formal_services_and_sensitive_state_unchanged=yes'
         ) | Set-Content -LiteralPath $cpuSummary -Encoding ascii
         $cpuCsv = Join-Path $selfTestDirectory 'cpu-profiles.csv'
         $validCpuRows = @(
-            'quota_milli,effective_count,gomaxprocs,gogc,profile,proxy_result,concurrent_success,total_bytes,throttled_events',
-            '500,1,1,120,performance-cpu-limited,passed,4,4194304,3',
-            '999,1,1,120,performance-cpu-limited,passed,4,4194304,2',
-            '1000,1,1,100,performance,passed,4,4194304,0',
-            '1001,2,2,100,performance,passed,4,4194304,1',
-            '1500,2,2,100,performance,passed,4,4194304,1',
-            '2000,2,2,100,performance,passed,4,4194304,0',
-            '2001,3,3,100,performance,passed,4,4194304,1',
-            '4000,4,4,100,performance,passed,4,4194304,0'
+            'quota_milli,effective_count,gomaxprocs,gogc,profile,proxy_result,concurrent_success,total_bytes,throttling_required,throttled_events',
+            '500,1,1,120,performance-cpu-limited,passed,4,4194304,yes,3',
+            '999,1,1,120,performance-cpu-limited,passed,4,4194304,yes,2',
+            '1000,1,1,100,performance,passed,4,4194304,yes,2',
+            '1001,2,2,100,performance,passed,4,4194304,yes,1',
+            '1500,2,2,100,performance,passed,4,4194304,yes,1',
+            '2000,2,2,100,performance,passed,4,4194304,yes,1',
+            '2001,3,3,100,performance,passed,4,4194304,yes,1',
+            '4000,4,4,100,performance,passed,4,4194304,no,0'
         )
         $validCpuRows | Set-Content -LiteralPath $cpuCsv -Encoding ascii
         foreach ($cpuFile in @($cpuSummary, $cpuCsv)) {
@@ -486,6 +491,13 @@ if ($SelfTestEvidence) {
         $cpuQuotaRejected = $false
         try { Assert-CpuEvidence $selfTestDirectory } catch { $cpuQuotaRejected = $true }
         if (-not $cpuQuotaRejected) { throw 'Evidence self-test failed to reject an incorrect CPU quota transition.' }
+        $validCpuRows -replace '^1500,2,2,100,performance,passed,4,4194304,yes,1$', '1500,2,2,100,performance,passed,4,4194304,yes,0' | Set-Content -LiteralPath $cpuCsv -Encoding ascii
+        $cpuHash = (Get-FileHash -LiteralPath $cpuCsv -Algorithm SHA256).Hash.ToLowerInvariant()
+        "$cpuHash  cpu-profiles.csv" | Set-Content -LiteralPath "$cpuCsv.sha256" -Encoding ascii
+        Assert-EvidenceChecksums $selfTestDirectory
+        $cpuThrottleRejected = $false
+        try { Assert-CpuEvidence $selfTestDirectory } catch { $cpuThrottleRejected = $true }
+        if (-not $cpuThrottleRejected) { throw 'Evidence self-test failed to reject a quota without required throttling.' }
         Write-Host 'Acceptance, memory, CPU and preflight verification self-test passed; no network connection was attempted.'
         return
     }

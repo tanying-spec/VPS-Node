@@ -59,6 +59,7 @@ jobs:
           grep -Fq 'verified_transfer_bytes=' tests/memory_profiles.sh
           grep -Fq 'cpu.max' tests/cpu_profiles.sh
           grep -Fq 'nr_throttled' tests/cpu_profiles.sh
+          grep -Fq 'saturated_quota_checks=' tests/cpu_profiles.sh
           grep -Fq 'VP_CPU_EVIDENCE_DIR=' tests/run_authorized_host.ps1
           ! grep -Eqi 'sshpass|plink|PreferredAuthentications=password|PasswordAuthentication=yes' tests/run_authorized_host.ps1
           ! grep -Eq '(^|[^A-Za-z])TunnelToken[[:space:]]*=' tests/run_authorized_host.ps1
