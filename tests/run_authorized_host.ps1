@@ -161,6 +161,8 @@ function Assert-MemoryEvidence([string]$Directory) {
         real_core_startups = '8'
         functional_proxy_checks = '8'
         traffic_survival_checks = '8'
+        concurrent_transfer_checks = '32'
+        verified_transfer_bytes = '33554432'
         oom_kill_total = '0'
         formal_services_and_sensitive_state_unchanged = 'yes'
     }
@@ -185,6 +187,7 @@ function Assert-MemoryEvidence([string]$Directory) {
         $peak = [int]$row.peak_mib
         if ($peak -lt 1 -or $peak -gt $limits[$index]) { throw "Invalid observed memory peak at row $index." }
         if ([int]$row.oom_kill -ne 0 -or $row.proxy_result -ne 'passed') { throw "Memory profile runtime failed at row $index." }
+        if ([int]$row.concurrent_success -ne 4 -or [int64]$row.total_bytes -ne 4194304) { throw "Memory profile concurrency failed at row $index." }
         if ($peak -gt $maximumPeak) { $maximumPeak = $peak }
     }
     if (-not $summary.ContainsKey('max_observed_peak_mib') -or [int]$summary.max_observed_peak_mib -ne $maximumPeak) {
@@ -276,22 +279,25 @@ if ($SelfTestEvidence) {
             'real_core_startups=8',
             'functional_proxy_checks=8',
             'traffic_survival_checks=8',
+            'concurrent_transfer_checks=32',
+            'verified_transfer_bytes=33554432',
             'oom_kill_total=0',
             'max_observed_peak_mib=48',
             'formal_services_and_sensitive_state_unchanged=yes'
         ) | Set-Content -LiteralPath $memorySummary -Encoding ascii
         $memoryCsv = Join-Path $selfTestDirectory 'memory-profiles.csv'
-        @(
-            'limit_mib,budget_mib,profile,gomemlimit,gogc,gomaxprocs,peak_mib,oom_kill,proxy_result',
-            '64,38,ultra-compact,38MiB,50,1,31,0,passed',
-            '96,57,ultra-compact,57MiB,50,1,32,0,passed',
-            '128,76,compact,76MiB,60,1,33,0,passed',
-            '192,115,balanced,115MiB,80,2,35,0,passed',
-            '256,153,balanced,153MiB,80,2,36,0,passed',
-            '512,307,standard,307MiB,100,2,40,0,passed',
-            '1024,512,performance,512MiB,100,4,45,0,passed',
-            '2048,512,performance,512MiB,100,4,48,0,passed'
-        ) | Set-Content -LiteralPath $memoryCsv -Encoding ascii
+        $validMemoryRows = @(
+            'limit_mib,budget_mib,profile,gomemlimit,gogc,gomaxprocs,peak_mib,oom_kill,proxy_result,concurrent_success,total_bytes',
+            '64,38,ultra-compact,38MiB,50,1,31,0,passed,4,4194304',
+            '96,57,ultra-compact,57MiB,50,1,32,0,passed,4,4194304',
+            '128,76,compact,76MiB,60,1,33,0,passed,4,4194304',
+            '192,115,balanced,115MiB,80,2,35,0,passed,4,4194304',
+            '256,153,balanced,153MiB,80,2,36,0,passed,4,4194304',
+            '512,307,standard,307MiB,100,2,40,0,passed,4,4194304',
+            '1024,512,performance,512MiB,100,4,45,0,passed,4,4194304',
+            '2048,512,performance,512MiB,100,4,48,0,passed,4,4194304'
+        )
+        $validMemoryRows | Set-Content -LiteralPath $memoryCsv -Encoding ascii
         foreach ($memoryFile in @($memorySummary, $memoryCsv)) {
             $memoryHash = (Get-FileHash -LiteralPath $memoryFile -Algorithm SHA256).Hash.ToLowerInvariant()
             $memoryName = [IO.Path]::GetFileName($memoryFile)
@@ -299,13 +305,21 @@ if ($SelfTestEvidence) {
         }
         Assert-EvidenceChecksums $selfTestDirectory
         Assert-MemoryEvidence $selfTestDirectory
-        (Get-Content -LiteralPath $memoryCsv) -replace ',0,passed$', ',1,passed' | Set-Content -LiteralPath $memoryCsv -Encoding ascii
+        (Get-Content -LiteralPath $memoryCsv) -replace ',0,passed,4,4194304$', ',1,passed,4,4194304' | Set-Content -LiteralPath $memoryCsv -Encoding ascii
         $memoryHash = (Get-FileHash -LiteralPath $memoryCsv -Algorithm SHA256).Hash.ToLowerInvariant()
         "$memoryHash  memory-profiles.csv" | Set-Content -LiteralPath "$memoryCsv.sha256" -Encoding ascii
         Assert-EvidenceChecksums $selfTestDirectory
         $memoryMetadataRejected = $false
         try { Assert-MemoryEvidence $selfTestDirectory } catch { $memoryMetadataRejected = $true }
         if (-not $memoryMetadataRejected) { throw 'Evidence self-test failed to reject a memory profile reporting an OOM kill.' }
+
+        $validMemoryRows -replace ',4,4194304$', ',4,4194303' | Set-Content -LiteralPath $memoryCsv -Encoding ascii
+        $memoryHash = (Get-FileHash -LiteralPath $memoryCsv -Algorithm SHA256).Hash.ToLowerInvariant()
+        "$memoryHash  memory-profiles.csv" | Set-Content -LiteralPath "$memoryCsv.sha256" -Encoding ascii
+        Assert-EvidenceChecksums $selfTestDirectory
+        $truncatedTransferRejected = $false
+        try { Assert-MemoryEvidence $selfTestDirectory } catch { $truncatedTransferRejected = $true }
+        if (-not $truncatedTransferRejected) { throw 'Evidence self-test failed to reject truncated concurrent transfers.' }
         Write-Host 'Acceptance and memory evidence verification self-test passed; no network connection was attempted.'
         return
     }

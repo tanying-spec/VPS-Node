@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.0-dev.41
+
+- Each enforced memory profile now runs four simultaneous 1 MiB downloads through the isolated real Mihomo process rather than a single transfer.
+- Acceptance requires all four clients to succeed, verifies exactly 4 MiB per profile and 32 MiB across the eight-profile matrix, then confirms the core remains alive with zero OOM.
+- Structured memory evidence records per-row concurrency and byte counts; local semantic verification rejects missing clients, truncated transfers and re-signed OOM results.
+
 ## 0.2.0-dev.40
 
 - Replaced configuration-only memory profile checks with eight real Mihomo runs under isolated cgroup v2 hard limits from 64 through 2048 MiB.

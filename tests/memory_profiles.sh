@@ -90,7 +90,7 @@ formal_mihomo_binary_before="$(file_digest "$MIHOMO_BIN")"
 mkdir -p "$EVIDENCE_DIR"
 csv_file="$EVIDENCE_DIR/memory-profiles.csv"
 summary_file="$EVIDENCE_DIR/memory-profiles-summary.txt"
-printf 'limit_mib,budget_mib,profile,gomemlimit,gogc,gomaxprocs,peak_mib,oom_kill,proxy_result\n' > "$csv_file"
+printf 'limit_mib,budget_mib,profile,gomemlimit,gogc,gomaxprocs,peak_mib,oom_kill,proxy_result,concurrent_success,total_bytes\n' > "$csv_file"
 
 previous_budget=0
 profile_count=0
@@ -152,7 +152,21 @@ EOF
     attempts=$((attempts + 1))
   done
   [ "$proxy_result" = "$ACCEPT_HOST" ] || { printf 'proxy verification failed in %s MiB cgroup\n' "$limit_mib" >&2; exit 1; }
-  curl -4 -fsS --max-time 15 --proxy "http://127.0.0.1:$port" 'https://speed.cloudflare.com/__down?bytes=1048576' >/dev/null
+  transfer_pids=""
+  transfer_index=1
+  while [ "$transfer_index" -le 4 ]; do
+    curl -4 -fsS --max-time 20 --proxy "http://127.0.0.1:$port" \
+      'https://speed.cloudflare.com/__down?bytes=1048576' > "$case_dir/payload-$transfer_index.bin" &
+    transfer_pids="$transfer_pids $!"
+    transfer_index=$((transfer_index + 1))
+  done
+  concurrent_success=0
+  for transfer_pid in $transfer_pids; do
+    if wait "$transfer_pid"; then concurrent_success=$((concurrent_success + 1)); fi
+  done
+  [ "$concurrent_success" -eq 4 ]
+  total_bytes="$(wc -c "$case_dir"/payload-*.bin | awk 'END{print $1}')"
+  [ "$total_bytes" -eq 4194304 ]
   kill -0 "$ACTIVE_PID" 2>/dev/null || { printf 'mihomo did not survive traffic in %s MiB cgroup\n' "$limit_mib" >&2; exit 1; }
 
   peak_bytes="$(cat "$ACTIVE_CGROUP/memory.peak" 2>/dev/null || cat "$ACTIVE_CGROUP/memory.current")"
@@ -161,8 +175,9 @@ EOF
   [ "${oom_kill:-0}" -eq 0 ]
   [ "$peak_mib" -gt 0 ] && [ "$peak_mib" -le "$limit_mib" ]
   [ "$peak_mib" -le "$max_peak_mib" ] || max_peak_mib="$peak_mib"
-  printf '%s,%s,%s,%s,%s,%s,%s,%s,passed\n' \
-    "$limit_mib" "$budget" "$profile" "$gomemlimit" "$gogc" "$gomaxprocs" "$peak_mib" "${oom_kill:-0}" >> "$csv_file"
+  printf '%s,%s,%s,%s,%s,%s,%s,%s,passed,%s,%s\n' \
+    "$limit_mib" "$budget" "$profile" "$gomemlimit" "$gogc" "$gomaxprocs" "$peak_mib" "${oom_kill:-0}" \
+    "$concurrent_success" "$total_bytes" >> "$csv_file"
   profile_count=$((profile_count + 1))
   cleanup_case
 done
@@ -195,6 +210,8 @@ formal_tunnel_state_after="$(rc-service cloudflared-tunnel status >/dev/null 2>&
   printf 'real_core_startups=%s\n' "$profile_count"
   printf 'functional_proxy_checks=%s\n' "$profile_count"
   printf 'traffic_survival_checks=%s\n' "$profile_count"
+  printf 'concurrent_transfer_checks=%s\n' $((profile_count * 4))
+  printf 'verified_transfer_bytes=%s\n' $((profile_count * 4194304))
   printf 'oom_kill_total=0\n'
   printf 'max_observed_peak_mib=%s\n' "$max_peak_mib"
   printf 'formal_services_and_sensitive_state_unchanged=yes\n'

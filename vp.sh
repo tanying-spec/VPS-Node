@@ -2,7 +2,7 @@
 
 set -u
 
-VP_VERSION="0.2.0-dev.40"
+VP_VERSION="0.2.0-dev.41"
 VP_CONFIG_DIR="${VP_CONFIG_DIR:-/etc/vps-node}"
 VP_DATA_DIR="${VP_DATA_DIR:-/var/lib/vps-node}"
 VP_LOG_DIR="${VP_LOG_DIR:-/var/log/vps-node}"

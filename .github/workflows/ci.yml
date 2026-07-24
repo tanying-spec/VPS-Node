@@ -52,6 +52,8 @@ jobs:
           grep -Fq 'memory.peak' tests/memory_profiles.sh
           grep -Fq 'oom_kill' tests/memory_profiles.sh
           grep -Fq 'speed.cloudflare.com/__down?bytes=1048576' tests/memory_profiles.sh
+          grep -Fq 'concurrent_transfer_checks=' tests/memory_profiles.sh
+          grep -Fq 'verified_transfer_bytes=' tests/memory_profiles.sh
           ! grep -Eqi 'sshpass|plink|PreferredAuthentications=password|PasswordAuthentication=yes' tests/run_authorized_host.ps1
           ! grep -Eq '(^|[^A-Za-z])TunnelToken[[:space:]]*=' tests/run_authorized_host.ps1
           ! grep -Eq '^[[:space:]]*\[(string|int)\]\$Authorized(Host|Port)' tests/run_authorized_host.ps1
