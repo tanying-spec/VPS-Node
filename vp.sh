@@ -2,7 +2,7 @@
 
 set -u
 
-VP_VERSION="0.2.0-dev.70"
+VP_VERSION="0.2.0-dev.71"
 VP_CONFIG_DIR="${VP_CONFIG_DIR:-/etc/vps-node}"
 VP_DATA_DIR="${VP_DATA_DIR:-/var/lib/vps-node}"
 VP_LOG_DIR="${VP_LOG_DIR:-/var/log/vps-node}"
@@ -1334,11 +1334,44 @@ prepare_core_internal_ports() {
 core_binary_rollback() {
   need_root || return 1
   [ -x "$VP_CORE_BACKUP_BIN" ] || { error "没有可回滚的 Mihomo 内核。"; return 1; }
+  approved_core_current_state="$(managed_file_state "$VP_CORE_BIN")"
+  approved_core_backup_state="$(managed_file_state "$VP_CORE_BACKUP_BIN")"
+  "$VP_CORE_BACKUP_BIN" -v >/dev/null 2>&1 || { error "备份内核无法运行。"; return 1; }
+  [ ! -f "$VP_CORE_CONFIG" ] || "$VP_CORE_BACKUP_BIN" -t -d "$VP_CONFIG_DIR" -f "$VP_CORE_CONFIG" >/dev/null 2>&1 || {
+    error "备份内核无法加载当前配置。"
+    return 1
+  }
+  core_current_version="未安装"
+  if [ -x "$VP_CORE_BIN" ]; then
+    detected_core_current="$("$VP_CORE_BIN" -v 2>/dev/null | head -n 1 || true)"
+    [ -n "$detected_core_current" ] && core_current_version="$detected_core_current"
+  fi
+  core_target_version="$("$VP_CORE_BACKUP_BIN" -v 2>/dev/null | head -n 1 || true)"
+  [ -n "$core_target_version" ] || core_target_version="版本输出为空（可执行性和配置校验已通过）"
+  printf 'Mihomo 内核回滚预览：\n'
+  printf '  当前版本：%s\n' "$core_current_version"
+  printf '  目标版本：%s\n' "$core_target_version"
+  printf '  影响范围：交换当前与备份二进制，并重启 Mihomo 服务\n'
+  if [ -n "${VP_CORE_ROLLBACK_CONFIRM:-}" ]; then
+    core_rollback_confirm="$VP_CORE_ROLLBACK_CONFIRM"
+  else
+    printf '输入 ROLLBACK 确认回滚 Mihomo 内核：'
+    read -r core_rollback_confirm || true
+  fi
+  if [ "$core_rollback_confirm" != ROLLBACK ]; then
+    warn "已取消 Mihomo 内核回滚，当前与备份二进制未修改。"
+    return 2
+  fi
   candidate="$(mktemp /tmp/vp-core-rollback.XXXXXX)" || return 1
   cp "$VP_CORE_BACKUP_BIN" "$candidate" || { rm -f "$candidate"; return 1; }
   chmod 755 "$candidate"
   "$candidate" -v >/dev/null 2>&1 || { rm -f "$candidate"; error "备份内核无法运行。"; return 1; }
-  [ -f "$VP_CORE_CONFIG" ] && "$candidate" -t -d "$VP_CONFIG_DIR" -f "$VP_CORE_CONFIG" >/dev/null 2>&1 || { rm -f "$candidate"; error "备份内核无法加载当前配置。"; return 1; }
+  [ ! -f "$VP_CORE_CONFIG" ] || "$candidate" -t -d "$VP_CONFIG_DIR" -f "$VP_CORE_CONFIG" >/dev/null 2>&1 || { rm -f "$candidate"; error "备份内核无法加载当前配置。"; return 1; }
+  if [ "${VP_ALLOW_TEST_HOOKS:-0}" = 1 ] && [ "${VP_TEST_CORE_ROLLBACK_SOURCE_RACE:-0}" = 1 ]; then
+    printf 'changed-after-core-rollback-validation\n' > "$VP_CORE_BACKUP_BIN"
+  fi
+  [ "$(managed_file_state "$VP_CORE_BIN")" = "$approved_core_current_state" ] || { rm -f "$candidate"; error "当前 Mihomo 二进制在回滚确认期间发生变化，已中止。"; return 1; }
+  [ "$(managed_file_state "$VP_CORE_BACKUP_BIN")" = "$approved_core_backup_state" ] || { rm -f "$candidate"; error "已验证的 Mihomo 备份在回滚确认期间发生变化，已中止。"; return 1; }
   current="$(mktemp /tmp/vp-core-current.XXXXXX)" || { rm -f "$candidate"; return 1; }
   cp "$VP_CORE_BIN" "$current"
   mv "$candidate" "$VP_CORE_BIN"
@@ -1359,11 +1392,42 @@ core_binary_rollback() {
 tunnel_binary_rollback() {
   need_root || return 1
   [ -x "$VP_TUNNEL_BACKUP_BIN" ] || { error "没有可回滚的 cloudflared。"; return 1; }
+  approved_tunnel_current_state="$(managed_file_state "$VP_TUNNEL_BIN")"
+  approved_tunnel_backup_state="$(managed_file_state "$VP_TUNNEL_BACKUP_BIN")"
   "$VP_TUNNEL_BACKUP_BIN" version >/dev/null 2>&1 || { error "备份 cloudflared 无法运行。"; return 1; }
-  current="$(mktemp /tmp/vp-tunnel-current.XXXXXX)" || return 1
-  cp "$VP_TUNNEL_BIN" "$current"
-  cp "$VP_TUNNEL_BACKUP_BIN" "$VP_TUNNEL_BIN"
-  chmod 755 "$VP_TUNNEL_BIN"
+  tunnel_current_version="未安装"
+  if [ -x "$VP_TUNNEL_BIN" ]; then
+    detected_tunnel_current="$("$VP_TUNNEL_BIN" version 2>/dev/null | head -n 1 || true)"
+    [ -n "$detected_tunnel_current" ] && tunnel_current_version="$detected_tunnel_current"
+  fi
+  tunnel_target_version="$("$VP_TUNNEL_BACKUP_BIN" version 2>/dev/null | head -n 1 || true)"
+  [ -n "$tunnel_target_version" ] || tunnel_target_version="版本输出为空（可执行性校验已通过）"
+  printf 'Cloudflare Tunnel 回滚预览：\n'
+  printf '  当前版本：%s\n' "$tunnel_current_version"
+  printf '  目标版本：%s\n' "$tunnel_target_version"
+  printf '  影响范围：交换当前与备份二进制，并重启 Tunnel 服务\n'
+  if [ -n "${VP_TUNNEL_ROLLBACK_CONFIRM:-}" ]; then
+    tunnel_rollback_confirm="$VP_TUNNEL_ROLLBACK_CONFIRM"
+  else
+    printf '输入 ROLLBACK 确认回滚 Cloudflare Tunnel：'
+    read -r tunnel_rollback_confirm || true
+  fi
+  if [ "$tunnel_rollback_confirm" != ROLLBACK ]; then
+    warn "已取消 Tunnel 回滚，当前与备份二进制未修改。"
+    return 2
+  fi
+  candidate="$(mktemp /tmp/vp-tunnel-rollback.XXXXXX)" || return 1
+  cp "$VP_TUNNEL_BACKUP_BIN" "$candidate" || { rm -f "$candidate"; return 1; }
+  chmod 755 "$candidate"
+  "$candidate" version >/dev/null 2>&1 || { rm -f "$candidate"; error "暂存的 cloudflared 备份无法运行。"; return 1; }
+  if [ "${VP_ALLOW_TEST_HOOKS:-0}" = 1 ] && [ "${VP_TEST_TUNNEL_ROLLBACK_SOURCE_RACE:-0}" = 1 ]; then
+    printf 'changed-after-tunnel-rollback-validation\n' > "$VP_TUNNEL_BACKUP_BIN"
+  fi
+  [ "$(managed_file_state "$VP_TUNNEL_BIN")" = "$approved_tunnel_current_state" ] || { rm -f "$candidate"; error "当前 cloudflared 二进制在回滚确认期间发生变化，已中止。"; return 1; }
+  [ "$(managed_file_state "$VP_TUNNEL_BACKUP_BIN")" = "$approved_tunnel_backup_state" ] || { rm -f "$candidate"; error "已验证的 cloudflared 备份在回滚确认期间发生变化，已中止。"; return 1; }
+  current="$(mktemp /tmp/vp-tunnel-current.XXXXXX)" || { rm -f "$candidate"; return 1; }
+  cp "$VP_TUNNEL_BIN" "$current" || { rm -f "$candidate" "$current"; return 1; }
+  mv "$candidate" "$VP_TUNNEL_BIN"
   if tunnel_service_restart; then
     mv "$current" "$VP_TUNNEL_BACKUP_BIN"
     chmod 755 "$VP_TUNNEL_BACKUP_BIN"

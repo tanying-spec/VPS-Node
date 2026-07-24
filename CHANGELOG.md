@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.0-dev.71
+
+- Mihomo and cloudflared binary rollback now validate the backup, preview current/target versions and service impact, then require the exact `ROLLBACK` confirmation.
+- Approval is bound to SHA-256-backed states of both the active and backup binaries; a source changed after validation is preserved and rejected.
+- The confirmed backup is copied to a private stage, validated again and only then exchanged with the active binary.
+- Regression tests prove cancellation is byte-identical, post-validation source races do not alter the active binary, and successful rollback exchanges both versions.
+
 ## 0.2.0-dev.70
 
 - `vp core-install` and `vp tunnel-install` now preview the installed version, trusted source, verification boundary and affected service before requiring the exact `INSTALL` confirmation.

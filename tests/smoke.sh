@@ -122,6 +122,67 @@ case "${1:-}" in
 esac
 FAKE_CORE
 chmod 755 "$fake_core"
+binary_rollback_root="$TMP/binary-rollback"
+mkdir -p "$binary_rollback_root"
+cat > "$binary_rollback_root/core-current" <<'CORE_CURRENT'
+#!/bin/sh
+case "${1:-}" in -v) printf 'current-core\n' ;; -t) exit 0 ;; esac
+CORE_CURRENT
+cat > "$binary_rollback_root/core-backup" <<'CORE_BACKUP'
+#!/bin/sh
+case "${1:-}" in -v) printf 'target-core\n' ;; -t) exit 0 ;; esac
+CORE_BACKUP
+cat > "$binary_rollback_root/tunnel-current" <<'TUNNEL_CURRENT'
+#!/bin/sh
+[ "${1:-}" = version ] && printf 'current-tunnel\n'
+TUNNEL_CURRENT
+cat > "$binary_rollback_root/tunnel-backup" <<'TUNNEL_BACKUP'
+#!/bin/sh
+[ "${1:-}" = version ] && printf 'target-tunnel\n'
+TUNNEL_BACKUP
+chmod 755 "$binary_rollback_root"/*
+core_rollback_current_hash="$(sha256sum "$binary_rollback_root/core-current" | awk '{print $1}')"
+core_rollback_backup_hash="$(sha256sum "$binary_rollback_root/core-backup" | awk '{print $1}')"
+cancelled_core_rollback="$(VP_CORE_BIN="$binary_rollback_root/core-current" \
+  VP_CORE_BACKUP_BIN="$binary_rollback_root/core-backup" VP_SKIP_SERVICE=1 \
+  VP_CORE_ROLLBACK_CONFIRM=CANCEL sh "$ROOT/vp.sh" core-rollback 2>&1 || true)"
+printf '%s\n' "$cancelled_core_rollback" | grep -q '已取消 Mihomo 内核回滚'
+[ "$(sha256sum "$binary_rollback_root/core-current" | awk '{print $1}')" = "$core_rollback_current_hash" ]
+[ "$(sha256sum "$binary_rollback_root/core-backup" | awk '{print $1}')" = "$core_rollback_backup_hash" ]
+cp "$binary_rollback_root/core-backup" "$binary_rollback_root/core-race-backup"
+if VP_CORE_BIN="$binary_rollback_root/core-current" VP_CORE_BACKUP_BIN="$binary_rollback_root/core-race-backup" \
+  VP_SKIP_SERVICE=1 VP_CORE_ROLLBACK_CONFIRM=ROLLBACK VP_ALLOW_TEST_HOOKS=1 \
+  VP_TEST_CORE_ROLLBACK_SOURCE_RACE=1 sh "$ROOT/vp.sh" core-rollback >/dev/null 2>&1; then
+  printf 'core rollback accepted a backup changed after validation\n' >&2
+  exit 1
+fi
+[ "$(sha256sum "$binary_rollback_root/core-current" | awk '{print $1}')" = "$core_rollback_current_hash" ]
+grep -q '^changed-after-core-rollback-validation$' "$binary_rollback_root/core-race-backup"
+VP_CORE_BIN="$binary_rollback_root/core-current" VP_CORE_BACKUP_BIN="$binary_rollback_root/core-backup" \
+  VP_SKIP_SERVICE=1 VP_CORE_ROLLBACK_CONFIRM=ROLLBACK sh "$ROOT/vp.sh" core-rollback >/dev/null
+[ "$(sha256sum "$binary_rollback_root/core-current" | awk '{print $1}')" = "$core_rollback_backup_hash" ]
+[ "$(sha256sum "$binary_rollback_root/core-backup" | awk '{print $1}')" = "$core_rollback_current_hash" ]
+tunnel_rollback_current_hash="$(sha256sum "$binary_rollback_root/tunnel-current" | awk '{print $1}')"
+tunnel_rollback_backup_hash="$(sha256sum "$binary_rollback_root/tunnel-backup" | awk '{print $1}')"
+cancelled_tunnel_rollback="$(VP_TUNNEL_BIN="$binary_rollback_root/tunnel-current" \
+  VP_TUNNEL_BACKUP_BIN="$binary_rollback_root/tunnel-backup" VP_SKIP_SERVICE=1 \
+  VP_TUNNEL_ROLLBACK_CONFIRM=CANCEL sh "$ROOT/vp.sh" tunnel-rollback 2>&1 || true)"
+printf '%s\n' "$cancelled_tunnel_rollback" | grep -q '已取消 Tunnel 回滚'
+[ "$(sha256sum "$binary_rollback_root/tunnel-current" | awk '{print $1}')" = "$tunnel_rollback_current_hash" ]
+[ "$(sha256sum "$binary_rollback_root/tunnel-backup" | awk '{print $1}')" = "$tunnel_rollback_backup_hash" ]
+cp "$binary_rollback_root/tunnel-backup" "$binary_rollback_root/tunnel-race-backup"
+if VP_TUNNEL_BIN="$binary_rollback_root/tunnel-current" VP_TUNNEL_BACKUP_BIN="$binary_rollback_root/tunnel-race-backup" \
+  VP_SKIP_SERVICE=1 VP_TUNNEL_ROLLBACK_CONFIRM=ROLLBACK VP_ALLOW_TEST_HOOKS=1 \
+  VP_TEST_TUNNEL_ROLLBACK_SOURCE_RACE=1 sh "$ROOT/vp.sh" tunnel-rollback >/dev/null 2>&1; then
+  printf 'tunnel rollback accepted a backup changed after validation\n' >&2
+  exit 1
+fi
+[ "$(sha256sum "$binary_rollback_root/tunnel-current" | awk '{print $1}')" = "$tunnel_rollback_current_hash" ]
+grep -q '^changed-after-tunnel-rollback-validation$' "$binary_rollback_root/tunnel-race-backup"
+VP_TUNNEL_BIN="$binary_rollback_root/tunnel-current" VP_TUNNEL_BACKUP_BIN="$binary_rollback_root/tunnel-backup" \
+  VP_SKIP_SERVICE=1 VP_TUNNEL_ROLLBACK_CONFIRM=ROLLBACK sh "$ROOT/vp.sh" tunnel-rollback >/dev/null
+[ "$(sha256sum "$binary_rollback_root/tunnel-current" | awk '{print $1}')" = "$tunnel_rollback_backup_hash" ]
+[ "$(sha256sum "$binary_rollback_root/tunnel-backup" | awk '{print $1}')" = "$tunnel_rollback_current_hash" ]
 mkdir -p "$TMP/collision-bin"
 cat > "$TMP/collision-bin/ss" <<'FAKE_SS'
 #!/bin/sh
