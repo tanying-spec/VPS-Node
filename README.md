@@ -1,5 +1,7 @@
 # VPS-Node
 
+> `0.2.0-dev.11` 新增 `vp network-optimize --dry-run`、`vp network-optimize 节点名 4` 和 `vp network-rollback`。候选参数只有在同节点、同并发复测不回退时才会保存；吞吐或首包表现不达标会立即恢复原值。
+
 > `0.2.0-dev.10` 新增 `vp test-node 节点名 4` 单节点并发测速、`vp test-all 4` 全部节点对比和 `vp network` 当前网络状态。测速会报告并发成功率、连接/首包时间和聚合吞吐，但不会根据一次结果擅自切换线路。
 
 > `0.2.0-dev.8` 新增 `vp report` 脱敏诊断报告、`vp self-heal` 单次自愈、`vp monitor-install` 低开销定时自愈和 `vp stability` 稳定性记录。后台检查使用定时任务，不增加常驻管理进程。
@@ -53,6 +55,9 @@ vp test-node home
 vp test-node home 4
 vp test-all 4
 vp network
+vp network-optimize --dry-run
+vp network-optimize home 4
+vp network-rollback
 vp report
 vp self-heal
 vp monitor-install

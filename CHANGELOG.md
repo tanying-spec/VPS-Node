@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.0-dev.11
+
+- Added `vp network-optimize --dry-run` to preview global network candidates and acceptance gates without changing the host.
+- Added verified network application: baseline benchmark, temporary BBR/fq application, identical retest, persistence only after passing and automatic rollback on regression.
+- Candidates require full concurrent success, at least 98% of baseline throughput and no more than 125% of baseline first-byte latency.
+- Added `vp network-rollback`; uninstall now restores the pre-project network values before removing project state.
+- Added tests proving an improved candidate is persisted while a slower candidate is rejected and rolled back.
+
 ## 0.2.0-dev.10
 
 - Added real concurrent node downloads with configurable 1-8 streams, success ratios, connection time, first-byte time and aggregate throughput.

@@ -2,7 +2,7 @@
 
 set -u
 
-VP_VERSION="0.2.0-dev.10"
+VP_VERSION="0.2.0-dev.11"
 VP_CONFIG_DIR="${VP_CONFIG_DIR:-/etc/vps-node}"
 VP_DATA_DIR="${VP_DATA_DIR:-/var/lib/vps-node}"
 VP_LOG_DIR="${VP_LOG_DIR:-/var/log/vps-node}"
@@ -43,6 +43,9 @@ VP_CLI_BACKUP_PATH="${VP_CLI_BACKUP_PATH:-$VP_CLI_PATH.previous}"
 VP_REPO="${VP_REPO:-tanying-spec/VPS-Node}"
 VP_REF="${VP_REF:-main}"
 VP_CURL_BIN="${VP_CURL_BIN:-curl}"
+VP_SYSCTL_BIN="${VP_SYSCTL_BIN:-sysctl}"
+VP_SYSCTL_CONFIG="${VP_SYSCTL_CONFIG:-/etc/sysctl.d/99-vps-node-network.conf}"
+VP_NETWORK_SNAPSHOT="${VP_NETWORK_SNAPSHOT:-$VP_DATA_DIR/network-before.env}"
 
 is_tty() { [ -t 1 ]; }
 color() { is_tty && printf '\033[%sm' "$1" || true; }
@@ -1347,14 +1350,19 @@ EOF
 }
 
 show_network_status() {
-  congestion="$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || printf unknown)"
-  available="$(sysctl -n net.ipv4.tcp_available_congestion_control 2>/dev/null || printf unknown)"
-  qdisc="$(sysctl -n net.core.default_qdisc 2>/dev/null || printf unknown)"
+  congestion="$("$VP_SYSCTL_BIN" -n net.ipv4.tcp_congestion_control 2>/dev/null || printf unknown)"
+  available="$("$VP_SYSCTL_BIN" -n net.ipv4.tcp_available_congestion_control 2>/dev/null || printf unknown)"
+  qdisc="$("$VP_SYSCTL_BIN" -n net.core.default_qdisc 2>/dev/null || printf unknown)"
   printf '\n当前网络状态\n'
   printf '%s\n' '----------------------------------------'
   printf 'TCP 拥塞控制：%s\n' "$congestion"
   printf '可用拥塞算法：%s\n' "$available"
   printf '默认队列规则：%s\n' "$qdisc"
+  if [ -r "$VP_NETWORK_SNAPSHOT" ] && [ -r "$VP_SYSCTL_CONFIG" ]; then
+    printf 'VPS-Node 已验证优化：已应用（可执行 vp network-rollback）\n'
+  else
+    printf 'VPS-Node 已验证优化：未应用\n'
+  fi
   printf '默认测试并发：%s 路\n' "${VP_TEST_CONCURRENCY:-4}"
   if command -v ss >/dev/null 2>&1; then
     established="$(ss -H -tn state established 2>/dev/null | awk 'END{print NR+0}')"
@@ -1370,6 +1378,159 @@ show_network_status() {
   else
     printf '建议：当前内核未提供 BBR，不建议强制写入无效配置。\n'
   fi
+}
+
+network_sysctl_value() {
+  "$VP_SYSCTL_BIN" -n "$1" 2>/dev/null || return 1
+}
+
+network_restore_values() {
+  restore_cc="$1"
+  restore_qdisc="$2"
+  "$VP_SYSCTL_BIN" -w "net.ipv4.tcp_congestion_control=$restore_cc" >/dev/null 2>&1 || return 1
+  "$VP_SYSCTL_BIN" -w "net.core.default_qdisc=$restore_qdisc" >/dev/null 2>&1 || return 1
+}
+
+network_rollback() {
+  need_root || return 1
+  quiet=0
+  [ "${1:-}" = "--quiet" ] && quiet=1
+  if [ ! -r "$VP_NETWORK_SNAPSHOT" ]; then
+    [ ! -e "$VP_SYSCTL_CONFIG" ] || { error "发现网络配置但缺少回滚记录，拒绝自动删除。"; return 1; }
+    [ "$quiet" -eq 1 ] || warn "没有可回滚的网络优化记录。"
+    return 0
+  fi
+  before_cc="$(awk -F= '$1=="BEFORE_CC"{print $2;exit}' "$VP_NETWORK_SNAPSHOT")"
+  before_qdisc="$(awk -F= '$1=="BEFORE_QDISC"{print $2;exit}' "$VP_NETWORK_SNAPSHOT")"
+  case "$before_cc$before_qdisc" in *[!A-Za-z0-9_-]*) error "网络回滚记录格式无效。"; return 1 ;; esac
+  network_restore_values "$before_cc" "$before_qdisc" || { error "无法恢复原网络参数。"; return 1; }
+  rm -f "$VP_SYSCTL_CONFIG" "$VP_NETWORK_SNAPSHOT"
+  stability_event recovered network "saved network tuning rolled back"
+  [ "$quiet" -eq 1 ] || ok "已恢复网络优化前参数：$before_cc / $before_qdisc。"
+}
+
+network_optimize_verified() {
+  need_root || return 1
+  mode="${1:-}"
+  if [ "$mode" = "--dry-run" ]; then
+    shift
+  else
+    mode=apply
+  fi
+  target="${1:-}"
+  concurrency="${2:-4}"
+  case "$concurrency" in ''|*[!0-9]*) error "并发数必须是 1-8。"; return 2 ;; esac
+  [ "$concurrency" -ge 1 ] && [ "$concurrency" -le 8 ] || { error "并发数必须是 1-8。"; return 2; }
+  current_cc="$(network_sysctl_value net.ipv4.tcp_congestion_control || printf unknown)"
+  current_qdisc="$(network_sysctl_value net.core.default_qdisc || printf unknown)"
+  available_cc="$(network_sysctl_value net.ipv4.tcp_available_congestion_control || printf unknown)"
+  printf '当前参数：拥塞控制=%s，队列规则=%s\n' "$current_cc" "$current_qdisc"
+  if printf '%s\n' "$available_cc" | grep -qw bbr; then
+    candidate_cc=bbr
+  else
+    warn "当前内核没有提供 BBR，不会写入无效参数。"
+    return 0
+  fi
+  candidate_qdisc=fq
+  printf '候选参数：拥塞控制=%s，队列规则=%s\n' "$candidate_cc" "$candidate_qdisc"
+  printf '验证门槛：前后并发全部成功；复测吞吐不低于基线 98%%；首包时间不高于基线 125%%。\n'
+  printf '影响范围：这是主机全局 TCP 参数，可能影响 VPS 上的其他网络任务。\n'
+  if [ "$mode" = "--dry-run" ]; then
+    ok "网络优化预览完成，未测速、未修改参数。"
+    return 0
+  fi
+  [ "$current_cc" != unknown ] && [ "$current_qdisc" != unknown ] || { error "无法读取当前网络参数。"; return 1; }
+  if [ "$current_cc" = "$candidate_cc" ] && [ "$current_qdisc" = "$candidate_qdisc" ]; then
+    ok "候选网络参数已经生效，无需重复应用。"
+    return 0
+  fi
+  if [ -z "$target" ]; then
+    target="$(awk -F'|' '$1=="reality"{print $2;exit} END{if(!NR)exit}' "$VP_NODES_DB" 2>/dev/null)"
+    [ -n "$target" ] || target="$(awk -F'|' 'NF{print $2;exit}' "$VP_NODES_DB" 2>/dev/null)"
+  else
+    target="$(resolve_node_selector "$target")"
+  fi
+  [ -n "$target" ] || { error "没有可用于前后对比的节点。"; return 1; }
+  if [ "${VP_NETWORK_CONFIRM:-}" != "APPLY" ]; then
+    printf '将使用节点 %s 做前后对比。请输入 APPLY 继续：' "$target"
+    read -r answer || true
+    [ "$answer" = APPLY ] || { warn "已取消。"; return 2; }
+  fi
+  benchmark_dir="$(mktemp -d /tmp/vp-network-verify.XXXXXX)" || return 1
+  before_result="$benchmark_dir/before.result"
+  after_result="$benchmark_dir/after.result"
+  printf '\n[1/3] 基线测速\n'
+  if ! VP_TEST_RESULT_FILE="$before_result" test_node_end_to_end "$target" "$concurrency"; then
+    rm -rf "$benchmark_dir"
+    error "基线测速失败，未修改网络参数。"
+    return 1
+  fi
+  [ -s "$before_result" ] || { rm -rf "$benchmark_dir"; error "基线测速没有有效结果，未修改网络参数。"; return 1; }
+  printf '\n[2/3] 临时应用候选参数\n'
+  if ! "$VP_SYSCTL_BIN" -w "net.ipv4.tcp_congestion_control=$candidate_cc" >/dev/null 2>&1 || \
+     ! "$VP_SYSCTL_BIN" -w "net.core.default_qdisc=$candidate_qdisc" >/dev/null 2>&1; then
+    network_restore_values "$current_cc" "$current_qdisc" >/dev/null 2>&1 || true
+    rm -rf "$benchmark_dir"
+    error "候选参数无法完整应用，已恢复原参数。"
+    return 1
+  fi
+  printf '\n[3/3] 同节点同并发复测\n'
+  VP_TEST_RESULT_FILE="$after_result" test_node_end_to_end "$target" "$concurrency" || true
+  accepted=0
+  if [ -s "$after_result" ] && awk -F'|' '
+    NR==FNR{bs=$3+0;bn=$4+0;bb=$5+0;bt=$7+0;next}
+    {as=$3+0;an=$4+0;ab=$5+0;at=$7+0}
+    END{exit (bs==bn && as==an && as>=bs && ab>=bb*0.98 && (bt<=0 || at<=bt*1.25))?0:1}
+  ' "$before_result" "$after_result"; then
+    accepted=1
+  fi
+  if [ "$accepted" -ne 1 ]; then
+    network_restore_values "$current_cc" "$current_qdisc" >/dev/null 2>&1 || true
+    rm -rf "$benchmark_dir"
+    stability_event rejected network "candidate failed benchmark gate"
+    error "复测未通过性能门槛，已自动恢复原网络参数。"
+    return 1
+  fi
+  if ! mkdir -p "$(dirname "$VP_SYSCTL_CONFIG")" "$(dirname "$VP_NETWORK_SNAPSHOT")"; then
+    network_restore_values "$current_cc" "$current_qdisc" >/dev/null 2>&1 || true
+    rm -rf "$benchmark_dir"
+    error "无法创建网络优化持久化目录，已恢复原参数。"
+    return 1
+  fi
+  snapshot_created=0
+  if [ ! -r "$VP_NETWORK_SNAPSHOT" ]; then
+    if ! {
+      printf 'BEFORE_CC=%s\n' "$current_cc"
+      printf 'BEFORE_QDISC=%s\n' "$current_qdisc"
+    } > "$VP_NETWORK_SNAPSHOT"; then
+      network_restore_values "$current_cc" "$current_qdisc" >/dev/null 2>&1 || true
+      rm -rf "$benchmark_dir" "$VP_NETWORK_SNAPSHOT"
+      error "无法保存网络回滚点，已恢复原参数。"
+      return 1
+    fi
+    chmod 600 "$VP_NETWORK_SNAPSHOT"
+    snapshot_created=1
+  fi
+  if ! {
+    printf '# Managed by VPS-Node after verified before/after benchmark\n'
+    printf 'net.ipv4.tcp_congestion_control=%s\n' "$candidate_cc"
+    printf 'net.core.default_qdisc=%s\n' "$candidate_qdisc"
+  } > "$VP_SYSCTL_CONFIG"; then
+    network_restore_values "$current_cc" "$current_qdisc" >/dev/null 2>&1 || true
+    rm -rf "$benchmark_dir" "$VP_SYSCTL_CONFIG"
+    [ "$snapshot_created" -eq 1 ] && rm -f "$VP_NETWORK_SNAPSHOT"
+    error "无法保存网络参数，已恢复原参数。"
+    return 1
+  fi
+  chmod 600 "$VP_SYSCTL_CONFIG"
+  before_bps="$(awk -F'|' 'NR==1{print $5}' "$before_result")"
+  after_bps="$(awk -F'|' 'NR==1{print $5}' "$after_result")"
+  rm -rf "$benchmark_dir"
+  stability_event accepted network "candidate passed benchmark gate"
+  before_mib="$(awk -v n="$before_bps" 'BEGIN{printf "%.2f",n/1048576}')"
+  after_mib="$(awk -v n="$after_bps" 'BEGIN{printf "%.2f",n/1048576}')"
+  ok "网络候选参数通过验证并已保存：${before_mib} -> ${after_mib} MiB/s。"
+  printf '如需恢复：vp network-rollback\n'
 }
 
 sha256_file() {
@@ -1535,7 +1696,7 @@ maintenance_mode() {
   fi
 
   temp_removed=0
-  for temp_path in /tmp/vp-node-test.* /tmp/vp-backup.* /tmp/vp-restore.* /tmp/vp-repair-config.* /tmp/vp-reality-key.*; do
+  for temp_path in /tmp/vp-node-test.* /tmp/vp-benchmark.* /tmp/vp-network-verify.* /tmp/vp-backup.* /tmp/vp-restore.* /tmp/vp-repair-config.* /tmp/vp-reality-key.*; do
     [ -e "$temp_path" ] || continue
     if find "$temp_path" -maxdepth 0 -mmin +60 >/dev/null 2>&1 && [ -n "$(find "$temp_path" -maxdepth 0 -mmin +60 -print 2>/dev/null)" ]; then
       rm -rf "$temp_path"
@@ -2201,6 +2362,7 @@ uninstall_project() {
   expected_backup_hash="$(awk 'NR==1{print tolower($1)}' "$backup_archive.sha256" 2>/dev/null)"
   actual_backup_hash="$(sha256_file "$backup_archive" 2>/dev/null | tr 'A-F' 'a-f')"
   [ -n "$actual_backup_hash" ] && [ "$expected_backup_hash" = "$actual_backup_hash" ] || { error "卸载备份校验失败，已中止卸载。"; return 1; }
+  network_rollback --quiet || { error "无法恢复项目应用前的网络参数，已中止卸载。"; return 1; }
   if [ "${VP_SKIP_SERVICE:-0}" != "1" ]; then
     case "$(service_manager)" in
       systemd)
@@ -2364,7 +2526,7 @@ advanced_menu() {
 }
 
 interactive_network() {
-  printf '1. 一键测试全部节点（并发）\n2. 查看当前网络状态\n3. 应用资源与 DNS 自适应并验证\n0. 返回\n请选择：'
+  printf '1. 一键测试全部节点（并发）\n2. 查看当前网络状态\n3. 预览候选网络优化\n4. 基线测试后应用并复测\n5. 回滚已应用网络优化\n6. 应用资源与 DNS 自适应并验证\n0. 返回\n请选择：'
   read -r action || true
   case "$action" in
     1)
@@ -2373,7 +2535,14 @@ interactive_network() {
       test_all_nodes "${concurrency:-4}"
       ;;
     2) show_network_status ;;
-    3) optimize_and_verify ;;
+    3) network_optimize_verified --dry-run ;;
+    4)
+      printf '用于验证的节点编号或名称（留空优先 Reality）：'; read -r target || true
+      printf '并发连接数（默认 4）：'; read -r concurrency || true
+      network_optimize_verified "$target" "${concurrency:-4}"
+      ;;
+    5) network_rollback ;;
+    6) optimize_and_verify ;;
     0) return 0 ;;
     *) warn "无效选择。" ;;
   esac
@@ -2432,6 +2601,8 @@ case "${1:-}" in
   test-node|test) shift; test_node_end_to_end "$@" ;;
   test-all|benchmark) shift; test_all_nodes "$@" ;;
   network|network-status) show_network_status ;;
+  network-optimize) shift; network_optimize_verified "$@" ;;
+  network-rollback) shift; network_rollback "$@" ;;
   rotate|rotate-credential) shift; rotate_credential "$@" ;;
   rotations|rotation-status) show_rotations ;;
   rotate-finalize|rotation-finalize) shift; finalize_rotation "$@" ;;
@@ -2455,7 +2626,7 @@ case "${1:-}" in
   uninstall) shift; uninstall_project "$@" ;;
   debug-tx) shift; debug_transaction "$@" ;;
   help|-h|--help)
-    printf '用法：vp [status|doctor|health|repair|report|self-heal|monitor-install|stability|network|test-all|optimize|maintain|update|rollback|init|core-install|reality-add|tunnel-install|argo-add|nodes|edit|delete|link|test-node|rotate|rotations|rotate-finalize|backup|restore|uninstall|version]\n'
+    printf '用法：vp [status|doctor|health|repair|report|self-heal|monitor-install|stability|network|network-optimize|network-rollback|test-all|optimize|maintain|update|rollback|init|core-install|reality-add|tunnel-install|argo-add|nodes|edit|delete|link|test-node|rotate|rotations|rotate-finalize|backup|restore|uninstall|version]\n'
     ;;
   '') menu ;;
   *) error "未知命令：$1"; exit 2 ;;

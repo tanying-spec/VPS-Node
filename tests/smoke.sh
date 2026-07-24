@@ -91,6 +91,89 @@ concurrent_output="$(VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_
   sh "$ROOT/vp.sh" test-node renamed-node 4)"
 printf '%s\n' "$concurrent_output" | grep -q '4/4 路成功'
 printf '%s\n' "$concurrent_output" | grep -q '聚合速度 4.00 MiB/s'
+sysctl_state="$TMP/fake-sysctl.state"
+printf 'CC=cubic\nQDISC=pfifo_fast\n' > "$sysctl_state"
+fake_sysctl="$TMP/fake-sysctl"
+cat > "$fake_sysctl" <<'FAKE_SYSCTL'
+#!/bin/sh
+. "$VP_FAKE_SYSCTL_STATE"
+if [ "${1:-}" = "-n" ]; then
+  case "${2:-}" in
+    net.ipv4.tcp_congestion_control) printf '%s\n' "$CC" ;;
+    net.ipv4.tcp_available_congestion_control) printf 'cubic bbr\n' ;;
+    net.core.default_qdisc) printf '%s\n' "$QDISC" ;;
+    *) exit 1 ;;
+  esac
+elif [ "${1:-}" = "-w" ]; then
+  case "${2:-}" in
+    net.ipv4.tcp_congestion_control=*) CC="${2#*=}" ;;
+    net.core.default_qdisc=*) QDISC="${2#*=}" ;;
+    *) exit 1 ;;
+  esac
+  printf 'CC=%s\nQDISC=%s\n' "$CC" "$QDISC" > "$VP_FAKE_SYSCTL_STATE"
+else
+  exit 1
+fi
+FAKE_SYSCTL
+adaptive_curl="$TMP/adaptive-curl"
+cat > "$adaptive_curl" <<'ADAPTIVE_CURL'
+#!/bin/sh
+. "$VP_FAKE_SYSCTL_STATE"
+case "$*" in
+  *generate_204*) printf '204|0.010000|0.020000|0.030000' ;;
+  *__down*)
+    [ "$CC" = bbr ] && speed="${VP_FAKE_BBR_SPEED:-2097152}" || speed=1048576
+    printf '200|1024|%s|0.040000|0.100000' "$speed"
+    ;;
+  *) exit 1 ;;
+esac
+ADAPTIVE_CURL
+chmod 755 "$fake_sysctl" "$adaptive_curl"
+network_config="$TMP/99-vps-node-network.conf"
+network_snapshot="$TMP/network-before.env"
+VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log" \
+VP_LIB_DIR="$TMP/dns-usr" VP_CORE_BIN="$TMP/dns-usr/bin/mihomo" \
+VP_CORE_BACKUP_BIN="$TMP/dns-usr/bin/mihomo.previous" VP_CURL_BIN="$adaptive_curl" \
+VP_SYSCTL_BIN="$fake_sysctl" VP_FAKE_SYSCTL_STATE="$sysctl_state" \
+VP_SYSCTL_CONFIG="$network_config" VP_NETWORK_SNAPSHOT="$network_snapshot" \
+VP_TEST_SERVER=127.0.0.1 VP_SKIP_SERVICE=1 \
+sh "$ROOT/vp.sh" network-optimize --dry-run >/dev/null
+grep -q '^CC=cubic$' "$sysctl_state"
+[ ! -e "$network_config" ]
+network_output="$(VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log" \
+  VP_LIB_DIR="$TMP/dns-usr" VP_CORE_BIN="$TMP/dns-usr/bin/mihomo" \
+  VP_CORE_BACKUP_BIN="$TMP/dns-usr/bin/mihomo.previous" VP_CURL_BIN="$adaptive_curl" \
+  VP_SYSCTL_BIN="$fake_sysctl" VP_FAKE_SYSCTL_STATE="$sysctl_state" \
+  VP_SYSCTL_CONFIG="$network_config" VP_NETWORK_SNAPSHOT="$network_snapshot" \
+  VP_NETWORK_CONFIRM=APPLY VP_TEST_SERVER=127.0.0.1 VP_SKIP_SERVICE=1 \
+  sh "$ROOT/vp.sh" network-optimize renamed-node 2)"
+printf '%s\n' "$network_output" | grep -q '1.00 -> 2.00 MiB/s'
+grep -q '^CC=bbr$' "$sysctl_state"
+grep -q '^QDISC=fq$' "$sysctl_state"
+[ -s "$network_config" ]
+[ -s "$network_snapshot" ]
+VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log" \
+VP_LIB_DIR="$TMP/dns-usr" VP_SYSCTL_BIN="$fake_sysctl" VP_FAKE_SYSCTL_STATE="$sysctl_state" \
+VP_SYSCTL_CONFIG="$network_config" VP_NETWORK_SNAPSHOT="$network_snapshot" \
+sh "$ROOT/vp.sh" network-rollback >/dev/null
+grep -q '^CC=cubic$' "$sysctl_state"
+grep -q '^QDISC=pfifo_fast$' "$sysctl_state"
+[ ! -e "$network_config" ]
+[ ! -e "$network_snapshot" ]
+if VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log" \
+  VP_LIB_DIR="$TMP/dns-usr" VP_CORE_BIN="$TMP/dns-usr/bin/mihomo" \
+  VP_CORE_BACKUP_BIN="$TMP/dns-usr/bin/mihomo.previous" VP_CURL_BIN="$adaptive_curl" \
+  VP_SYSCTL_BIN="$fake_sysctl" VP_FAKE_SYSCTL_STATE="$sysctl_state" VP_FAKE_BBR_SPEED=524288 \
+  VP_SYSCTL_CONFIG="$network_config" VP_NETWORK_SNAPSHOT="$network_snapshot" \
+  VP_NETWORK_CONFIRM=APPLY VP_TEST_SERVER=127.0.0.1 VP_SKIP_SERVICE=1 \
+  sh "$ROOT/vp.sh" network-optimize renamed-node 2 >/dev/null 2>&1; then
+  printf 'regressed network candidate unexpectedly accepted\n' >&2
+  exit 1
+fi
+grep -q '^CC=cubic$' "$sysctl_state"
+grep -q '^QDISC=pfifo_fast$' "$sysctl_state"
+[ ! -e "$network_config" ]
+[ ! -e "$network_snapshot" ]
 menu_output="$(printf '3\n1\n1\n\n0\n' | \
   VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log" \
   VP_LIB_DIR="$TMP/dns-usr" VP_CORE_BIN="$TMP/dns-usr/bin/mihomo" \
