@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.0-dev.58
+
+- Uninstall now audits every managed project path and the selected systemd/OpenRC service definitions after deletion.
+- A retained directory, CLI, rollback asset, service unit, init script or watchdog job makes uninstall return failure instead of falsely reporting success.
+- Failure output lists each exact residual path, preserves the verified recovery archive and gives a direct cleanup/reinstall/restore route.
+- Regression tests inject a partial deletion and prove the residual is reported, the success message is suppressed and the recovery archive remains valid.
+
 ## 0.2.0-dev.57
 
 - Uninstall now creates and verifies its external recovery archive before stopping services, rolling back host networking or deleting project files.

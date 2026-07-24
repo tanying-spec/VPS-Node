@@ -2,7 +2,7 @@
 
 set -u
 
-VP_VERSION="0.2.0-dev.57"
+VP_VERSION="0.2.0-dev.58"
 VP_CONFIG_DIR="${VP_CONFIG_DIR:-/etc/vps-node}"
 VP_DATA_DIR="${VP_DATA_DIR:-/var/lib/vps-node}"
 VP_LOG_DIR="${VP_LOG_DIR:-/var/log/vps-node}"
@@ -3988,6 +3988,51 @@ uninstall_stop_services() {
   return 0
 }
 
+uninstall_remove_project_paths() {
+  if [ "${VP_ALLOW_TEST_HOOKS:-0}" = "1" ] && [ "${VP_TEST_UNINSTALL_REMOVE_FAIL:-0}" = "1" ]; then
+    rm -rf "$VP_CONFIG_DIR" "$VP_LOG_DIR" "$VP_LIB_DIR" >/dev/null 2>&1 || true
+    rm -f "$VP_CLI_PATH" "$VP_CLI_BACKUP_PATH" "$VP_CLI_BACKUP_SHA256" >/dev/null 2>&1 || true
+    return 0
+  fi
+  rm -rf "$VP_CONFIG_DIR" "$VP_DATA_DIR" "$VP_LOG_DIR" "$VP_LIB_DIR" >/dev/null 2>&1 || true
+  rm -f "$VP_CLI_PATH" "$VP_CLI_BACKUP_PATH" "$VP_CLI_BACKUP_SHA256" >/dev/null 2>&1 || true
+}
+
+uninstall_report_residuals() {
+  residual_count=0
+  for residual_path in "$VP_CONFIG_DIR" "$VP_DATA_DIR" "$VP_LOG_DIR" "$VP_LIB_DIR" \
+    "$VP_CLI_PATH" "$VP_CLI_BACKUP_PATH" "$VP_CLI_BACKUP_SHA256"; do
+    if [ -e "$residual_path" ] || [ -L "$residual_path" ]; then
+      printf '  残留：%s\n' "$residual_path" >&2
+      residual_count=$((residual_count + 1))
+    fi
+  done
+  case "${uninstall_manager:-skip}" in
+    systemd)
+      for residual_path in "/etc/systemd/system/${VP_WATCHDOG_SERVICE}.timer" \
+        "/etc/systemd/system/${VP_WATCHDOG_SERVICE}.service" \
+        "/etc/systemd/system/${VP_TUNNEL_SERVICE}.service" \
+        "/etc/systemd/system/${VP_CORE_SERVICE}.service"; do
+        if [ -e "$residual_path" ] || [ -L "$residual_path" ]; then
+          printf '  残留：%s\n' "$residual_path" >&2
+          residual_count=$((residual_count + 1))
+        fi
+      done
+      ;;
+    openrc)
+      for residual_path in "/etc/init.d/$VP_TUNNEL_SERVICE" "/etc/init.d/$VP_CORE_SERVICE" \
+        "/etc/periodic/15min/$VP_WATCHDOG_SERVICE" "${uninstall_watchdog_hold:-}"; do
+        [ -n "$residual_path" ] || continue
+        if [ -e "$residual_path" ] || [ -L "$residual_path" ]; then
+          printf '  残留：%s\n' "$residual_path" >&2
+          residual_count=$((residual_count + 1))
+        fi
+      done
+      ;;
+  esac
+  [ "$residual_count" -eq 0 ]
+}
+
 uninstall_project() {
   need_root || return 1
   [ "$#" -le 1 ] || { error "卸载命令只接受 --dry-run 参数。"; return 2; }
@@ -4049,8 +4094,13 @@ uninstall_project() {
         ;;
     esac
   fi
-  rm -rf "$VP_CONFIG_DIR" "$VP_DATA_DIR" "$VP_LOG_DIR" "$VP_LIB_DIR"
-  rm -f "$VP_CLI_PATH" "$VP_CLI_BACKUP_PATH" "$VP_CLI_BACKUP_SHA256"
+  uninstall_remove_project_paths
+  if ! uninstall_report_residuals; then
+    error "卸载未完整完成：以上路径未能删除。恢复包保持有效，请清除残留后重新安装；如需恢复数据，再执行 vp restore。"
+    printf '恢复包：%s\n' "$backup_archive"
+    printf '重新安装后恢复：vp restore %s\n' "$backup_archive"
+    return 1
+  fi
   ok "VPS-Node 已卸载。"
   printf '恢复包：%s\n' "$backup_archive"
   printf '重新安装后恢复：vp restore %s\n' "$backup_archive"
