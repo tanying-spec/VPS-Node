@@ -569,6 +569,14 @@ ADAPTIVE_CURL
 chmod 755 "$fake_sysctl" "$adaptive_curl"
 network_config="$TMP/99-vps-node-network.conf"
 network_snapshot="$TMP/network-before.env"
+run_network_status() {
+  VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log" \
+  VP_LIB_DIR="$TMP/dns-usr" VP_SYSCTL_BIN="$fake_sysctl" VP_FAKE_SYSCTL_STATE="$sysctl_state" \
+  VP_SYSCTL_CONFIG="$network_config" VP_NETWORK_SNAPSHOT="$network_snapshot" \
+  VP_CURL_BIN="$adaptive_curl" VP_SKIP_SERVICE=1 \
+  sh "$ROOT/vp.sh" network 2>&1
+}
+printf '%s\n' "$(run_network_status)" | grep -q 'VPS-Node 已验证优化：未应用'
 VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log" \
 VP_LIB_DIR="$TMP/dns-usr" VP_CORE_BIN="$TMP/dns-usr/bin/mihomo" \
 VP_CORE_BACKUP_BIN="$TMP/dns-usr/bin/mihomo.previous" VP_CURL_BIN="$adaptive_curl" \
@@ -624,6 +632,31 @@ grep -q '^CC=bbr$' "$sysctl_state"
 grep -q '^QDISC=fq$' "$sysctl_state"
 [ -s "$network_config" ]
 [ -s "$network_snapshot" ]
+active_network_status="$(run_network_status)"
+printf '%s\n' "$active_network_status" | grep -q 'VPS-Node 已验证优化：已应用且运行一致（bbr / fq）'
+dashboard_network_status="$(VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log" \
+  VP_LIB_DIR="$TMP/dns-usr" VP_SYSCTL_BIN="$fake_sysctl" VP_FAKE_SYSCTL_STATE="$sysctl_state" \
+  VP_SYSCTL_CONFIG="$network_config" VP_NETWORK_SNAPSHOT="$network_snapshot" \
+  VP_CURL_BIN="$adaptive_curl" VP_SKIP_SERVICE=1 sh "$ROOT/vp.sh" status 2>&1)"
+printf '%s\n' "$dashboard_network_status" | grep -q '网络验证优化：已应用且运行一致（bbr / fq）'
+
+printf 'CC=cubic\nQDISC=fq\n' > "$sysctl_state"
+drift_network_status="$(run_network_status)"
+printf '%s\n' "$drift_network_status" | grep -q 'VPS-Node 已验证优化：运行时漂移'
+printf '%s\n' "$drift_network_status" | grep -q '持久化目标：bbr / fq'
+printf '%s\n' "$drift_network_status" | grep -q '实时参数：cubic / fq'
+
+printf '# Managed by VPS-Node after verified before/after benchmark\nnet.ipv4.tcp_congestion_control=bbr\n' > "$network_config"
+printf '%s\n' "$(run_network_status)" | grep -q 'VPS-Node 已验证优化：持久化记录异常'
+printf '# Managed by VPS-Node after verified before/after benchmark\nnet.ipv4.tcp_congestion_control=bbr\nnet.core.default_qdisc=fq\n' > "$network_config"
+rm -f "$network_config"
+printf '%s\n' "$(run_network_status)" | grep -q 'VPS-Node 已验证优化：仅有回滚记录'
+printf '# Managed by VPS-Node after verified before/after benchmark\nnet.ipv4.tcp_congestion_control=bbr\nnet.core.default_qdisc=fq\n' > "$network_config"
+rm -f "$network_snapshot"
+printf '%s\n' "$(run_network_status)" | grep -q 'VPS-Node 已验证优化：仅有持久化配置'
+printf 'BEFORE_CC=cubic\nBEFORE_QDISC=pfifo_fast\n' > "$network_snapshot"
+printf 'CC=bbr\nQDISC=fq\n' > "$sysctl_state"
+printf '%s\n' "$(run_network_status)" | grep -q 'VPS-Node 已验证优化：已应用且运行一致（bbr / fq）'
 network_config_hash_before_cancel="$(sha256sum "$network_config" | awk '{print $1}')"
 network_snapshot_hash_before_cancel="$(sha256sum "$network_snapshot" | awk '{print $1}')"
 cancelled_network_rollback="$(VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log" \

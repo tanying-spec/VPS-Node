@@ -2,7 +2,7 @@
 
 set -u
 
-VP_VERSION="0.2.0-dev.80"
+VP_VERSION="0.2.0-dev.81"
 VP_CONFIG_DIR="${VP_CONFIG_DIR:-/etc/vps-node}"
 VP_DATA_DIR="${VP_DATA_DIR:-/var/lib/vps-node}"
 VP_LOG_DIR="${VP_LOG_DIR:-/var/log/vps-node}"
@@ -2336,6 +2336,94 @@ EOF
   rm -f "$results"
 }
 
+inspect_network_optimization() {
+  NETWORK_OPT_STATE=none
+  NETWORK_OPT_EXPECTED_CC=unknown
+  NETWORK_OPT_EXPECTED_QDISC=unknown
+  NETWORK_OPT_LIVE_CC="$(network_sysctl_value net.ipv4.tcp_congestion_control || printf unknown)"
+  NETWORK_OPT_LIVE_QDISC="$(network_sysctl_value net.core.default_qdisc || printf unknown)"
+
+  network_snapshot_exists=0
+  network_config_exists=0
+  { [ -e "$VP_NETWORK_SNAPSHOT" ] || [ -L "$VP_NETWORK_SNAPSHOT" ]; } && network_snapshot_exists=1
+  { [ -e "$VP_SYSCTL_CONFIG" ] || [ -L "$VP_SYSCTL_CONFIG" ]; } && network_config_exists=1
+
+  if [ "$network_snapshot_exists" -eq 0 ] && [ "$network_config_exists" -eq 0 ]; then
+    return 0
+  elif [ "$network_snapshot_exists" -eq 1 ] && [ "$network_config_exists" -eq 0 ]; then
+    NETWORK_OPT_STATE=orphan-snapshot
+    return 0
+  elif [ "$network_snapshot_exists" -eq 0 ] && [ "$network_config_exists" -eq 1 ]; then
+    NETWORK_OPT_STATE=orphan-config
+    return 0
+  fi
+
+  if [ ! -f "$VP_NETWORK_SNAPSHOT" ] || [ -L "$VP_NETWORK_SNAPSHOT" ] || [ ! -r "$VP_NETWORK_SNAPSHOT" ] || \
+     [ ! -f "$VP_SYSCTL_CONFIG" ] || [ -L "$VP_SYSCTL_CONFIG" ] || [ ! -r "$VP_SYSCTL_CONFIG" ]; then
+    NETWORK_OPT_STATE=persistence-invalid
+    return 0
+  fi
+
+  network_snapshot_values="$(awk -F= '
+    /^[[:space:]]*$/ { next }
+    $1=="BEFORE_CC" && NF==2 { cc_count++; cc=$2; next }
+    $1=="BEFORE_QDISC" && NF==2 { qdisc_count++; qdisc=$2; next }
+    { invalid=1 }
+    END {
+      if (invalid || cc_count != 1 || qdisc_count != 1 ||
+          cc !~ /^[A-Za-z0-9_-]+$/ || qdisc !~ /^[A-Za-z0-9_-]+$/) exit 1
+      printf "%s|%s", cc, qdisc
+    }
+  ' "$VP_NETWORK_SNAPSHOT" 2>/dev/null)" || {
+    NETWORK_OPT_STATE=persistence-invalid
+    return 0
+  }
+  [ -n "$network_snapshot_values" ] || {
+    NETWORK_OPT_STATE=persistence-invalid
+    return 0
+  }
+
+  network_config_values="$(awk -F= '
+    /^[[:space:]]*$/ || /^[[:space:]]*#/ { next }
+    $1=="net.ipv4.tcp_congestion_control" && NF==2 { cc_count++; cc=$2; next }
+    $1=="net.core.default_qdisc" && NF==2 { qdisc_count++; qdisc=$2; next }
+    { invalid=1 }
+    END {
+      if (invalid || cc_count != 1 || qdisc_count != 1 ||
+          cc !~ /^[A-Za-z0-9_-]+$/ || qdisc !~ /^[A-Za-z0-9_-]+$/) exit 1
+      printf "%s|%s", cc, qdisc
+    }
+  ' "$VP_SYSCTL_CONFIG" 2>/dev/null)" || {
+    NETWORK_OPT_STATE=persistence-invalid
+    return 0
+  }
+  [ -n "$network_config_values" ] || {
+    NETWORK_OPT_STATE=persistence-invalid
+    return 0
+  }
+
+  NETWORK_OPT_EXPECTED_CC="${network_config_values%%|*}"
+  NETWORK_OPT_EXPECTED_QDISC="${network_config_values#*|}"
+  if [ "$NETWORK_OPT_LIVE_CC" != "$NETWORK_OPT_EXPECTED_CC" ] || \
+     [ "$NETWORK_OPT_LIVE_QDISC" != "$NETWORK_OPT_EXPECTED_QDISC" ]; then
+    NETWORK_OPT_STATE=runtime-drift
+  else
+    NETWORK_OPT_STATE=active
+  fi
+}
+
+network_optimization_summary() {
+  inspect_network_optimization
+  case "$NETWORK_OPT_STATE" in
+    active) printf '已应用且运行一致（%s / %s）' "$NETWORK_OPT_EXPECTED_CC" "$NETWORK_OPT_EXPECTED_QDISC" ;;
+    runtime-drift) printf '运行时漂移（目标 %s / %s，实时 %s / %s）' "$NETWORK_OPT_EXPECTED_CC" "$NETWORK_OPT_EXPECTED_QDISC" "$NETWORK_OPT_LIVE_CC" "$NETWORK_OPT_LIVE_QDISC" ;;
+    persistence-invalid) printf '持久化记录异常，不能确认已应用' ;;
+    orphan-snapshot) printf '仅有回滚记录，不能确认已应用' ;;
+    orphan-config) printf '仅有持久化配置，缺少安全回滚点' ;;
+    *) printf '未应用' ;;
+  esac
+}
+
 show_network_status() {
   congestion="$("$VP_SYSCTL_BIN" -n net.ipv4.tcp_congestion_control 2>/dev/null || printf unknown)"
   available="$("$VP_SYSCTL_BIN" -n net.ipv4.tcp_available_congestion_control 2>/dev/null || printf unknown)"
@@ -2345,11 +2433,32 @@ show_network_status() {
   printf 'TCP 拥塞控制：%s\n' "$congestion"
   printf '可用拥塞算法：%s\n' "$available"
   printf '默认队列规则：%s\n' "$qdisc"
-  if [ -r "$VP_NETWORK_SNAPSHOT" ] && [ -r "$VP_SYSCTL_CONFIG" ]; then
-    printf 'VPS-Node 已验证优化：已应用（可执行 vp network-rollback）\n'
-  else
-    printf 'VPS-Node 已验证优化：未应用\n'
-  fi
+  inspect_network_optimization
+  case "$NETWORK_OPT_STATE" in
+    active)
+      printf 'VPS-Node 已验证优化：已应用且运行一致（%s / %s）\n' "$NETWORK_OPT_EXPECTED_CC" "$NETWORK_OPT_EXPECTED_QDISC"
+      printf '如需恢复优化前参数：vp network-rollback\n'
+      ;;
+    runtime-drift)
+      printf 'VPS-Node 已验证优化：运行时漂移\n'
+      printf '  持久化目标：%s / %s\n' "$NETWORK_OPT_EXPECTED_CC" "$NETWORK_OPT_EXPECTED_QDISC"
+      printf '  实时参数：%s / %s\n' "$NETWORK_OPT_LIVE_CC" "$NETWORK_OPT_LIVE_QDISC"
+      printf '建议：确认其他任务是否改过参数；需要恢复时执行 vp network-rollback，重新应用前必须再次测速验证。\n'
+      ;;
+    persistence-invalid)
+      printf 'VPS-Node 已验证优化：持久化记录异常，不能确认已应用\n'
+      printf '建议：不要直接覆盖文件；先备份并检查 %s 与 %s。\n' "$VP_NETWORK_SNAPSHOT" "$VP_SYSCTL_CONFIG"
+      ;;
+    orphan-snapshot)
+      printf 'VPS-Node 已验证优化：仅有回滚记录，不能确认已应用\n'
+      printf '建议：检查上次操作是否中断；不要在未确认实时参数前删除回滚记录。\n'
+      ;;
+    orphan-config)
+      printf 'VPS-Node 已验证优化：仅有持久化配置，缺少安全回滚点\n'
+      printf '建议：当前状态不可安全自动回滚，请先人工核对配置来源。\n'
+      ;;
+    *) printf 'VPS-Node 已验证优化：未应用\n' ;;
+  esac
   printf '默认测试并发：%s 路\n' "${VP_TEST_CONCURRENCY:-4}"
   public_ipv4 >/dev/null 2>&1 && printf '公网 IPv4：可用\n' || printf '公网 IPv4：未检测到\n'
   public_ipv6 >/dev/null 2>&1 && printf '公网 IPv6：可用\n' || printf '公网 IPv6：未检测到\n'
@@ -4124,8 +4233,8 @@ show_status() {
   else
     printf '  OOM Kill：0\n'
   fi
+  printf '\n已应用的优化参数：\n'
   if [ -r "$VP_CORE_ENV" ]; then
-    printf '\n已应用的优化参数：\n'
     printf '  内存档位：%s\n' "$(awk -F= '$1=="VP_MEMORY_PROFILE"{print $2;exit}' "$VP_CORE_ENV" 2>/dev/null || printf '未知')"
     printf '  核心预算：%s MiB\n' "$(awk -F= '$1=="VP_CORE_BUDGET_MIB"{print $2;exit}' "$VP_CORE_ENV" 2>/dev/null || printf '未知')"
     printf '  GOMEMLIMIT：%s\n' "$(awk -F= '$1=="GOMEMLIMIT"{print $2;exit}' "$VP_CORE_ENV" 2>/dev/null || printf '未知')"
@@ -4142,6 +4251,7 @@ show_status() {
       "$(awk -F= '$1=="VP_DNS_MODE"{print $2;exit}' "$VP_CORE_ENV" 2>/dev/null || printf '未知')" \
       "$(awk -F= '$1=="VP_DNS_SERVERS"{print $2;exit}' "$VP_CORE_ENV" 2>/dev/null || printf '未检测')"
   fi
+  printf '  网络验证优化：%s\n' "$(network_optimization_summary)"
   printf '%s\n\n' '----------------------------------------'
 }
 

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.0-dev.81
+
+- Network optimization status now validates the rollback snapshot and persistent sysctl configuration as strict regular files with exactly one valid value for each managed field.
+- `vp network` distinguishes active-and-consistent state, live runtime drift, invalid persistence, an orphan rollback snapshot, an orphan configuration and a clean unapplied state.
+- The dashboard reuses the same inspection result, so it cannot disagree with `vp network` or claim an optimization merely because two files exist.
+- Regression tests cover all six states, expected/live parameter reporting and recovery to a valid state before the existing transactional rollback cases continue.
+
 ## 0.2.0-dev.80
 
 - Network rollback now stages exact copies of the rollback snapshot and persistent sysctl configuration before touching live kernel values.
