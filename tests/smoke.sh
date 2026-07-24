@@ -113,16 +113,31 @@ VP_LIB_DIR="$TMP/dns-usr" VP_CORE_BIN="$TMP/dns-usr/bin/mihomo" \
 VP_CORE_BACKUP_BIN="$TMP/dns-usr/bin/mihomo.previous" VP_SKIP_SERVICE=1 \
 sh "$ROOT/vp.sh" edit argo-edit argo-renamed 25434 new.example.com /new-path >/dev/null
 grep -q '^argo|argo-renamed|25434|[^|]*|/new-path|new.example.com$' "$TMP/dns-etc/nodes.db"
+VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log" \
+VP_LIB_DIR="$TMP/dns-usr" VP_CORE_BIN="$TMP/dns-usr/bin/mihomo" \
+VP_CORE_BACKUP_BIN="$TMP/dns-usr/bin/mihomo.previous" VP_SKIP_SERVICE=1 \
+sh "$ROOT/vp.sh" argo-add 'phone#backup' 25436 share.example.com '/ws?ed=2048&mode=fast' >/dev/null
+special_link="$(VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log" \
+  VP_LIB_DIR="$TMP/dns-usr" sh "$ROOT/vp.sh" link 'phone#backup')"
+printf '%s\n' "$special_link" | grep -Fq 'path=%2Fws%3Fed%3D2048%26mode%3Dfast#phone%23backup'
 plain_subscription="$(VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log" \
   VP_LIB_DIR="$TMP/dns-usr" VP_PUBLIC_IPV6_OVERRIDE=2001:db8::10 sh "$ROOT/vp.sh" subscription plain)"
-[ "$(printf '%s\n' "$plain_subscription" | grep -c '^vless://')" -eq 3 ]
+[ "$(printf '%s\n' "$plain_subscription" | grep -c '^vless://')" -eq 4 ]
 current_uuid="$(awk -F'|' '$2=="renamed-node"{print $4}' "$TMP/dns-etc/nodes.db")"
 old_uuid="$(awk -F'|' '$1=="renamed-node"{print $3}' "$TMP/dns-etc/credential-rotations.db")"
 printf '%s\n' "$plain_subscription" | grep -Fq "vless://$current_uuid@"
 printf '%s\n' "$plain_subscription" | grep -Fq "vless://$old_uuid@"
 base64_subscription="$(VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log" \
   VP_LIB_DIR="$TMP/dns-usr" VP_PUBLIC_IPV6_OVERRIDE=2001:db8::10 sh "$ROOT/vp.sh" subscription base64)"
-[ "$(printf '%s' "$base64_subscription" | base64 -d | grep -c '^vless://')" -eq 3 ]
+[ "$(printf '%s' "$base64_subscription" | base64 -d | grep -c '^vless://')" -eq 4 ]
+printf '%s\n' 'argo|broken|25437|not-a-uuid|/broken|broken.example.com' >> "$TMP/dns-etc/nodes.db"
+if VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log" \
+  VP_LIB_DIR="$TMP/dns-usr" sh "$ROOT/vp.sh" link broken >/dev/null 2>"$TMP/broken-link.err"; then
+  printf 'malformed node unexpectedly produced a share link\n' >&2
+  exit 1
+fi
+grep -q 'UUID 格式无效' "$TMP/broken-link.err"
+sed -i '/^argo|broken|/d' "$TMP/dns-etc/nodes.db"
 legacy_db="$TMP/legacy-nodes.db"
 cat > "$legacy_db" <<'LEGACY_DB'
 vless-reality|legacy-reality|26433|11111111-1111-4111-8111-111111111111|www.amd.com|www.amd.com:443|legacy-private|legacy-public|a1b2c3d4e5f60708

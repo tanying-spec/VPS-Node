@@ -2,7 +2,7 @@
 
 set -u
 
-VP_VERSION="0.2.0-dev.15"
+VP_VERSION="0.2.0-dev.16"
 VP_CONFIG_DIR="${VP_CONFIG_DIR:-/etc/vps-node}"
 VP_DATA_DIR="${VP_DATA_DIR:-/var/lib/vps-node}"
 VP_LOG_DIR="${VP_LOG_DIR:-/var/log/vps-node}"
@@ -1340,6 +1340,61 @@ finalize_rotation() {
   ok "已完成 $match_count 项凭据轮换，旧凭据不再有效。"
 }
 
+urlencode_component() {
+  LC_ALL=C od -An -tx1 | awk '
+    BEGIN {
+      ORS=""
+      for (n = 0; n < 256; n++) value_by_hex[sprintf("%02x", n)] = n
+    }
+    {
+      for (i = 1; i <= NF; i++) {
+        byte = tolower($i)
+        value = value_by_hex[byte]
+        if ((value >= 48 && value <= 57) || (value >= 65 && value <= 90) ||
+            (value >= 97 && value <= 122) || value == 45 || value == 46 ||
+            value == 95 || value == 126) {
+          printf "%c", value
+        } else {
+          printf "%%%s", toupper(byte)
+        }
+      }
+    }
+  '
+}
+
+valid_uuid() {
+  printf '%s\n' "$1" | awk -F- '
+    NF == 5 && length($1) == 8 && length($2) == 4 && length($3) == 4 &&
+    length($4) == 4 && length($5) == 12 && $0 !~ /[^0-9A-Fa-f-]/ { ok=1 }
+    END { exit ok ? 0 : 1 }
+  '
+}
+
+validate_node_share_record() {
+  share_record="$1"
+  IFS='|' read -r share_proto share_name share_port share_uuid share_sni share_dest share_private share_public share_sid share_family share_extra <<EOF
+$share_record
+EOF
+  [ -z "$share_extra" ] || { error "节点记录字段数量异常，无法生成可靠链接。"; return 1; }
+  [ -n "$share_name" ] || { error "节点名称为空，无法生成链接。"; return 1; }
+  valid_uuid "$share_uuid" || { error "节点 $share_name 的 UUID 格式无效。"; return 1; }
+  case "$share_proto" in
+    reality)
+      case "$share_port" in ''|*[!0-9]*) error "节点 $share_name 的端口无效。"; return 1 ;; esac
+      [ "$share_port" -ge 1 ] && [ "$share_port" -le 65535 ] || { error "节点 $share_name 的端口超出范围。"; return 1; }
+      [ -n "$share_sni" ] && [ -n "$share_public" ] && [ -n "$share_sid" ] || {
+        error "节点 $share_name 缺少 Reality SNI、公钥或 Short ID。"; return 1;
+      }
+      case "${share_family:-ipv4}" in ipv4|ipv6) ;; *) error "节点 $share_name 的地址族无效。"; return 1 ;; esac
+      ;;
+    argo)
+      [ -n "$share_dest" ] || { error "节点 $share_name 缺少 Tunnel 公网域名。"; return 1; }
+      case "$share_sni" in /*) ;; *) error "节点 $share_name 的 WebSocket 路径必须以 / 开头。"; return 1 ;; esac
+      ;;
+    *) error "暂不支持该协议的分享链接。"; return 1 ;;
+  esac
+}
+
 node_share_link() {
   record="$1"
   credential_override="${2:-}"
@@ -1348,17 +1403,21 @@ node_share_link() {
 $record
 EOF
   [ -n "$credential_override" ] && uuid="$credential_override"
+  validate_node_share_record "$(printf '%s\n' "$record" | awk -F'|' -v OFS='|' -v credential="$uuid" '{$4=credential; print}')" || return 1
   label="$name$label_suffix"
+  encoded_label="$(printf '%s' "$label" | urlencode_component)" || return 1
   case "$proto" in
     reality)
+      address="$(link_address "${address_family:-ipv4}")"
+      [ -n "$address" ] || { error "无法取得节点 $name 的公网 ${address_family:-ipv4} 地址，未输出残缺链接。"; return 1; }
       printf 'vless://%s@%s:%s?encryption=none&security=reality&sni=%s&fp=chrome&pbk=%s&sid=%s&type=tcp#%s\n' \
-        "$uuid" "$(link_address "${address_family:-ipv4}")" "$port" "$sni" "$public" "$short_id" "$label"
+        "$uuid" "$address" "$port" "$sni" "$public" "$short_id" "$encoded_label"
       ;;
     argo)
       path="$sni"
       host="$dest"
-      encoded_path="$(printf '%s' "$path" | sed 's#/#%2F#g')"
-      printf 'vless://%s@%s:443?encryption=none&security=tls&sni=%s&fp=chrome&type=ws&host=%s&path=%s#%s\n' "$uuid" "$host" "$host" "$host" "$encoded_path" "$label"
+      encoded_path="$(printf '%s' "$path" | urlencode_component)" || return 1
+      printf 'vless://%s@%s:443?encryption=none&security=tls&sni=%s&fp=chrome&type=ws&host=%s&path=%s#%s\n' "$uuid" "$host" "$host" "$host" "$encoded_path" "$encoded_label"
       ;;
     *) error "暂不支持该协议的分享链接。"; return 1 ;;
   esac

@@ -1,5 +1,7 @@
 # VPS-Node
 
+> `0.2.0-dev.16` 分享链接会先执行完整性检查，再安全编码路径和节点名称；UUID、端口、Reality 参数、Tunnel 域名、WebSocket 路径或公网地址异常时会明确报错，不再输出看似完整但无法使用的残缺链接。订阅导出执行同样的检查。
+
 > `0.2.0-dev.15` 新增 `vp migrate-mh /etc/mihomo/nodes.db --dry-run` 和 `--apply`。只迁移能够无损映射的 Reality 与标准 Argo WS；不猜测转换其他协议，也不读取旧 Tunnel Token、用户、iptables、cron 或 sysctl。
 
 > `0.2.0-dev.13` Reality 节点可明确选择 `ipv4` 或 `ipv6`；IPv6 会先验证公网可用性，分享链接自动使用方括号。`vp subscription base64` 可导出全部节点，并在凭据轮换宽限期内同时包含新旧链接。

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.0-dev.16
+
+- Share links are now validated before output; malformed UUIDs, ports, Reality fields, Tunnel hosts, WebSocket paths and unavailable public addresses produce specific errors instead of incomplete links.
+- WebSocket paths and node labels use byte-safe percent encoding, so reserved characters cannot corrupt URI query or fragment boundaries.
+- Subscription export inherits the same validation and aborts rather than silently including a broken node.
+
 ## 0.2.0-dev.15
 
 - Added preview-first migration from Mihomo-lite-argo `nodes.db`.
