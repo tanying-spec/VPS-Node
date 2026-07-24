@@ -2,7 +2,7 @@
 
 set -u
 
-VP_VERSION="0.1.0-dev.2"
+VP_VERSION="0.2.0-dev.1"
 VP_CONFIG_DIR="${VP_CONFIG_DIR:-/etc/vps-node}"
 VP_DATA_DIR="${VP_DATA_DIR:-/var/lib/vps-node}"
 VP_LOG_DIR="${VP_LOG_DIR:-/var/log/vps-node}"
@@ -1022,12 +1022,27 @@ EOF
   IFS='|' read -r http_code connect_time total_time <<EOF
 $result
 EOF
-  cleanup_node_test
-  trap - EXIT HUP INT TERM
   if [ "$http_code" = "204" ]; then
+    test_bytes="${VP_TEST_BYTES:-5242880}"
+    case "$test_bytes" in ''|*[!0-9]*) test_bytes=5242880 ;; esac
+    speed_result="$(curl -sS -o /dev/null -w '%{http_code}|%{size_download}|%{speed_download}' --max-time 45 --proxy "http://127.0.0.1:$client_port" "https://speed.cloudflare.com/__down?bytes=$test_bytes" 2>/dev/null || true)"
+    IFS='|' read -r speed_http speed_size speed_bps <<EOF
+$speed_result
+EOF
+    cleanup_node_test
+    trap - EXIT HUP INT TERM
     ok "节点 $name 端到端测试成功：连接 ${connect_time}s，总耗时 ${total_time}s。"
+    if [ "$speed_http" = "200" ] && [ -n "$speed_bps" ]; then
+      speed_mib="$(awk -v n="$speed_bps" 'BEGIN { printf "%.2f", n / 1048576 }')"
+      size_mib="$(awk -v n="${speed_size:-0}" 'BEGIN { printf "%.1f", n / 1048576 }')"
+      printf '测速结果：下载 %s MiB，速度 %s MiB/s。\n' "$size_mib" "$speed_mib"
+    else
+      warn "协议认证成功，但测速数据下载失败。"
+    fi
     return 0
   fi
+  cleanup_node_test
+  trap - EXIT HUP INT TERM
   if [ "$proto" = "reality" ] && [ -z "${VP_TEST_SERVER:-}" ]; then
     if VP_TEST_SERVER=127.0.0.1 test_node_end_to_end "$target" >/dev/null 2>&1; then
       warn "节点 $name 的本地协议认证正常，但 VPS 无法通过自身公网 IP 回环验证；请从外部网络确认公网端口可达。"
