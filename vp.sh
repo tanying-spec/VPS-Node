@@ -21,6 +21,13 @@ VP_CORE_ENV="$VP_CONFIG_DIR/core.env"
 VP_MIXED_PORT="${VP_MIXED_PORT:-17890}"
 VP_CONTROLLER_PORT="${VP_CONTROLLER_PORT:-19090}"
 VP_MIHOMO_API="${VP_MIHOMO_API:-https://api.github.com/repos/MetaCubeX/mihomo/releases/latest}"
+VP_TUNNEL_BIN="${VP_TUNNEL_BIN:-$VP_LIB_DIR/bin/cloudflared}"
+VP_TUNNEL_BACKUP_BIN="${VP_TUNNEL_BACKUP_BIN:-$VP_LIB_DIR/bin/cloudflared.previous}"
+VP_TUNNEL_SERVICE="${VP_TUNNEL_SERVICE:-vps-node-tunnel}"
+VP_TUNNEL_TOKEN_FILE="$VP_SECRETS_DIR/cloudflared.token"
+VP_TUNNEL_RUNNER="$VP_LIB_DIR/bin/cloudflared-run"
+VP_TUNNEL_METRICS_PORT="${VP_TUNNEL_METRICS_PORT:-22041}"
+VP_CLOUDFLARED_API="${VP_CLOUDFLARED_API:-https://api.github.com/repos/cloudflare/cloudflared/releases/latest}"
 
 is_tty() { [ -t 1 ]; }
 color() { is_tty && printf '\033[%sm' "$1" || true; }
@@ -399,11 +406,161 @@ render_mihomo_config() {
           printf "      dest: '%s'\n      private-key: '%s'\n" "$(yaml_quote "$dest")" "$(yaml_quote "$private_key")"
           printf "      short-id:\n        - '%s'\n      server-names:\n        - '%s'\n" "$(yaml_quote "$short_id")" "$(yaml_quote "$sni")"
           ;;
+        argo)
+          printf "  - name: '%s'\n" "$(yaml_quote "$name")"
+          printf '    type: vless\n    port: %s\n    listen: 127.0.0.1\n    allow-insecure: true\n' "$port"
+          printf "    users:\n      - username: '%s'\n        uuid: '%s'\n" "$(yaml_quote "$name")" "$(yaml_quote "$uuid")"
+          printf "    ws-path: '%s'\n" "$(yaml_quote "$sni")"
+          ;;
       esac
     done < "$nodes_file"
     printf 'proxies: []\nproxy-groups:\n  - name: Proxy\n    type: select\n    proxies:\n      - DIRECT\nrules:\n  - MATCH,DIRECT\n'
   } > "$output_file"
   chmod 600 "$output_file"
+}
+
+cloudflared_download_url() {
+  case "$(detect_arch)" in
+    amd64) cf_arch=amd64 ;;
+    arm64) cf_arch=arm64 ;;
+    armv7) cf_arch=arm ;;
+    *) error "cloudflared 不支持当前架构。"; return 1 ;;
+  esac
+  release_json="$(curl -fsSL --max-time 30 "$VP_CLOUDFLARED_API")" || { error "无法访问 cloudflared Release API。"; return 1; }
+  url="$(printf '%s\n' "$release_json" | sed -n 's/.*"browser_download_url"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | grep -E "cloudflared-linux-${cf_arch}$" | head -n 1 || true)"
+  [ -n "$url" ] || { error "Release 中没有适配的 cloudflared。"; return 1; }
+  printf '%s' "$url"
+}
+
+install_tunnel_binary() {
+  mkdir -p "$(dirname "$VP_TUNNEL_BIN")"
+  tunnel_tmp="$(mktemp /tmp/vp-cloudflared.XXXXXX)" || return 1
+  if [ -n "${VP_TUNNEL_SOURCE_BIN:-}" ]; then
+    cp "$VP_TUNNEL_SOURCE_BIN" "$tunnel_tmp" || { rm -f "$tunnel_tmp"; return 1; }
+  else
+    url="$(cloudflared_download_url)" || { rm -f "$tunnel_tmp"; return 1; }
+    info "正在下载 cloudflared。"
+    curl -fL --max-time 180 "$url" -o "$tunnel_tmp" || { rm -f "$tunnel_tmp"; error "cloudflared 下载失败。"; return 1; }
+  fi
+  chmod 755 "$tunnel_tmp"
+  "$tunnel_tmp" version >/dev/null 2>&1 || { rm -f "$tunnel_tmp"; error "cloudflared 无法运行。"; return 1; }
+  [ -x "$VP_TUNNEL_BIN" ] && cp "$VP_TUNNEL_BIN" "$VP_TUNNEL_BACKUP_BIN"
+  mv "$tunnel_tmp" "$VP_TUNNEL_BIN"
+}
+
+install_tunnel_service() {
+  [ "${VP_SKIP_SERVICE:-0}" = "1" ] && return 0
+  cat > "$VP_TUNNEL_RUNNER" <<EOF
+#!/bin/sh
+exec "$VP_TUNNEL_BIN" tunnel --no-autoupdate --protocol http2 --metrics "127.0.0.1:$VP_TUNNEL_METRICS_PORT" run --token-file "$VP_TUNNEL_TOKEN_FILE"
+EOF
+  chmod 700 "$VP_TUNNEL_RUNNER"
+  case "$(service_manager)" in
+    systemd)
+      cat > "/etc/systemd/system/${VP_TUNNEL_SERVICE}.service" <<EOF
+[Unit]
+Description=VPS-Node Cloudflare Tunnel
+After=network-online.target $VP_CORE_SERVICE.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=$VP_TUNNEL_RUNNER
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target
+EOF
+      systemctl daemon-reload
+      systemctl enable "$VP_TUNNEL_SERVICE" >/dev/null
+      ;;
+    openrc)
+      cat > "/etc/init.d/$VP_TUNNEL_SERVICE" <<EOF
+#!/sbin/openrc-run
+description="VPS-Node Cloudflare Tunnel"
+command="$VP_TUNNEL_RUNNER"
+supervisor="supervise-daemon"
+output_log="$VP_LOG_DIR/tunnel.log"
+error_log="$VP_LOG_DIR/tunnel.log"
+respawn_delay=5
+respawn_max=0
+depend() { need net; after $VP_CORE_SERVICE; }
+EOF
+      chmod 755 "/etc/init.d/$VP_TUNNEL_SERVICE"
+      rc-update add "$VP_TUNNEL_SERVICE" default >/dev/null
+      ;;
+    *) error "无法安装 Tunnel 服务。"; return 1 ;;
+  esac
+}
+
+tunnel_service_restart() {
+  [ "${VP_SKIP_SERVICE:-0}" = "1" ] && return 0
+  service_action restart "$VP_TUNNEL_SERVICE" >/dev/null 2>&1 || return 1
+  attempts=0
+  while [ "$attempts" -lt 15 ]; do
+    service_state "$VP_TUNNEL_SERVICE" | grep -Eq 'active|started' && return 0
+    sleep 1
+    attempts=$((attempts + 1))
+  done
+  return 1
+}
+
+tunnel_install() {
+  need_root || return 1
+  init_layout >/dev/null || return 1
+  token_source="${1:-}"
+  if [ -n "$token_source" ] && [ -r "$token_source" ]; then
+    token="$(cat "$token_source")"
+  elif [ -n "${VP_TUNNEL_TOKEN:-}" ]; then
+    token="$VP_TUNNEL_TOKEN"
+  else
+    printf '请输入 Cloudflare Tunnel Token：' >&2
+    stty -echo 2>/dev/null || true
+    read -r token || true
+    stty echo 2>/dev/null || true
+    printf '\n' >&2
+  fi
+  [ -n "${token:-}" ] || { error "Token 不能为空。"; return 1; }
+  case "$token" in *[!A-Za-z0-9._-]*) error "Token 格式无效。"; return 1 ;; esac
+  install_tunnel_binary || return 1
+  printf '%s\n' "$token" > "$VP_TUNNEL_TOKEN_FILE"
+  chmod 600 "$VP_TUNNEL_TOKEN_FILE"
+  install_tunnel_service || return 1
+  tunnel_service_restart || { error "Tunnel 启动失败。"; return 1; }
+  ok "Cloudflare Tunnel 已安装。"
+}
+
+argo_add() {
+  need_root || return 1
+  [ -x "$VP_CORE_BIN" ] || { error "请先安装代理核心。"; return 1; }
+  name="${1:-argo-1}"
+  requested_port="${2:-}"
+  host="${3:-}"
+  path="${4:-/$(random_hex 8)}"
+  [ -n "$host" ] || { error "请提供 Tunnel 公网域名。"; return 1; }
+  case "$name$host$path" in *'|'*|*' '*|*\"*|*\'*) error "参数包含非法字符。"; return 1 ;; esac
+  case "$path" in /*) ;; *) path="/$path" ;; esac
+  port="$(choose_port "$requested_port")" || { error "本地端口不可用。"; return 1; }
+  uuid="$(new_uuid)"
+  begin_state_transaction argo-add || return 1
+  candidate_root="$VP_TX_ACTIVE/candidate"
+  if awk -F'|' -v n="$name" '$2==n{found=1} END{exit found?0:1}' "$candidate_root/nodes.db"; then
+    abort_state_transaction; error "节点名称已存在。"; return 1
+  fi
+  printf 'argo|%s|%s|%s|%s|%s\n' "$name" "$port" "$uuid" "$path" "$host" >> "$candidate_root/nodes.db"
+  render_mihomo_config "$candidate_root/nodes.db" "$candidate_root/generated/mihomo.yaml"
+  if ! validate_state_candidate || ! "$VP_CORE_BIN" -t -d "$VP_CONFIG_DIR" -f "$candidate_root/generated/mihomo.yaml" >/dev/null 2>&1; then
+    abort_state_transaction; error "Argo 候选配置验证失败。"; return 1
+  fi
+  activate_state_candidate || { abort_state_transaction; return 1; }
+  if ! core_service_restart; then
+    abort_state_transaction; core_service_restart >/dev/null 2>&1 || true
+    error "Argo 本地入口启动失败，已恢复原配置。"; return 1
+  fi
+  commit_state_transaction
+  ok "Argo 备用节点已创建：$name。"
+  warn "请确认 Cloudflare Tunnel 公网主机名的服务指向 http://127.0.0.1:$port。"
 }
 
 install_core_service() {
@@ -600,6 +757,12 @@ EOF
     reality)
       printf 'vless://%s@%s:%s?encryption=none&security=reality&sni=%s&fp=chrome&pbk=%s&sid=%s&type=tcp#%s\n' "$uuid" "$(public_ip)" "$port" "$sni" "$public" "$short_id" "$name"
       ;;
+    argo)
+      path="$sni"
+      host="$dest"
+      encoded_path="$(printf '%s' "$path" | sed 's#/#%2F#g')"
+      printf 'vless://%s@%s:443?encryption=none&security=tls&sni=%s&fp=chrome&type=ws&host=%s&path=%s#%s\n' "$uuid" "$host" "$host" "$host" "$encoded_path" "$name"
+      ;;
     *) error "暂不支持该协议的分享链接。"; return 1 ;;
   esac
 }
@@ -713,6 +876,8 @@ case "${1:-}" in
   init) init_layout ;;
   core-install|install-core) core_install ;;
   reality-add|add-reality) shift; reality_add "$@" ;;
+  tunnel-install|install-tunnel) shift; tunnel_install "$@" ;;
+  argo-add|add-argo) shift; argo_add "$@" ;;
   nodes|list) show_nodes ;;
   link) shift; show_node_link "$@" ;;
   status) show_status ;;
@@ -721,7 +886,7 @@ case "${1:-}" in
   uninstall) uninstall_project ;;
   debug-tx) shift; debug_transaction "$@" ;;
   help|-h|--help)
-    printf '用法：vp [status|doctor|init|core-install|reality-add|nodes|link|uninstall|version]\n'
+    printf '用法：vp [status|doctor|init|core-install|reality-add|tunnel-install|argo-add|nodes|link|uninstall|version]\n'
     ;;
   '') menu ;;
   *) error "未知命令：$1"; exit 2 ;;

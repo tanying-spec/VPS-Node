@@ -67,6 +67,25 @@ if [ -n "${VP_TEST_MIHOMO_BIN:-}" ]; then
   VP_CONFIG_DIR="$TMP/core-etc" VP_DATA_DIR="$TMP/core-lib" VP_LOG_DIR="$TMP/core-log" \
   VP_LIB_DIR="$TMP/core-usr-lib" VP_CORE_BIN="$TMP/core-usr-lib/bin/mihomo" \
   sh "$ROOT/vp.sh" link test-reality | grep -q '^vless://'
+
+  VP_CONFIG_DIR="$TMP/core-etc" VP_DATA_DIR="$TMP/core-lib" VP_LOG_DIR="$TMP/core-log" \
+  VP_LIB_DIR="$TMP/core-usr-lib" VP_CORE_BIN="$TMP/core-usr-lib/bin/mihomo" \
+  VP_CORE_BACKUP_BIN="$TMP/core-usr-lib/bin/mihomo.previous" VP_SKIP_SERVICE=1 \
+  sh "$ROOT/vp.sh" argo-add test-argo 25434 tunnel.example.com /private-path >/dev/null
+  grep -q '^argo|test-argo|25434|' "$TMP/core-etc/nodes.db"
+  VP_CONFIG_DIR="$TMP/core-etc" VP_DATA_DIR="$TMP/core-lib" VP_LOG_DIR="$TMP/core-log" \
+  VP_LIB_DIR="$TMP/core-usr-lib" VP_CORE_BIN="$TMP/core-usr-lib/bin/mihomo" \
+  sh "$ROOT/vp.sh" link test-argo | grep -q '^vless://'
+
+  if [ -n "${VP_TEST_CLOUDFLARED_BIN:-}" ]; then
+    printf 'test.token_value-123\n' > "$TMP/tunnel.token"
+    VP_CONFIG_DIR="$TMP/core-etc" VP_DATA_DIR="$TMP/core-lib" VP_LOG_DIR="$TMP/core-log" \
+    VP_LIB_DIR="$TMP/core-usr-lib" VP_TUNNEL_BIN="$TMP/core-usr-lib/bin/cloudflared" \
+    VP_TUNNEL_BACKUP_BIN="$TMP/core-usr-lib/bin/cloudflared.previous" \
+    VP_TUNNEL_SOURCE_BIN="$VP_TEST_CLOUDFLARED_BIN" VP_SKIP_SERVICE=1 \
+    sh "$ROOT/vp.sh" tunnel-install "$TMP/tunnel.token" >/dev/null
+    [ "$(stat -c '%a' "$TMP/core-etc/secrets/cloudflared.token")" = "600" ]
+  fi
 fi
 
 printf 'smoke: ok\n'
