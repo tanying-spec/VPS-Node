@@ -2,7 +2,7 @@
 
 set -u
 
-VP_VERSION="0.2.0-dev.26"
+VP_VERSION="0.2.0-dev.27"
 VP_CONFIG_DIR="${VP_CONFIG_DIR:-/etc/vps-node}"
 VP_DATA_DIR="${VP_DATA_DIR:-/var/lib/vps-node}"
 VP_LOG_DIR="${VP_LOG_DIR:-/var/log/vps-node}"
@@ -42,6 +42,7 @@ VP_CLOUDFLARED_API="${VP_CLOUDFLARED_API:-https://api.github.com/repos/cloudflar
 VP_BACKUP_DIR="$VP_DATA_DIR/backups"
 VP_UNINSTALL_BACKUP_DIR="${VP_UNINSTALL_BACKUP_DIR:-/root}"
 VP_STABILITY_LOG="${VP_STABILITY_LOG:-$VP_LOG_DIR/stability.log}"
+VP_SELF_HEAL_LOCK="${VP_SELF_HEAL_LOCK:-$VP_DATA_DIR/self-heal.lock}"
 VP_WATCHDOG_RUNNER="${VP_WATCHDOG_RUNNER:-$VP_LIB_DIR/bin/watchdog-run}"
 VP_WATCHDOG_SERVICE="${VP_WATCHDOG_SERVICE:-vps-node-watchdog}"
 VP_CLI_PATH="${VP_CLI_PATH:-/usr/local/bin/vp}"
@@ -2371,6 +2372,10 @@ stability_event() {
   event_action="$2"
   event_detail="$3"
   mkdir -p "$VP_LOG_DIR" || return 1
+  if [ "$event_status" = healthy ] && [ -r "$VP_STABILITY_LOG" ] &&
+     tail -n 1 "$VP_STABILITY_LOG" 2>/dev/null | grep -Fq "|$event_status|$event_action|$event_detail"; then
+    return 0
+  fi
   printf '%s|%s|%s|%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$event_status" "$event_action" "$event_detail" >> "$VP_STABILITY_LOG"
   chmod 600 "$VP_STABILITY_LOG"
   event_lines="$(wc -l < "$VP_STABILITY_LOG" 2>/dev/null || printf 0)"
@@ -2381,6 +2386,28 @@ stability_event() {
   fi
 }
 
+acquire_self_heal_lock() {
+  mkdir -p "$(dirname "$VP_SELF_HEAL_LOCK")" || return 1
+  if mkdir "$VP_SELF_HEAL_LOCK" 2>/dev/null; then
+    printf '%s\n' "$$" > "$VP_SELF_HEAL_LOCK/pid"
+    return 0
+  fi
+  lock_pid="$(cat "$VP_SELF_HEAL_LOCK/pid" 2>/dev/null || true)"
+  if pid_is_alive "$lock_pid"; then
+    return 1
+  fi
+  rm -rf "$VP_SELF_HEAL_LOCK"
+  mkdir "$VP_SELF_HEAL_LOCK" 2>/dev/null || return 1
+  printf '%s\n' "$$" > "$VP_SELF_HEAL_LOCK/pid"
+}
+
+release_self_heal_lock() {
+  [ -d "$VP_SELF_HEAL_LOCK" ] || return 0
+  lock_pid="$(cat "$VP_SELF_HEAL_LOCK/pid" 2>/dev/null || true)"
+  [ "$lock_pid" = "$$" ] && rm -rf "$VP_SELF_HEAL_LOCK"
+  return 0
+}
+
 self_heal_once() {
   need_root || return 1
   quiet=0
@@ -2388,6 +2415,11 @@ self_heal_once() {
   had_transaction=0
   [ -d "$VP_TX_ACTIVE" ] && had_transaction=1
   init_layout >/dev/null || return 1
+  if ! acquire_self_heal_lock; then
+    [ "$quiet" -eq 1 ] || warn "已有自愈检查正在运行，本次跳过。"
+    return 0
+  fi
+  trap 'release_self_heal_lock' EXIT HUP INT TERM
   repaired=0
   failures=0
   oom_snapshot
@@ -2430,6 +2462,8 @@ self_heal_once() {
   if [ "$quiet" -eq 0 ]; then
     [ "$failures" -eq 0 ] && ok "自愈检查完成：修复 $repaired 项。" || error "自愈检查完成：修复 $repaired 项，失败 $failures 项。"
   fi
+  release_self_heal_lock
+  trap - EXIT HUP INT TERM
   [ "$failures" -eq 0 ]
 }
 
@@ -2489,6 +2523,13 @@ EOF
 
 show_stability() {
   printf '后台自愈运行器：%s\n' "$([ -x "$VP_WATCHDOG_RUNNER" ] && printf '已安装' || printf '未安装')"
+  if [ -d "$VP_SELF_HEAL_LOCK" ] && pid_is_alive "$(cat "$VP_SELF_HEAL_LOCK/pid" 2>/dev/null || true)"; then
+    printf '当前检查：运行中\n'
+  elif [ -d "$VP_SELF_HEAL_LOCK" ]; then
+    printf '当前检查：发现过期锁，下次检查会自动回收\n'
+  else
+    printf '当前检查：空闲\n'
+  fi
   if [ -r "$VP_STABILITY_LOG" ]; then
     printf '最近稳定性事件：\n'
     tail -n 20 "$VP_STABILITY_LOG"

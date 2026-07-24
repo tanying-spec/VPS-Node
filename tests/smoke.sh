@@ -499,6 +499,26 @@ VP_LIB_DIR="$TMP/dns-usr" VP_CORE_BIN="$TMP/dns-usr/bin/mihomo" \
 VP_CORE_BACKUP_BIN="$TMP/dns-usr/bin/mihomo.previous" VP_SKIP_SERVICE=1 \
 sh "$ROOT/vp.sh" self-heal >/dev/null
 grep -q '|recovered|core|service restarted$' "$TMP/dns-log/stability.log"
+mkdir -p "$TMP/dns-lib/self-heal.lock"
+printf '%s\n' "$$" > "$TMP/dns-lib/self-heal.lock/pid"
+stability_lines_before="$(wc -l < "$TMP/dns-log/stability.log")"
+VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log" \
+VP_LIB_DIR="$TMP/dns-usr" VP_CORE_BIN="$TMP/dns-usr/bin/mihomo" VP_SKIP_SERVICE=1 \
+sh "$ROOT/vp.sh" self-heal --quiet
+[ "$(wc -l < "$TMP/dns-log/stability.log")" = "$stability_lines_before" ]
+[ -d "$TMP/dns-lib/self-heal.lock" ]
+printf '99999999\n' > "$TMP/dns-lib/self-heal.lock/pid"
+VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log" \
+VP_LIB_DIR="$TMP/dns-usr" VP_CORE_BIN="$TMP/dns-usr/bin/mihomo" VP_SKIP_SERVICE=1 \
+sh "$ROOT/vp.sh" self-heal --quiet
+[ ! -e "$TMP/dns-lib/self-heal.lock" ]
+
+dedupe_root="$TMP/self-heal-dedupe"
+VP_CONFIG_DIR="$dedupe_root/etc" VP_DATA_DIR="$dedupe_root/lib" VP_LOG_DIR="$dedupe_root/log" \
+VP_LIB_DIR="$dedupe_root/usr" VP_SKIP_SERVICE=1 sh "$ROOT/vp.sh" self-heal --quiet
+VP_CONFIG_DIR="$dedupe_root/etc" VP_DATA_DIR="$dedupe_root/lib" VP_LOG_DIR="$dedupe_root/log" \
+VP_LIB_DIR="$dedupe_root/usr" VP_SKIP_SERVICE=1 sh "$ROOT/vp.sh" self-heal --quiet
+[ "$(grep -c '|healthy|check|no action required$' "$dedupe_root/log/stability.log")" -eq 1 ]
 VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log" \
 VP_LIB_DIR="$TMP/dns-usr" VP_CORE_BIN="$TMP/dns-usr/bin/mihomo" \
 VP_CORE_BACKUP_BIN="$TMP/dns-usr/bin/mihomo.previous" VP_CLI_PATH="$ROOT/vp.sh" VP_SKIP_SERVICE=1 \

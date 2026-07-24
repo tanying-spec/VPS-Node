@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.0-dev.27
+
+- Periodic/manual self-heal runs now use a PID-aware lock so overlapping timers cannot race into duplicate service restarts.
+- Live locks cause a zero-impact skip; stale locks left by crashes are reclaimed automatically and the lock is removed on normal/signal exit.
+- Consecutive identical healthy events are deduplicated while failures/recoveries remain fully recorded; tests cover live-lock skip, stale-lock recovery and log deduplication.
+
 ## 0.2.0-dev.26
 
 - Cloudflare Tunnel metrics port now detects conflicts, automatically avoids Mihomo internal ports and persists the selected value for health/status and future updates.
