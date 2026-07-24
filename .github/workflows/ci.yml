@@ -32,6 +32,28 @@ jobs:
           grep -Fq 'ACCEPT_HOST="134.209.180.134"' tests/isolated_acceptance.sh
           grep -Fq 'ACCEPT_HOST="134.209.180.134"' tests/memory_profiles.sh
           ! grep -R 'VP_ACCEPT_HOST' tests
+          grep -Fq "\$AuthorizedHost = '134.209.180.134'" tests/run_authorized_host.ps1
+          grep -Fq "\$AuthorizedPort = 18750" tests/run_authorized_host.ps1
+          grep -Fq "'BatchMode=yes'" tests/run_authorized_host.ps1
+          grep -Fq "'PasswordAuthentication=no'" tests/run_authorized_host.ps1
+          grep -Fq "'PreferredAuthentications=publickey'" tests/run_authorized_host.ps1
+          grep -Fq "vp.sh vp.sh.sha256 tests/isolated_acceptance.sh tests/memory_profiles.sh" tests/run_authorized_host.ps1
+          ! grep -Eqi 'sshpass|plink|PreferredAuthentications=password|PasswordAuthentication=yes' tests/run_authorized_host.ps1
+          ! grep -Eq '^[[:space:]]*\[(string|int)\]\$Authorized(Host|Port)' tests/run_authorized_host.ps1
+      - name: Check authorized-host PowerShell syntax
+        shell: pwsh
+        run: |
+          $tokens = $null
+          $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile(
+            (Resolve-Path 'tests/run_authorized_host.ps1'),
+            [ref]$tokens,
+            [ref]$errors
+          ) | Out-Null
+          if ($errors.Count -gt 0) {
+            $errors | ForEach-Object { Write-Error $_.Message }
+            exit 1
+          }
       - name: Run portable smoke test
         shell: bash
         run: |

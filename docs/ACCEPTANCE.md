@@ -2,6 +2,29 @@
 
 允许的实机只有 `134.209.180.134`。不得在其他主机运行本验收。
 
+在 Windows 项目目录中推荐使用固定入口：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\tests\run_authorized_host.ps1
+```
+
+该入口固定连接 `root@134.209.180.134:18750`，强制 `BatchMode=yes`、关闭密码和键盘交互认证，仅使用专用公钥。它只上传 `vp.sh`、校验文件和两个验收脚本到随机 `/tmp`，不会把整个工作区、Token 或其他本地文件上传。成功后证据保存在本地 `evidence/<run-id>`（已从 Git 忽略），远端临时源码无论成功失败都会尝试清理。
+
+如测试机尚未授权专用公钥，请在测试机控制台执行一次（不会更改 SSH 端口或认证策略）：
+
+```sh
+install -d -m 700 /root/.ssh
+key='ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJS6tPqkMs4Q/FbG2ZM8wWyPlXl/ppT2C/DiKLeJjIz9 codex-u683775765-62.72.48.31'
+grep -qxF "$key" /root/.ssh/authorized_keys 2>/dev/null || printf '%s\n' "$key" >> /root/.ssh/authorized_keys
+chmod 600 /root/.ssh/authorized_keys
+```
+
+只运行隔离功能验收、跳过内存档位时：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\tests\run_authorized_host.ps1 -SkipMemoryProfiles
+```
+
 脚本中的目标 IP 为常量，不能通过环境变量改成其他主机。旧的非隔离系统测试已经删除。
 
 验收脚本使用：

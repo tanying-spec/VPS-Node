@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.0-dev.37
+
+- Added a Windows PowerShell authorized-host runner fixed to `134.209.180.134:18750`; host and port are constants rather than user-overridable parameters.
+- The runner enforces public-key-only SSH, uploads only four allowlisted acceptance files into a random `/tmp` directory, discovers the running Mihomo executable read-only and never performs a formal installation.
+- It runs isolated acceptance plus memory profiles, downloads only redacted evidence, verifies every SHA-256 locally and removes the remote temporary source in `finally` handling.
+- CI statically forbids password helpers/authentication and host overrides, checks the PowerShell AST, and retains the existing shell-side fixed-host guards.
+
 ## 0.2.0-dev.36
 
 - Backup creation now refuses overwrite, requires SHA-256 and commits archive/checksum from same-directory temporary files; checksum commit failure removes the incomplete restore point.
