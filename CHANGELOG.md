@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.0-dev.9
+
+- Added read-only installer modes: `--check` for compatibility/conflicts and `--dry-run` for an exact action preview.
+- Installation now reports supported architecture, OS, init system, memory, disk, dependencies, GitHub reachability, existing proxy processes and reserved-port conflicts before writing files.
+- Existing Mihomo, Xray, sing-box and cloudflared processes are explicitly preserved; the installer does not stop or modify them.
+- Added isolated installer tests proving check and preview modes do not create the management script or state directories.
+
 ## 0.2.0-dev.8
 
 - Added SHA-256 verified redacted diagnostic reports that exclude credentials, UUIDs, domains and complete node links.

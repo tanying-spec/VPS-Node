@@ -25,4 +25,6 @@ jobs:
           test "$expected" = "$actual"
       - name: Run portable smoke test
         shell: bash
-        run: sudo sh tests/smoke.sh
+        run: |
+          sudo sh tests/smoke.sh
+          sudo sh tests/install_smoke.sh

@@ -22,6 +22,18 @@
 
 ## 安装
 
+安装前只检查，不修改系统：
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/tanying-spec/VPS-Node/main/install.sh | sh -s -- --check
+```
+
+预览正式安装会做什么：
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/tanying-spec/VPS-Node/main/install.sh | sh -s -- --dry-run
+```
+
 ```sh
 curl -fsSL https://raw.githubusercontent.com/tanying-spec/VPS-Node/main/install.sh | sh
 vp
