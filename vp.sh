@@ -2,7 +2,7 @@
 
 set -u
 
-VP_VERSION="0.2.0-dev.5"
+VP_VERSION="0.2.0-dev.6"
 VP_CONFIG_DIR="${VP_CONFIG_DIR:-/etc/vps-node}"
 VP_DATA_DIR="${VP_DATA_DIR:-/var/lib/vps-node}"
 VP_LOG_DIR="${VP_LOG_DIR:-/var/log/vps-node}"
@@ -34,6 +34,7 @@ VP_TUNNEL_RUNNER="$VP_LIB_DIR/bin/cloudflared-run"
 VP_TUNNEL_METRICS_PORT="${VP_TUNNEL_METRICS_PORT:-22041}"
 VP_CLOUDFLARED_API="${VP_CLOUDFLARED_API:-https://api.github.com/repos/cloudflare/cloudflared/releases/latest}"
 VP_BACKUP_DIR="$VP_DATA_DIR/backups"
+VP_UNINSTALL_BACKUP_DIR="${VP_UNINSTALL_BACKUP_DIR:-/root}"
 VP_CLI_PATH="${VP_CLI_PATH:-/usr/local/bin/vp}"
 VP_CLI_BACKUP_PATH="${VP_CLI_BACKUP_PATH:-$VP_CLI_PATH.previous}"
 VP_REPO="${VP_REPO:-tanying-spec/VPS-Node}"
@@ -1783,9 +1784,42 @@ safe_repair() {
   ok "安全修复完成：执行了 $repaired 项修改。"
 }
 
+uninstall_path_safe() {
+  path="${1:-}"
+  case "$path" in
+    ''|/|/etc|/var|/usr|/usr/local|/var/lib|/var/log|.|..|*/../*|*/..|*/./*|*/.) return 1 ;;
+    /*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+uninstall_path_contains() {
+  parent="${1%/}"
+  child="${2%/}"
+  [ "$child" = "$parent" ] || [ "${child#"$parent"/}" != "$child" ]
+}
+
+uninstall_plan() {
+  printf '将停止并移除服务：%s、%s\n' "$VP_CORE_SERVICE" "$VP_TUNNEL_SERVICE"
+  printf '将删除项目路径：\n'
+  printf '  %s\n' "$VP_CONFIG_DIR" "$VP_DATA_DIR" "$VP_LOG_DIR" "$VP_LIB_DIR" "$VP_CLI_PATH" "$VP_CLI_BACKUP_PATH"
+}
+
 uninstall_project() {
   need_root || return 1
-  warn "该操作将删除 VPS-Node 的状态和凭据。"
+  [ "$#" -le 1 ] || { error "卸载命令只接受 --dry-run 参数。"; return 2; }
+  mode="${1:-}"
+  case "$mode" in ''|--dry-run) ;; *) error "不支持的卸载参数：$mode"; return 2 ;; esac
+  for target in "$VP_CONFIG_DIR" "$VP_DATA_DIR" "$VP_LOG_DIR" "$VP_LIB_DIR" "$VP_CLI_PATH" "$VP_CLI_BACKUP_PATH"; do
+    uninstall_path_safe "$target" || { error "拒绝卸载：检测到危险路径 $target"; return 1; }
+  done
+  uninstall_plan
+  [ "$mode" = "--dry-run" ] && { ok "预览完成，未修改任何文件或服务。"; return 0; }
+  uninstall_path_safe "$VP_UNINSTALL_BACKUP_DIR" || { error "卸载备份目录不安全：$VP_UNINSTALL_BACKUP_DIR"; return 1; }
+  for target in "$VP_CONFIG_DIR" "$VP_DATA_DIR" "$VP_LOG_DIR" "$VP_LIB_DIR"; do
+    uninstall_path_contains "$target" "$VP_UNINSTALL_BACKUP_DIR" && { error "卸载备份目录位于待删除路径内：$VP_UNINSTALL_BACKUP_DIR"; return 1; }
+  done
+  warn "该操作将删除 VPS-Node；继续前会创建外部恢复包。"
   if [ -n "${VP_UNINSTALL_CONFIRM:-}" ]; then
     answer="$VP_UNINSTALL_CONFIRM"
   else
@@ -1793,6 +1827,13 @@ uninstall_project() {
     read -r answer || true
   fi
   [ "$answer" = "DELETE" ] || { warn "已取消。"; return 2; }
+  mkdir -p "$VP_UNINSTALL_BACKUP_DIR" || { error "无法创建卸载备份目录。"; return 1; }
+  backup_archive="$VP_UNINSTALL_BACKUP_DIR/vps-node-uninstall-backup-$(date '+%Y%m%d-%H%M%S').tar.gz"
+  create_backup "$backup_archive" || { error "卸载前备份失败，已中止卸载。"; return 1; }
+  [ -s "$backup_archive" ] && [ -s "$backup_archive.sha256" ] || { error "卸载备份或 SHA-256 文件缺失，已中止卸载。"; return 1; }
+  expected_backup_hash="$(awk 'NR==1{print tolower($1)}' "$backup_archive.sha256" 2>/dev/null)"
+  actual_backup_hash="$(sha256_file "$backup_archive" 2>/dev/null | tr 'A-F' 'a-f')"
+  [ -n "$actual_backup_hash" ] && [ "$expected_backup_hash" = "$actual_backup_hash" ] || { error "卸载备份校验失败，已中止卸载。"; return 1; }
   if [ "${VP_SKIP_SERVICE:-0}" != "1" ]; then
     case "$(service_manager)" in
       systemd)
@@ -1813,6 +1854,8 @@ uninstall_project() {
   rm -rf "$VP_CONFIG_DIR" "$VP_DATA_DIR" "$VP_LOG_DIR" "$VP_LIB_DIR"
   rm -f "$VP_CLI_PATH" "$VP_CLI_BACKUP_PATH"
   ok "VPS-Node 已卸载。"
+  printf '恢复包：%s\n' "$backup_archive"
+  printf '重新安装后恢复：vp restore %s\n' "$backup_archive"
 }
 
 pause_screen() {
@@ -1993,7 +2036,7 @@ case "${1:-}" in
   repair|fix) safe_repair ;;
   optimize|optimization) optimize_and_verify ;;
   version|--version|-V) printf '%s\n' "$VP_VERSION" ;;
-  uninstall) uninstall_project ;;
+  uninstall) shift; uninstall_project "$@" ;;
   debug-tx) shift; debug_transaction "$@" ;;
   help|-h|--help)
     printf '用法：vp [status|doctor|health|repair|optimize|maintain|update|rollback|init|core-install|reality-add|tunnel-install|argo-add|nodes|delete|link|test-node|rotate|rotations|rotate-finalize|backup|restore|uninstall|version]\n'

@@ -66,14 +66,35 @@ VP_CONFIG_DIR="$uninstall_root/etc" VP_DATA_DIR="$uninstall_root/lib" \
 VP_LOG_DIR="$uninstall_root/log" VP_LIB_DIR="$uninstall_root/usr" \
 VP_CLI_PATH="$uninstall_root/vp" VP_CLI_BACKUP_PATH="$uninstall_root/vp.previous" \
 VP_SKIP_SERVICE=1 sh "$ROOT/vp.sh" init >/dev/null
+printf 'RECOVERY_MARKER=keep-me\n' >> "$uninstall_root/etc/state.env"
+VP_CONFIG_DIR="$uninstall_root/etc" VP_DATA_DIR="$uninstall_root/lib" \
+VP_LOG_DIR="$uninstall_root/log" VP_LIB_DIR="$uninstall_root/usr" \
+VP_CLI_PATH="$uninstall_root/vp" VP_CLI_BACKUP_PATH="$uninstall_root/vp.previous" \
+VP_UNINSTALL_BACKUP_DIR="$uninstall_root/recovery" VP_SKIP_SERVICE=1 \
+  sh "$ROOT/vp.sh" uninstall --dry-run >/dev/null
+[ -e "$uninstall_root/etc/state.env" ]
 printf '11\nDELETE\n' | \
   VP_CONFIG_DIR="$uninstall_root/etc" VP_DATA_DIR="$uninstall_root/lib" \
   VP_LOG_DIR="$uninstall_root/log" VP_LIB_DIR="$uninstall_root/usr" \
   VP_CLI_PATH="$uninstall_root/vp" VP_CLI_BACKUP_PATH="$uninstall_root/vp.previous" \
+  VP_UNINSTALL_BACKUP_DIR="$uninstall_root/recovery" \
   VP_SKIP_SERVICE=1 sh "$ROOT/vp.sh" >/dev/null 2>&1
 [ ! -e "$uninstall_root/etc" ]
 [ ! -e "$uninstall_root/lib" ]
 [ ! -e "$uninstall_root/vp" ]
+uninstall_backup="$(find "$uninstall_root/recovery" -name 'vps-node-uninstall-backup-*.tar.gz' -type f | head -n 1)"
+[ -s "$uninstall_backup" ]
+[ -s "$uninstall_backup.sha256" ]
+(cd "$(dirname "$uninstall_backup")" && sha256sum -c "$(basename "$uninstall_backup").sha256" >/dev/null)
+tar -xOf "$uninstall_backup" config/state.env | grep -q '^RECOVERY_MARKER=keep-me$'
+
+if VP_CONFIG_DIR=/etc VP_DATA_DIR="$TMP/safe-lib" VP_LOG_DIR="$TMP/safe-log" \
+  VP_LIB_DIR="$TMP/safe-usr" VP_CLI_PATH="$TMP/safe-vp" \
+  VP_CLI_BACKUP_PATH="$TMP/safe-vp.previous" VP_SKIP_SERVICE=1 \
+  sh "$ROOT/vp.sh" uninstall --dry-run >/dev/null 2>&1; then
+  printf 'dangerous uninstall path unexpectedly accepted\n' >&2
+  exit 1
+fi
 
 printf 'TEST_VALUE=before\n' >> "$TMP/etc/state.env"
 VP_CONFIG_DIR="$TMP/etc" VP_DATA_DIR="$TMP/lib" VP_LOG_DIR="$TMP/log" VP_LIB_DIR="$TMP/usr-lib" \

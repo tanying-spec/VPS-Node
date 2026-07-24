@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.0-dev.6
+
+- Added `vp uninstall --dry-run` to preview every service and path affected by uninstall.
+- Uninstall now creates and verifies an external recovery archive before removing anything.
+- Added dangerous-path and backup-location guards so unsafe overrides cannot trigger broad deletion.
+
 ## 0.2.0-dev.5
 
 - Added a clearly visible uninstall entry to the main interactive menu with explicit confirmation.
