@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.0-dev.10
+
+- Added real concurrent node downloads with configurable 1-8 streams, success ratios, connection time, first-byte time and aggregate throughput.
+- Added `vp test-all [concurrency]` to compare every Reality and Argo node and report the best measured result without changing routing automatically.
+- Added `vp network` for congestion-control, queue discipline and TCP connection visibility.
+- Reworked the main network menu around current state, one-click concurrent testing and existing resource/DNS adaptive verification.
+
 ## 0.2.0-dev.9
 
 - Added read-only installer modes: `--check` for compatibility/conflicts and `--dry-run` for an exact action preview.

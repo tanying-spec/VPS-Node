@@ -40,7 +40,7 @@ cat > "$fake_core" <<'FAKE_CORE'
 #!/bin/sh
 case "${1:-}" in
   -v|-t) exit 0 ;;
-  *) exit 0 ;;
+  *) exec tail -f /dev/null ;;
 esac
 FAKE_CORE
 chmod 755 "$fake_core"
@@ -74,6 +74,23 @@ VP_LIB_DIR="$TMP/dns-usr" VP_CORE_BIN="$TMP/dns-usr/bin/mihomo" \
 VP_CORE_BACKUP_BIN="$TMP/dns-usr/bin/mihomo.previous" VP_SKIP_SERVICE=1 \
 sh "$ROOT/vp.sh" edit argo-edit argo-renamed 25434 new.example.com /new-path >/dev/null
 grep -q '^argo|argo-renamed|25434|[^|]*|/new-path|new.example.com$' "$TMP/dns-etc/nodes.db"
+fake_curl="$TMP/fake-curl"
+cat > "$fake_curl" <<'FAKE_CURL'
+#!/bin/sh
+case "$*" in
+  *generate_204*) printf '204|0.010000|0.020000|0.030000' ;;
+  *__down*) printf '200|1024|1048576|0.040000|0.100000' ;;
+  *) exit 1 ;;
+esac
+FAKE_CURL
+chmod 755 "$fake_curl"
+concurrent_output="$(VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log" \
+  VP_LIB_DIR="$TMP/dns-usr" VP_CORE_BIN="$TMP/dns-usr/bin/mihomo" \
+  VP_CORE_BACKUP_BIN="$TMP/dns-usr/bin/mihomo.previous" VP_CURL_BIN="$fake_curl" \
+  VP_TEST_SERVER=127.0.0.1 VP_TEST_BYTES=1024 VP_SKIP_SERVICE=1 \
+  sh "$ROOT/vp.sh" test-node renamed-node 4)"
+printf '%s\n' "$concurrent_output" | grep -q '4/4 路成功'
+printf '%s\n' "$concurrent_output" | grep -q '聚合速度 4.00 MiB/s'
 menu_output="$(printf '3\n1\n1\n\n0\n' | \
   VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log" \
   VP_LIB_DIR="$TMP/dns-usr" VP_CORE_BIN="$TMP/dns-usr/bin/mihomo" \

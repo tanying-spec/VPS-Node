@@ -2,7 +2,7 @@
 
 set -u
 
-VP_VERSION="0.2.0-dev.9"
+VP_VERSION="0.2.0-dev.10"
 VP_CONFIG_DIR="${VP_CONFIG_DIR:-/etc/vps-node}"
 VP_DATA_DIR="${VP_DATA_DIR:-/var/lib/vps-node}"
 VP_LOG_DIR="${VP_LOG_DIR:-/var/log/vps-node}"
@@ -42,6 +42,7 @@ VP_CLI_PATH="${VP_CLI_PATH:-/usr/local/bin/vp}"
 VP_CLI_BACKUP_PATH="${VP_CLI_BACKUP_PATH:-$VP_CLI_PATH.previous}"
 VP_REPO="${VP_REPO:-tanying-spec/VPS-Node}"
 VP_REF="${VP_REF:-main}"
+VP_CURL_BIN="${VP_CURL_BIN:-curl}"
 
 is_tty() { [ -t 1 ]; }
 color() { is_tty && printf '\033[%sm' "$1" || true; }
@@ -1204,6 +1205,9 @@ EOF
 
 test_node_end_to_end() {
   target="${1:-}"
+  concurrency="${2:-${VP_TEST_CONCURRENCY:-1}}"
+  case "$concurrency" in ''|*[!0-9]*) error "并发数必须是 1-8。"; return 2 ;; esac
+  [ "$concurrency" -ge 1 ] && [ "$concurrency" -le 8 ] || { error "并发数必须是 1-8。"; return 2; }
   [ -x "$VP_CORE_BIN" ] || { error "代理核心尚未安装。"; return 1; }
   [ -n "$target" ] || { error "请指定节点名称。"; return 1; }
   record="$(awk -F'|' -v n="$target" '$2==n{print;exit}' "$VP_NODES_DB" 2>/dev/null)"
@@ -1253,24 +1257,45 @@ EOF
   "$VP_CORE_BIN" -d "$test_dir/data" -f "$test_dir/client.yaml" > "$test_dir/client.log" 2>&1 &
   client_pid=$!
   sleep 2
-  result="$(curl -sS -o /dev/null -w '%{http_code}|%{time_connect}|%{time_total}' --max-time 25 --proxy "http://127.0.0.1:$client_port" https://cp.cloudflare.com/generate_204 2>/dev/null || true)"
-  IFS='|' read -r http_code connect_time total_time <<EOF
+  result="$("$VP_CURL_BIN" -sS -o /dev/null -w '%{http_code}|%{time_connect}|%{time_starttransfer}|%{time_total}' --max-time 25 --proxy "http://127.0.0.1:$client_port" https://cp.cloudflare.com/generate_204 2>/dev/null || true)"
+  IFS='|' read -r http_code connect_time first_byte_time total_time <<EOF
 $result
 EOF
   if [ "$http_code" = "204" ]; then
     test_bytes="${VP_TEST_BYTES:-5242880}"
     case "$test_bytes" in ''|*[!0-9]*) test_bytes=5242880 ;; esac
-    speed_result="$(curl -sS -o /dev/null -w '%{http_code}|%{size_download}|%{speed_download}' --max-time 45 --proxy "http://127.0.0.1:$client_port" "https://speed.cloudflare.com/__down?bytes=$test_bytes" 2>/dev/null || true)"
-    IFS='|' read -r speed_http speed_size speed_bps <<EOF
-$speed_result
+    speed_pids=""
+    stream=1
+    while [ "$stream" -le "$concurrency" ]; do
+      "$VP_CURL_BIN" -sS -o /dev/null -w '%{http_code}|%{size_download}|%{speed_download}|%{time_starttransfer}|%{time_total}' \
+        --max-time 45 --proxy "http://127.0.0.1:$client_port" \
+        "https://speed.cloudflare.com/__down?bytes=$test_bytes&stream=$stream" \
+        > "$test_dir/speed-$stream.result" 2>/dev/null &
+      speed_pids="$speed_pids $!"
+      stream=$((stream + 1))
+    done
+    for speed_pid in $speed_pids; do
+      wait "$speed_pid" 2>/dev/null || true
+    done
+    speed_summary="$(awk -F'|' '
+      $1==200 {ok++; bytes+=$2; bps+=$3; ttfb+=$4; total+=$5}
+      END {printf "%d|%.0f|%.0f|%.6f|%.6f",ok+0,bytes+0,bps+0,ok?ttfb/ok:0,ok?total/ok:0}
+    ' "$test_dir"/speed-*.result 2>/dev/null)"
+    IFS='|' read -r speed_success speed_size speed_bps average_ttfb average_total <<EOF
+$speed_summary
 EOF
     cleanup_node_test
     trap - EXIT HUP INT TERM
-    ok "节点 $name 端到端测试成功：连接 ${connect_time}s，总耗时 ${total_time}s。"
-    if [ "$speed_http" = "200" ] && [ -n "$speed_bps" ]; then
+    ok "节点 $name 协议认证成功：连接 ${connect_time}s，首包 ${first_byte_time}s，总耗时 ${total_time}s。"
+    if [ "${speed_success:-0}" -gt 0 ] && [ -n "$speed_bps" ]; then
       speed_mib="$(awk -v n="$speed_bps" 'BEGIN { printf "%.2f", n / 1048576 }')"
       size_mib="$(awk -v n="${speed_size:-0}" 'BEGIN { printf "%.1f", n / 1048576 }')"
-      printf '测速结果：下载 %s MiB，速度 %s MiB/s。\n' "$size_mib" "$speed_mib"
+      printf '并发测速：%s/%s 路成功，下载 %s MiB，聚合速度 %s MiB/s，平均首包 %ss。\n' \
+        "$speed_success" "$concurrency" "$size_mib" "$speed_mib" "$average_ttfb"
+      if [ -n "${VP_TEST_RESULT_FILE:-}" ]; then
+        printf '%s|%s|%s|%s|%s|%s|%s|%s\n' "$name" "$proto" "$speed_success" "$concurrency" "$speed_bps" "$connect_time" "$first_byte_time" "$average_total" >> "$VP_TEST_RESULT_FILE"
+      fi
+      [ "$speed_success" -eq "$concurrency" ] || warn "部分并发流失败；节点可连接，但高并发稳定性不足。"
     else
       warn "协议认证成功，但测速数据下载失败。"
     fi
@@ -1279,13 +1304,72 @@ EOF
   cleanup_node_test
   trap - EXIT HUP INT TERM
   if [ "$proto" = "reality" ] && [ -z "${VP_TEST_SERVER:-}" ]; then
-    if VP_TEST_SERVER=127.0.0.1 test_node_end_to_end "$target" >/dev/null 2>&1; then
+    if VP_TEST_SERVER=127.0.0.1 VP_TEST_RESULT_FILE= VP_TEST_BYTES=1 VP_TEST_CONCURRENCY=1 test_node_end_to_end "$target" 1 >/dev/null 2>&1; then
       warn "节点 $name 的本地协议认证正常，但 VPS 无法通过自身公网 IP 回环验证；请从外部网络确认公网端口可达。"
       return 2
     fi
   fi
   error "节点 $name 端到端测试失败（HTTP ${http_code:-无响应}）。"
   return 1
+}
+
+test_all_nodes() {
+  concurrency="${1:-4}"
+  case "$concurrency" in ''|*[!0-9]*) error "并发数必须是 1-8。"; return 2 ;; esac
+  [ "$concurrency" -ge 1 ] && [ "$concurrency" -le 8 ] || { error "并发数必须是 1-8。"; return 2; }
+  [ -s "$VP_NODES_DB" ] || { warn "当前没有节点。"; return 1; }
+  results="$(mktemp /tmp/vp-benchmark.XXXXXX)" || return 1
+  : > "$results"
+  printf '\n全部节点真实并发测试（每个节点 %s 路）\n' "$concurrency"
+  printf '%s\n' '----------------------------------------'
+  for benchmark_name in $(awk -F'|' 'NF{print $2}' "$VP_NODES_DB"); do
+    printf '\n[%s]\n' "$benchmark_name"
+    VP_TEST_RESULT_FILE="$results" test_node_end_to_end "$benchmark_name" "$concurrency" || true
+  done
+  printf '\n测试汇总\n'
+  printf '%s\n' '----------------------------------------'
+  if [ -s "$results" ]; then
+    awk -F'|' '{printf "%s  协议=%s  成功=%s/%s  聚合速度=%.2f MiB/s  首包=%ss\n",$1,$2,$3,$4,$5/1048576,$7}' "$results"
+    best="$(awk -F'|' '$3>0 && $5+0>max{max=$5+0;name=$1;proto=$2;success=$3;streams=$4}END{if(name)printf "%s|%s|%.0f|%s|%s",name,proto,max,success,streams}' "$results")"
+    if [ -n "$best" ]; then
+      IFS='|' read -r best_name best_proto best_bps best_success best_streams <<EOF
+$best
+EOF
+      best_mib="$(awk -v n="$best_bps" 'BEGIN{printf "%.2f",n/1048576}')"
+      printf '实测建议：当前吞吐最高的是 %s（%s，%s MiB/s，成功 %s/%s）。\n' \
+        "$best_name" "$best_proto" "$best_mib" "$best_success" "$best_streams"
+      printf '说明：该结论只代表本次服务器到测试站点的结果，不会自动修改客户端或默认线路。\n'
+    fi
+  else
+    warn "没有节点完成并发下载，未生成排名。"
+  fi
+  rm -f "$results"
+}
+
+show_network_status() {
+  congestion="$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || printf unknown)"
+  available="$(sysctl -n net.ipv4.tcp_available_congestion_control 2>/dev/null || printf unknown)"
+  qdisc="$(sysctl -n net.core.default_qdisc 2>/dev/null || printf unknown)"
+  printf '\n当前网络状态\n'
+  printf '%s\n' '----------------------------------------'
+  printf 'TCP 拥塞控制：%s\n' "$congestion"
+  printf '可用拥塞算法：%s\n' "$available"
+  printf '默认队列规则：%s\n' "$qdisc"
+  printf '默认测试并发：%s 路\n' "${VP_TEST_CONCURRENCY:-4}"
+  if command -v ss >/dev/null 2>&1; then
+    established="$(ss -H -tn state established 2>/dev/null | awk 'END{print NR+0}')"
+    listening="$(ss -H -ltn 2>/dev/null | awk 'END{print NR+0}')"
+    printf 'TCP 已连接 / 监听：%s / %s\n' "$established" "$listening"
+  else
+    printf 'TCP 连接统计：缺少 ss\n'
+  fi
+  if [ "$congestion" = bbr ]; then
+    printf '建议：BBR 已启用，先通过并发测速验证实际效果，不需要重复套用参数。\n'
+  elif printf '%s\n' "$available" | grep -qw bbr; then
+    printf '建议：系统支持 BBR，但必须经过启用前后实测再决定是否保留。\n'
+  else
+    printf '建议：当前内核未提供 BBR，不建议强制写入无效配置。\n'
+  fi
 }
 
 sha256_file() {
@@ -2279,13 +2363,29 @@ advanced_menu() {
   esac
 }
 
+interactive_network() {
+  printf '1. 一键测试全部节点（并发）\n2. 查看当前网络状态\n3. 应用资源与 DNS 自适应并验证\n0. 返回\n请选择：'
+  read -r action || true
+  case "$action" in
+    1)
+      printf '每个节点并发连接数（默认 4，范围 1-8）：'
+      read -r concurrency || true
+      test_all_nodes "${concurrency:-4}"
+      ;;
+    2) show_network_status ;;
+    3) optimize_and_verify ;;
+    0) return 0 ;;
+    *) warn "无效选择。" ;;
+  esac
+}
+
 menu() {
   while true; do
     show_status
     printf '1. 创建 Reality 主节点\n'
     printf '2. 配置 Cloudflare 备用节点\n'
     printf '3. 查看与管理节点\n'
-    printf '4. 一键优化并验证\n'
+    printf '4. 网络状态、并发测速与自适应\n'
     printf '5. 健康检查与安全修复\n'
     printf '6. 一键安全维护\n'
     printf '7. 备份与迁移\n'
@@ -2300,7 +2400,7 @@ menu() {
       1) interactive_reality_add; pause_screen ;;
       2) interactive_argo_setup; pause_screen ;;
       3) interactive_node_action; pause_screen ;;
-      4) optimize_and_verify; pause_screen ;;
+      4) interactive_network; pause_screen ;;
       5) interactive_health; pause_screen ;;
       6) maintenance_mode; pause_screen ;;
       7) interactive_backup; pause_screen ;;
@@ -2330,6 +2430,8 @@ case "${1:-}" in
   edit|edit-node) shift; edit_node "$@" ;;
   link) shift; show_node_link "$@" ;;
   test-node|test) shift; test_node_end_to_end "$@" ;;
+  test-all|benchmark) shift; test_all_nodes "$@" ;;
+  network|network-status) show_network_status ;;
   rotate|rotate-credential) shift; rotate_credential "$@" ;;
   rotations|rotation-status) show_rotations ;;
   rotate-finalize|rotation-finalize) shift; finalize_rotation "$@" ;;
@@ -2353,7 +2455,7 @@ case "${1:-}" in
   uninstall) shift; uninstall_project "$@" ;;
   debug-tx) shift; debug_transaction "$@" ;;
   help|-h|--help)
-    printf '用法：vp [status|doctor|health|repair|report|self-heal|monitor-install|stability|optimize|maintain|update|rollback|init|core-install|reality-add|tunnel-install|argo-add|nodes|edit|delete|link|test-node|rotate|rotations|rotate-finalize|backup|restore|uninstall|version]\n'
+    printf '用法：vp [status|doctor|health|repair|report|self-heal|monitor-install|stability|network|test-all|optimize|maintain|update|rollback|init|core-install|reality-add|tunnel-install|argo-add|nodes|edit|delete|link|test-node|rotate|rotations|rotate-finalize|backup|restore|uninstall|version]\n'
     ;;
   '') menu ;;
   *) error "未知命令：$1"; exit 2 ;;
