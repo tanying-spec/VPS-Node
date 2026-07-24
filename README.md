@@ -1,5 +1,7 @@
 # VPS-Node
 
+> `0.2.0-dev.21` 恢复备份支持 `vp restore 备份文件 --dry-run`：先检查归档、数据库关联和当前 Mihomo 内核兼容性，只显示脱敏范围摘要；正式恢复必须输入 `RESTORE`，取消或预览不会改变当前状态。
+
 > `0.2.0-dev.20` 所有创建、编辑、迁移和恢复事务统一验证节点数据库：协议、字段数、UUID、端口、Reality 密钥、WS 路径、域名及名称/监听端口唯一性；凭据轮换还必须与现有节点协议和当前 UUID 一致。异常备份不会改变在线状态。
 
 > `0.2.0-dev.19` 安装和在线更新会为上一版管理脚本生成独立 SHA-256；回滚前必须先通过校验，即使损坏内容仍符合 shell 语法也会拒绝执行。自动测试覆盖坏更新、正常更新、正常回滚和备份篡改拒绝。
@@ -85,7 +87,8 @@ vp optimize
 vp rotate home 24
 vp rotate-finalize home
 vp backup
-vp restore /path/to/backup.tar.gz
+vp restore /path/to/backup.tar.gz --dry-run
+vp restore /path/to/backup.tar.gz --apply
 vp migrate-mh /etc/mihomo/nodes.db --dry-run
 vp migrate-mh /etc/mihomo/nodes.db --apply
 vp maintain

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.0-dev.21
+
+- Added `vp restore BACKUP --dry-run` with archive, state-database and current-Mihomo validation before any project state is initialized or changed.
+- Restore displays only a redacted scope summary (version/time, protocol counts, rotation count and token presence), then requires an explicit `RESTORE` confirmation to apply.
+- Added evidence that dry-run leaves current state unchanged before the tested apply/rollback-capable restore path.
+
 ## 0.2.0-dev.20
 
 - Centralized candidate-state validation now enforces supported protocols, exact field counts, UUID/port/key/path/host constraints and unique node names/listen ports.

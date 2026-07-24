@@ -2,7 +2,7 @@
 
 set -u
 
-VP_VERSION="0.2.0-dev.20"
+VP_VERSION="0.2.0-dev.21"
 VP_CONFIG_DIR="${VP_CONFIG_DIR:-/etc/vps-node}"
 VP_DATA_DIR="${VP_DATA_DIR:-/var/lib/vps-node}"
 VP_LOG_DIR="${VP_LOG_DIR:-/var/log/vps-node}"
@@ -1961,6 +1961,8 @@ restore_extra_snapshot() {
 restore_backup() {
   need_root || return 1
   archive="${1:-}"
+  restore_mode="${2:---apply}"
+  case "$restore_mode" in --dry-run|--apply) ;; *) error "恢复模式只能是 --dry-run 或 --apply。"; return 2 ;; esac
   [ -r "$archive" ] || { error "备份文件不存在。"; return 1; }
   if [ -r "$archive.sha256" ]; then
     expected_archive_hash="$(awk 'NR==1{print tolower($1)}' "$archive.sha256" 2>/dev/null)"
@@ -1976,6 +1978,47 @@ restore_backup() {
   tar -xzf "$archive" -C "$package" || { cleanup_restore; trap - EXIT HUP INT TERM; error "备份无法解压。"; return 1; }
   [ -f "$package/manifest.env" ] && grep -q '^FORMAT_VERSION=1$' "$package/manifest.env" || { cleanup_restore; trap - EXIT HUP INT TERM; error "不支持该备份格式。"; return 1; }
   [ -f "$package/config/nodes.db" ] && [ -f "$package/config/state.env" ] || { cleanup_restore; trap - EXIT HUP INT TERM; error "备份缺少必要状态文件。"; return 1; }
+  [ -f "$package/config/credential-rotations.db" ] || : > "$package/config/credential-rotations.db"
+  if grep -Ev '^[A-Z][A-Z0-9_]*=[A-Za-z0-9._:/+-]*$|^$' "$package/config/state.env" >/dev/null 2>&1 ||
+     ! validate_nodes_database "$package/config/nodes.db" ||
+     ! validate_rotations_database "$package/config/nodes.db" "$package/config/credential-rotations.db"; then
+    cleanup_restore; trap - EXIT HUP INT TERM
+    error "备份状态数据库未通过完整性与关联约束检查。"
+    return 1
+  fi
+  if [ -x "$VP_CORE_BIN" ] && [ -f "$package/config/generated/mihomo.yaml" ] &&
+     ! "$VP_CORE_BIN" -t -d "$package/config" -f "$package/config/generated/mihomo.yaml" >/dev/null 2>&1; then
+    cleanup_restore; trap - EXIT HUP INT TERM
+    error "备份中的 Mihomo 配置未通过当前内核验证。"
+    return 1
+  fi
+  backup_version="$(awk -F= '$1=="VP_VERSION"{print $2;exit}' "$package/manifest.env" 2>/dev/null)"
+  backup_created="$(awk -F= '$1=="CREATED_AT"{print $2;exit}' "$package/manifest.env" 2>/dev/null)"
+  backup_nodes="$(awk 'NF{n++}END{print n+0}' "$package/config/nodes.db")"
+  backup_reality="$(awk -F'|' '$1=="reality"{n++}END{print n+0}' "$package/config/nodes.db")"
+  backup_argo="$(awk -F'|' '$1=="argo"{n++}END{print n+0}' "$package/config/nodes.db")"
+  backup_rotations="$(awk 'NF{n++}END{print n+0}' "$package/config/credential-rotations.db")"
+  backup_token=no
+  [ -s "$package/config/secrets/cloudflared.token" ] && backup_token=yes
+  printf '恢复预览：版本=%s，创建时间=%s\n' "${backup_version:-未知}" "${backup_created:-未知}"
+  printf '  节点：%s（Reality %s / Argo %s）\n' "$backup_nodes" "$backup_reality" "$backup_argo"
+  printf '  凭据轮换记录：%s；Tunnel Token：%s（内容不显示）\n' "$backup_rotations" "$backup_token"
+  printf '  将替换：VPS-Node 节点、轮换、运行参数、Token 与项目数据。\n'
+  printf '  不会修改：SSH、防火墙、其他代理项目或非 VPS-Node 文件。\n'
+  if [ "$restore_mode" = --dry-run ]; then
+    cleanup_restore; trap - EXIT HUP INT TERM
+    ok "恢复预览完成，未修改任何文件或服务。"
+    return 0
+  fi
+  if [ "${VP_RESTORE_CONFIRM:-}" != RESTORE ]; then
+    printf '请输入 RESTORE 确认覆盖当前 VPS-Node 状态：'
+    read -r restore_answer || true
+    [ "$restore_answer" = RESTORE ] || {
+      cleanup_restore; trap - EXIT HUP INT TERM
+      warn "已取消恢复，当前状态未改变。"
+      return 2
+    }
+  fi
 
   init_layout >/dev/null || { cleanup_restore; trap - EXIT HUP INT TERM; return 1; }
   begin_state_transaction backup-restore || { cleanup_restore; trap - EXIT HUP INT TERM; return 1; }
@@ -3036,7 +3079,7 @@ interactive_health() {
 }
 
 interactive_backup() {
-  printf '1. 创建备份\n2. 恢复 VPS-Node 备份\n3. 预览旧 Mihomo-lite-argo 迁移\n4. 应用旧项目无损迁移\n0. 返回\n请选择：'
+  printf '1. 创建备份\n2. 预览并恢复 VPS-Node 备份\n3. 预览旧 Mihomo-lite-argo 迁移\n4. 应用旧项目无损迁移\n0. 返回\n请选择：'
   read -r action || true
   case "$action" in
     1) create_backup "$VP_BACKUP_DIR" ;;

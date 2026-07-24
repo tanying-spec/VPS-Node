@@ -334,9 +334,15 @@ sh "$ROOT/vp.sh" backup "$portable_backup" >/dev/null
 [ -s "$portable_backup" ]
 [ -s "$portable_backup.sha256" ]
 sed -i 's/BACKUP_TEST_MARKER=original/BACKUP_TEST_MARKER=changed/' "$TMP/dns-etc/state.env"
+restore_preview="$(VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log" \
+  VP_LIB_DIR="$TMP/dns-usr" VP_CORE_BIN="$TMP/dns-usr/bin/mihomo" VP_SKIP_SERVICE=1 \
+  sh "$ROOT/vp.sh" restore "$portable_backup" --dry-run)"
+printf '%s\n' "$restore_preview" | grep -q '^恢复预览：'
+printf '%s\n' "$restore_preview" | grep -q '未修改任何文件或服务'
+grep -q '^BACKUP_TEST_MARKER=changed$' "$TMP/dns-etc/state.env"
 VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log" \
 VP_LIB_DIR="$TMP/dns-usr" VP_CORE_BIN="$TMP/dns-usr/bin/mihomo" VP_SKIP_SERVICE=1 \
-sh "$ROOT/vp.sh" restore "$portable_backup" >/dev/null
+VP_RESTORE_CONFIRM=RESTORE sh "$ROOT/vp.sh" restore "$portable_backup" --apply >/dev/null
 grep -q '^BACKUP_TEST_MARKER=original$' "$TMP/dns-etc/state.env"
 
 malicious_package="$TMP/malicious-package"
