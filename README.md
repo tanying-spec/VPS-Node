@@ -1,5 +1,7 @@
 # VPS-Node
 
+> `0.2.0-dev.8` 新增 `vp report` 脱敏诊断报告、`vp self-heal` 单次自愈、`vp monitor-install` 低开销定时自愈和 `vp stability` 稳定性记录。后台检查使用定时任务，不增加常驻管理进程。
+
 > `0.2.0-dev.7` 首页会直接显示总体可用状态、主备节点数量和下一步编号建议；节点管理支持修改名称、端口、Reality SNI、Tunnel 域名与 WebSocket 路径，变更失败会自动回滚。
 
 > 从 `0.2.0-dev.6` 起，可先运行 `vp uninstall --dry-run` 预览卸载范围。正式卸载会先在 `/root` 创建带 SHA-256 校验的独立恢复包；备份或校验失败时不会删除项目。
@@ -34,6 +36,10 @@ vp argo-add backup 25443 tunnel.example.com /private-path
 vp nodes
 vp link home
 vp test-node home
+vp report
+vp self-heal
+vp monitor-install
+vp stability
 vp optimize
 vp rotate home 24
 vp rotate-finalize home

@@ -2,7 +2,7 @@
 
 set -u
 
-VP_VERSION="0.2.0-dev.7"
+VP_VERSION="0.2.0-dev.8"
 VP_CONFIG_DIR="${VP_CONFIG_DIR:-/etc/vps-node}"
 VP_DATA_DIR="${VP_DATA_DIR:-/var/lib/vps-node}"
 VP_LOG_DIR="${VP_LOG_DIR:-/var/log/vps-node}"
@@ -35,6 +35,9 @@ VP_TUNNEL_METRICS_PORT="${VP_TUNNEL_METRICS_PORT:-22041}"
 VP_CLOUDFLARED_API="${VP_CLOUDFLARED_API:-https://api.github.com/repos/cloudflare/cloudflared/releases/latest}"
 VP_BACKUP_DIR="$VP_DATA_DIR/backups"
 VP_UNINSTALL_BACKUP_DIR="${VP_UNINSTALL_BACKUP_DIR:-/root}"
+VP_STABILITY_LOG="${VP_STABILITY_LOG:-$VP_LOG_DIR/stability.log}"
+VP_WATCHDOG_RUNNER="${VP_WATCHDOG_RUNNER:-$VP_LIB_DIR/bin/watchdog-run}"
+VP_WATCHDOG_SERVICE="${VP_WATCHDOG_SERVICE:-vps-node-watchdog}"
 VP_CLI_PATH="${VP_CLI_PATH:-/usr/local/bin/vp}"
 VP_CLI_BACKUP_PATH="${VP_CLI_BACKUP_PATH:-$VP_CLI_PATH.previous}"
 VP_REPO="${VP_REPO:-tanying-spec/VPS-Node}"
@@ -1459,6 +1462,182 @@ maintenance_mode() {
   layered_health_check
 }
 
+stability_event() {
+  event_status="$1"
+  event_action="$2"
+  event_detail="$3"
+  mkdir -p "$VP_LOG_DIR" || return 1
+  printf '%s|%s|%s|%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$event_status" "$event_action" "$event_detail" >> "$VP_STABILITY_LOG"
+  chmod 600 "$VP_STABILITY_LOG"
+  event_lines="$(wc -l < "$VP_STABILITY_LOG" 2>/dev/null || printf 0)"
+  case "$event_lines" in ''|*[!0-9]*) event_lines=0 ;; esac
+  if [ "$event_lines" -gt 200 ]; then
+    tail -n 200 "$VP_STABILITY_LOG" > "$VP_STABILITY_LOG.tmp" && mv "$VP_STABILITY_LOG.tmp" "$VP_STABILITY_LOG"
+    chmod 600 "$VP_STABILITY_LOG"
+  fi
+}
+
+self_heal_once() {
+  need_root || return 1
+  quiet=0
+  [ "${1:-}" = "--quiet" ] && quiet=1
+  had_transaction=0
+  [ -d "$VP_TX_ACTIVE" ] && had_transaction=1
+  init_layout >/dev/null || return 1
+  repaired=0
+  failures=0
+  if [ "$had_transaction" -eq 1 ]; then
+    stability_event recovered transaction "interrupted configuration restored"
+    repaired=$((repaired + 1))
+  fi
+  if [ -x "$VP_CORE_BIN" ] && [ -s "$VP_NODES_DB" ]; then
+    if [ ! -f "$VP_CORE_CONFIG" ] || ! "$VP_CORE_BIN" -t -d "$VP_CONFIG_DIR" -f "$VP_CORE_CONFIG" >/dev/null 2>&1; then
+      stability_event failed core "configuration invalid; restart skipped"
+      failures=$((failures + 1))
+    elif ! core_process_running; then
+      if core_service_restart; then
+        stability_event recovered core "service restarted"
+        repaired=$((repaired + 1))
+      else
+        stability_event failed core "restart failed"
+        failures=$((failures + 1))
+      fi
+    fi
+  fi
+  if [ -s "$VP_TUNNEL_TOKEN_FILE" ] && [ -x "$VP_TUNNEL_BIN" ]; then
+    if [ "$(service_state "$VP_TUNNEL_SERVICE")" != "active" ] && [ "$(service_state "$VP_TUNNEL_SERVICE")" != "started" ]; then
+      if tunnel_service_restart; then
+        stability_event recovered tunnel "service restarted"
+        repaired=$((repaired + 1))
+      else
+        stability_event failed tunnel "restart failed"
+        failures=$((failures + 1))
+      fi
+    fi
+  fi
+  if [ "$repaired" -eq 0 ] && [ "$failures" -eq 0 ]; then
+    stability_event healthy check "no action required"
+  fi
+  if [ "$quiet" -eq 0 ]; then
+    [ "$failures" -eq 0 ] && ok "自愈检查完成：修复 $repaired 项。" || error "自愈检查完成：修复 $repaired 项，失败 $failures 项。"
+  fi
+  [ "$failures" -eq 0 ]
+}
+
+install_stability_monitor() {
+  need_root || return 1
+  init_layout >/dev/null || return 1
+  mkdir -p "$(dirname "$VP_WATCHDOG_RUNNER")"
+  cat > "$VP_WATCHDOG_RUNNER" <<EOF
+#!/bin/sh
+exec "$VP_CLI_PATH" self-heal --quiet
+EOF
+  chmod 700 "$VP_WATCHDOG_RUNNER"
+  if [ "${VP_SKIP_SERVICE:-0}" = "1" ]; then
+    ok "后台自愈运行器已在隔离模式生成。"
+    return 0
+  fi
+  case "$(service_manager)" in
+    systemd)
+      cat > "/etc/systemd/system/${VP_WATCHDOG_SERVICE}.service" <<EOF
+[Unit]
+Description=VPS-Node low-overhead self-heal check
+
+[Service]
+Type=oneshot
+ExecStart=$VP_WATCHDOG_RUNNER
+EOF
+      cat > "/etc/systemd/system/${VP_WATCHDOG_SERVICE}.timer" <<EOF
+[Unit]
+Description=Run VPS-Node self-heal every 5 minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+      systemctl daemon-reload
+      systemctl enable --now "${VP_WATCHDOG_SERVICE}.timer" >/dev/null || return 1
+      ;;
+    openrc)
+      mkdir -p /etc/periodic/15min
+      cat > "/etc/periodic/15min/$VP_WATCHDOG_SERVICE" <<EOF
+#!/bin/sh
+exec "$VP_WATCHDOG_RUNNER"
+EOF
+      chmod 700 "/etc/periodic/15min/$VP_WATCHDOG_SERVICE"
+      rc-service crond start >/dev/null 2>&1 || true
+      rc-update add crond default >/dev/null 2>&1 || true
+      ;;
+    *) error "当前系统无法安装定时自愈。"; return 1 ;;
+  esac
+  stability_event enabled monitor "periodic self-heal installed"
+  ok "低开销后台自愈已启用。"
+}
+
+show_stability() {
+  printf '后台自愈运行器：%s\n' "$([ -x "$VP_WATCHDOG_RUNNER" ] && printf '已安装' || printf '未安装')"
+  if [ -r "$VP_STABILITY_LOG" ]; then
+    printf '最近稳定性事件：\n'
+    tail -n 20 "$VP_STABILITY_LOG"
+  else
+    printf '最近稳定性事件：暂无\n'
+  fi
+}
+
+diagnostic_report() {
+  need_root || return 1
+  destination="${1:-/root/vps-node-diagnostic-$(date '+%Y%m%d-%H%M%S').txt}"
+  case "$destination" in /*) ;; *) error "诊断报告必须使用绝对路径。"; return 1 ;; esac
+  mkdir -p "$(dirname "$destination")" || return 1
+  memory_snapshot
+  dns_result=failed
+  dns_probe >/dev/null 2>&1 && dns_result=ok
+  config_result=missing
+  if [ -x "$VP_CORE_BIN" ] && [ -f "$VP_CORE_CONFIG" ]; then
+    "$VP_CORE_BIN" -t -d "$VP_CONFIG_DIR" -f "$VP_CORE_CONFIG" >/dev/null 2>&1 && config_result=valid || config_result=invalid
+  fi
+  umask 077
+  {
+    printf 'VPS-Node redacted diagnostic report\n'
+    printf 'generated_at=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+    printf 'vp_version=%s\n' "$VP_VERSION"
+    printf 'architecture=%s\n' "$(uname -m 2>/dev/null || printf unknown)"
+    printf 'service_manager=%s\n' "$(service_manager)"
+    printf 'core_state=%s\n' "$(service_state "$VP_CORE_SERVICE")"
+    printf 'tunnel_state=%s\n' "$(service_state "$VP_TUNNEL_SERVICE")"
+    printf 'core_config=%s\n' "$config_result"
+    printf 'dns_probe=%s\n' "$dns_result"
+    printf 'transaction=%s\n' "$([ -d "$VP_TX_ACTIVE" ] && printf interrupted || printf clean)"
+    printf 'memory_source=%s\n' "$MEM_SOURCE"
+    printf 'memory_working_mib=%s\n' "$(bytes_to_mib "$MEM_WORKING_BYTES")"
+    printf 'memory_total_mib=%s\n' "$(bytes_to_mib "$MEM_TOTAL_BYTES")"
+    printf 'memory_limit_mib=%s\n' "$(bytes_to_mib "$MEM_LIMIT_BYTES")"
+    printf 'swap_used_mib=%s\n' "$(bytes_to_mib "$MEM_SWAP_BYTES")"
+    printf 'nodes_total=%s\n' "$(node_count)"
+    printf 'rotations_active=%s\n' "$(rotation_count active)"
+    printf 'rotations_expired=%s\n' "$(rotation_count expired)"
+    printf '\nredacted_nodes:\n'
+    awk -F'|' 'NF{printf "node_%d protocol=%s port=%s endpoint=<redacted> credentials=<redacted>\n",++n,$1,$3}' "$VP_NODES_DB" 2>/dev/null
+    printf '\nprotected_file_modes:\n'
+    for protected in "$VP_NODES_DB" "$VP_ROTATIONS_DB" "$VP_STATE_FILE" "$VP_CORE_ENV" "$VP_TUNNEL_TOKEN_FILE"; do
+      [ -e "$protected" ] || continue
+      printf '%s=%s\n' "$(basename "$protected")" "$(file_mode "$protected")"
+    done
+    printf '\nrecent_stability_events:\n'
+    [ -r "$VP_STABILITY_LOG" ] && tail -n 20 "$VP_STABILITY_LOG" || printf 'none\n'
+  } > "$destination" || { rm -f "$destination"; return 1; }
+  chmod 600 "$destination"
+  report_hash="$(sha256_file "$destination" 2>/dev/null || true)"
+  [ -n "$report_hash" ] || { rm -f "$destination"; error "无法校验诊断报告。"; return 1; }
+  printf '%s  %s\n' "$report_hash" "$(basename "$destination")" > "$destination.sha256"
+  chmod 600 "$destination.sha256"
+  ok "脱敏诊断报告已创建：$destination"
+}
+
 resolve_repo_commit() {
   commit_json="$(curl -fsSL --max-time 20 "https://api.github.com/repos/$VP_REPO/commits/$VP_REF")" || return 1
   commit_sha="$(printf '%s\n' "$commit_json" | sed -n 's/.*"sha"[[:space:]]*:[[:space:]]*"\([0-9a-fA-F]\{40\}\)".*/\1/p' | head -n 1)"
@@ -1904,7 +2083,7 @@ uninstall_path_contains() {
 }
 
 uninstall_plan() {
-  printf '将停止并移除服务：%s、%s\n' "$VP_CORE_SERVICE" "$VP_TUNNEL_SERVICE"
+  printf '将停止并移除服务：%s、%s、%s\n' "$VP_CORE_SERVICE" "$VP_TUNNEL_SERVICE" "$VP_WATCHDOG_SERVICE"
   printf '将删除项目路径：\n'
   printf '  %s\n' "$VP_CONFIG_DIR" "$VP_DATA_DIR" "$VP_LOG_DIR" "$VP_LIB_DIR" "$VP_CLI_PATH" "$VP_CLI_BACKUP_PATH"
 }
@@ -1941,9 +2120,11 @@ uninstall_project() {
   if [ "${VP_SKIP_SERVICE:-0}" != "1" ]; then
     case "$(service_manager)" in
       systemd)
+        systemctl disable --now "${VP_WATCHDOG_SERVICE}.timer" >/dev/null 2>&1 || true
         systemctl disable --now "$VP_TUNNEL_SERVICE" >/dev/null 2>&1 || true
         systemctl disable --now "$VP_CORE_SERVICE" >/dev/null 2>&1 || true
-        rm -f "/etc/systemd/system/${VP_TUNNEL_SERVICE}.service" "/etc/systemd/system/${VP_CORE_SERVICE}.service"
+        rm -f "/etc/systemd/system/${VP_WATCHDOG_SERVICE}.timer" "/etc/systemd/system/${VP_WATCHDOG_SERVICE}.service" \
+          "/etc/systemd/system/${VP_TUNNEL_SERVICE}.service" "/etc/systemd/system/${VP_CORE_SERVICE}.service"
         systemctl daemon-reload >/dev/null 2>&1 || true
         ;;
       openrc)
@@ -1952,6 +2133,7 @@ uninstall_project() {
         rc-update del "$VP_TUNNEL_SERVICE" default >/dev/null 2>&1 || true
         rc-update del "$VP_CORE_SERVICE" default >/dev/null 2>&1 || true
         rm -f "/etc/init.d/$VP_TUNNEL_SERVICE" "/etc/init.d/$VP_CORE_SERVICE"
+        rm -f "/etc/periodic/15min/$VP_WATCHDOG_SERVICE"
         ;;
     esac
   fi
@@ -2052,11 +2234,18 @@ EOF
 }
 
 interactive_health() {
-  layered_health_check && return 0
-  printf '发现错误，是否执行安全修复？[Y/n]：'
-  read -r answer || true
-  case "$answer" in n|N|no|NO) return 1 ;; esac
-  safe_repair && layered_health_check
+  printf '1. 分层健康检查\n2. 安全修复并复检\n3. 导出脱敏诊断报告\n4. 立即执行一次自愈\n5. 启用低开销后台自愈\n6. 查看稳定性记录\n0. 返回\n请选择：'
+  read -r action || true
+  case "$action" in
+    1) layered_health_check ;;
+    2) safe_repair && layered_health_check ;;
+    3) diagnostic_report ;;
+    4) self_heal_once ;;
+    5) install_stability_monitor ;;
+    6) show_stability ;;
+    0) return 0 ;;
+    *) warn "无效选择。" ;;
+  esac
 }
 
 interactive_backup() {
@@ -2147,6 +2336,10 @@ case "${1:-}" in
   backup) shift; create_backup "$@" ;;
   restore) shift; restore_backup "$@" ;;
   maintain|maintenance) maintenance_mode ;;
+  report|diagnostic) shift; diagnostic_report "$@" ;;
+  self-heal|selfheal) shift; self_heal_once "$@" ;;
+  monitor-install|watchdog-install) install_stability_monitor ;;
+  stability|monitor-status) show_stability ;;
   update) update_cli ;;
   rollback) rollback_cli ;;
   core-rollback) core_binary_rollback ;;
@@ -2160,7 +2353,7 @@ case "${1:-}" in
   uninstall) shift; uninstall_project "$@" ;;
   debug-tx) shift; debug_transaction "$@" ;;
   help|-h|--help)
-    printf '用法：vp [status|doctor|health|repair|optimize|maintain|update|rollback|init|core-install|reality-add|tunnel-install|argo-add|nodes|edit|delete|link|test-node|rotate|rotations|rotate-finalize|backup|restore|uninstall|version]\n'
+    printf '用法：vp [status|doctor|health|repair|report|self-heal|monitor-install|stability|optimize|maintain|update|rollback|init|core-install|reality-add|tunnel-install|argo-add|nodes|edit|delete|link|test-node|rotate|rotations|rotate-finalize|backup|restore|uninstall|version]\n'
     ;;
   '') menu ;;
   *) error "未知命令：$1"; exit 2 ;;

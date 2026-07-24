@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.0-dev.8
+
+- Added SHA-256 verified redacted diagnostic reports that exclude credentials, UUIDs, domains and complete node links.
+- Added one-shot self-healing for interrupted transactions and stopped project-owned core or Tunnel services.
+- Added low-overhead scheduled monitoring through systemd timers or Alpine periodic jobs instead of a resident daemon.
+- Added capped stability event history and numbered health-menu entries for reports, self-healing and monitoring.
+
 ## 0.2.0-dev.7
 
 - Added an outcome-first home dashboard with overall readiness, node composition and a numbered next-step recommendation.

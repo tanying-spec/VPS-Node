@@ -81,6 +81,37 @@ menu_output="$(printf '3\n1\n1\n\n0\n' | \
   sh "$ROOT/vp.sh")"
 printf '%s\n' "$menu_output" | grep -q 'vless://'
 
+mkdir -p "$TMP/dns-etc/secrets"
+printf 'sensitive-test-token-should-not-leak\n' > "$TMP/dns-etc/secrets/cloudflared.token"
+chmod 600 "$TMP/dns-etc/secrets/cloudflared.token"
+diagnostic="$TMP/redacted-diagnostic.txt"
+VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log" \
+VP_LIB_DIR="$TMP/dns-usr" VP_CORE_BIN="$TMP/dns-usr/bin/mihomo" \
+VP_CORE_BACKUP_BIN="$TMP/dns-usr/bin/mihomo.previous" VP_SKIP_SERVICE=1 \
+sh "$ROOT/vp.sh" report "$diagnostic" >/dev/null
+[ "$(stat -c '%a' "$diagnostic")" = "600" ]
+[ -s "$diagnostic.sha256" ]
+(cd "$TMP" && sha256sum -c "$(basename "$diagnostic").sha256" >/dev/null)
+grep -q '^redacted_nodes:' "$diagnostic"
+grep -q 'credentials=<redacted>' "$diagnostic"
+! grep -Fq 'sensitive-test-token-should-not-leak' "$diagnostic"
+! grep -Fq 'www.microsoft.com' "$diagnostic"
+! grep -Fq 'new.example.com' "$diagnostic"
+node_uuid="$(awk -F'|' 'NR==1{print $4}' "$TMP/dns-etc/nodes.db")"
+! grep -Fq "$node_uuid" "$diagnostic"
+
+VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log" \
+VP_LIB_DIR="$TMP/dns-usr" VP_CORE_BIN="$TMP/dns-usr/bin/mihomo" \
+VP_CORE_BACKUP_BIN="$TMP/dns-usr/bin/mihomo.previous" VP_SKIP_SERVICE=1 \
+sh "$ROOT/vp.sh" self-heal >/dev/null
+grep -q '|recovered|core|service restarted$' "$TMP/dns-log/stability.log"
+VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log" \
+VP_LIB_DIR="$TMP/dns-usr" VP_CORE_BIN="$TMP/dns-usr/bin/mihomo" \
+VP_CORE_BACKUP_BIN="$TMP/dns-usr/bin/mihomo.previous" VP_CLI_PATH="$ROOT/vp.sh" VP_SKIP_SERVICE=1 \
+sh "$ROOT/vp.sh" monitor-install >/dev/null
+[ -x "$TMP/dns-usr/bin/watchdog-run" ]
+grep -Fq "exec \"$ROOT/vp.sh\" self-heal --quiet" "$TMP/dns-usr/bin/watchdog-run"
+
 uninstall_root="$TMP/uninstall"
 mkdir -p "$uninstall_root"
 : > "$uninstall_root/vp"
