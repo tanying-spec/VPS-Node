@@ -283,11 +283,11 @@ memory_snapshot() {
 }
 
 service_state() {
-  name="$1"
+  service_state_name="$1"
   if command -v systemctl >/dev/null 2>&1; then
-    systemctl is-active "$name" 2>/dev/null || printf 'not-installed'
+    systemctl is-active "$service_state_name" 2>/dev/null || printf 'not-installed'
   elif command -v rc-service >/dev/null 2>&1; then
-    rc-service "$name" status >/dev/null 2>&1 && printf 'active' || printf 'not-installed'
+    rc-service "$service_state_name" status >/dev/null 2>&1 && printf 'active' || printf 'not-installed'
   else
     printf 'unsupported'
   fi
@@ -304,11 +304,11 @@ service_manager() {
 }
 
 service_action() {
-  action="$1"
-  name="$2"
+  service_action_verb="$1"
+  service_action_name="$2"
   case "$(service_manager)" in
-    systemd) systemctl "$action" "$name" ;;
-    openrc) rc-service "$name" "$action" ;;
+    systemd) systemctl "$service_action_verb" "$service_action_name" ;;
+    openrc) rc-service "$service_action_name" "$service_action_verb" ;;
     *) error "当前系统不支持 systemd 或 OpenRC。"; return 1 ;;
   esac
 }
@@ -587,6 +587,7 @@ argo_add() {
   case "$name$host$path" in *'|'*|*' '*|*\"*|*\'*) error "参数包含非法字符。"; return 1 ;; esac
   case "$path" in /*) ;; *) path="/$path" ;; esac
   port="$(choose_port "$requested_port")" || { error "本地端口不可用。"; return 1; }
+  created_name="$name"
   uuid="$(new_uuid)"
   begin_state_transaction argo-add || return 1
   candidate_root="$VP_TX_ACTIVE/candidate"
@@ -604,7 +605,7 @@ argo_add() {
     error "Argo 本地入口启动失败，已恢复原配置。"; return 1
   fi
   commit_state_transaction
-  ok "Argo 备用节点已创建：$name。"
+  ok "Argo 备用节点已创建：$created_name。"
   warn "请确认 Cloudflare Tunnel 公网主机名的服务指向 http://127.0.0.1:$port。"
 }
 
@@ -771,9 +772,9 @@ reality_keypair() {
 }
 
 port_in_use() {
-  port="$1"
+  check_listen_port="$1"
   if command -v ss >/dev/null 2>&1; then
-    ss -H -lntu 2>/dev/null | awk -v p=":$port" '$5 ~ p "$" {found=1} END{exit !found}'
+    ss -H -lntu 2>/dev/null | awk -v p=":$check_listen_port" '$5 ~ p "$" {found=1} END{exit !found}'
   else
     return 1
   fi
@@ -803,6 +804,8 @@ reality_add() {
   sni="${3:-www.amd.com}"
   case "$name$sni" in *'|'*|*' '*|*\"*|*\'*) error "名称或 SNI 包含非法字符。"; return 1 ;; esac
   port="$(choose_port "$requested_port")" || { error "端口不可用。"; return 1; }
+  created_name="$name"
+  created_port="$port"
   uuid="$(new_uuid)"
   pair="$(reality_keypair)" || { error "Reality 密钥生成失败。"; return 1; }
   private="${pair%%|*}"
@@ -824,7 +827,7 @@ reality_add() {
     error "新节点启动失败，已恢复原配置。"; return 1
   fi
   commit_state_transaction
-  ok "Reality 节点已创建：$name（端口 $port）。"
+  ok "Reality 节点已创建：$created_name（端口 $created_port）。"
 }
 
 public_ip() {
@@ -1011,6 +1014,12 @@ EOF
   if [ "$http_code" = "204" ]; then
     ok "节点 $name 端到端测试成功：连接 ${connect_time}s，总耗时 ${total_time}s。"
     return 0
+  fi
+  if [ "$proto" = "reality" ] && [ -z "${VP_TEST_SERVER:-}" ]; then
+    if VP_TEST_SERVER=127.0.0.1 test_node_end_to_end "$target" >/dev/null 2>&1; then
+      warn "节点 $name 的本地协议认证正常，但 VPS 无法通过自身公网 IP 回环验证；请从外部网络确认公网端口可达。"
+      return 2
+    fi
   fi
   error "节点 $name 端到端测试失败（HTTP ${http_code:-无响应}）。"
   return 1
