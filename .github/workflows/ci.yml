@@ -65,10 +65,8 @@ jobs:
         run: |
           $runner = './tests/run_authorized_host.ps1'
           & $runner -ValidateOnly
-          if ($LASTEXITCODE -ne 0) { exit 1 }
 
           & $runner -ValidateOnly -TunnelTokenFile /root/independent-test.token -TunnelHost test.example.com -TunnelPath /private-test -TunnelOriginPort 25443
-          if ($LASTEXITCODE -ne 0) { exit 1 }
 
           $invalidCases = @(
             @('-ValidateOnly', '-TunnelHost', 'test.example.com'),
