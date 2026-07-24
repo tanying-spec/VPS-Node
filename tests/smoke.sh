@@ -513,6 +513,28 @@ VP_LIB_DIR="$TMP/dns-usr" VP_CORE_BIN="$TMP/dns-usr/bin/mihomo" VP_SKIP_SERVICE=
 sh "$ROOT/vp.sh" self-heal --quiet
 [ ! -e "$TMP/dns-lib/self-heal.lock" ]
 
+self_heal_clean_hash="$(sha256sum "$TMP/dns-etc/generated/mihomo.yaml" | awk '{print $1}')"
+printf '\n# drift repaired by periodic self-heal\n' >> "$TMP/dns-etc/generated/mihomo.yaml"
+VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log" \
+VP_LIB_DIR="$TMP/dns-usr" VP_CORE_BIN="$TMP/dns-usr/bin/mihomo" VP_SKIP_SERVICE=1 \
+sh "$ROOT/vp.sh" self-heal --quiet
+[ "$(sha256sum "$TMP/dns-etc/generated/mihomo.yaml" | awk '{print $1}')" = "$self_heal_clean_hash" ]
+grep -q '|recovered|core|configuration rebuilt from authoritative state$' "$TMP/dns-log/stability.log"
+cp "$TMP/dns-etc/nodes.db" "$TMP/nodes-before-invalid-self-heal"
+printf '%s\n' 'argo|self-heal-bad|25436|77777777-7777-4777-8777-777777777777|/bad|bad.example.com' >> "$TMP/dns-etc/nodes.db"
+invalid_db_hash="$(sha256sum "$TMP/dns-etc/nodes.db" | awk '{print $1}')"
+config_before_invalid_heal="$(sha256sum "$TMP/dns-etc/generated/mihomo.yaml" | awk '{print $1}')"
+if VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log" \
+  VP_LIB_DIR="$TMP/dns-usr" VP_CORE_BIN="$TMP/dns-usr/bin/mihomo" VP_SKIP_SERVICE=1 \
+  sh "$ROOT/vp.sh" self-heal --quiet; then
+  printf 'invalid node database unexpectedly self-healed\n' >&2
+  exit 1
+fi
+[ "$(sha256sum "$TMP/dns-etc/nodes.db" | awk '{print $1}')" = "$invalid_db_hash" ]
+[ "$(sha256sum "$TMP/dns-etc/generated/mihomo.yaml" | awk '{print $1}')" = "$config_before_invalid_heal" ]
+grep -q '|failed|state|node or rotation database invalid; automatic rebuild refused$' "$TMP/dns-log/stability.log"
+mv "$TMP/nodes-before-invalid-self-heal" "$TMP/dns-etc/nodes.db"
+
 dedupe_root="$TMP/self-heal-dedupe"
 VP_CONFIG_DIR="$dedupe_root/etc" VP_DATA_DIR="$dedupe_root/lib" VP_LOG_DIR="$dedupe_root/log" \
 VP_LIB_DIR="$dedupe_root/usr" VP_SKIP_SERVICE=1 sh "$ROOT/vp.sh" self-heal --quiet

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.0-dev.28
+
+- Self-heal now rebuilds missing, invalid or drifted Mihomo configuration from validated authoritative node/rotation state and uses the existing verified restart/rollback path.
+- Invalid node or rotation databases are never guessed or overwritten; self-heal records a distinct state failure and returns non-zero for manual trusted-backup recovery.
+- Tests prove drift is repaired automatically while a malformed live database and the existing generated configuration remain byte-for-byte unchanged.
+
 ## 0.2.0-dev.27
 
 - Periodic/manual self-heal runs now use a PID-aware lock so overlapping timers cannot race into duplicate service restarts.

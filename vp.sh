@@ -2,7 +2,7 @@
 
 set -u
 
-VP_VERSION="0.2.0-dev.27"
+VP_VERSION="0.2.0-dev.28"
 VP_CONFIG_DIR="${VP_CONFIG_DIR:-/etc/vps-node}"
 VP_DATA_DIR="${VP_DATA_DIR:-/var/lib/vps-node}"
 VP_LOG_DIR="${VP_LOG_DIR:-/var/log/vps-node}"
@@ -2432,9 +2432,19 @@ self_heal_once() {
     repaired=$((repaired + 1))
   fi
   if [ -x "$VP_CORE_BIN" ] && [ -s "$VP_NODES_DB" ]; then
-    if [ ! -f "$VP_CORE_CONFIG" ] || ! "$VP_CORE_BIN" -t -d "$VP_CONFIG_DIR" -f "$VP_CORE_CONFIG" >/dev/null 2>&1; then
-      stability_event failed core "configuration invalid; restart skipped"
+    if ! validate_nodes_database "$VP_NODES_DB" || ! validate_rotations_database "$VP_NODES_DB" "$VP_ROTATIONS_DB"; then
+      stability_event failed state "node or rotation database invalid; automatic rebuild refused"
       failures=$((failures + 1))
+    elif [ ! -f "$VP_CORE_CONFIG" ] ||
+         ! "$VP_CORE_BIN" -t -d "$VP_CONFIG_DIR" -f "$VP_CORE_CONFIG" >/dev/null 2>&1 ||
+         ! generated_config_matches_state; then
+      if safe_repair >/dev/null 2>&1; then
+        stability_event recovered core "configuration rebuilt from authoritative state"
+        repaired=$((repaired + 1))
+      else
+        stability_event failed core "configuration rebuild or verified restart failed"
+        failures=$((failures + 1))
+      fi
     elif ! core_process_running; then
       if core_service_restart; then
         stability_event recovered core "service restarted"
