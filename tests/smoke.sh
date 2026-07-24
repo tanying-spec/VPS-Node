@@ -48,6 +48,16 @@ VP_DNS_PUBLIC_SERVERS=192.0.2.1 VP_SKIP_SERVICE=1 \
 sh "$ROOT/vp.sh" core-install >/dev/null
 grep -q '^VP_DNS_MODE=system$' "$TMP/dns-etc/core.env"
 ! grep -q '1\.1\.1\.1\|8\.8\.8\.8' "$TMP/dns-etc/generated/mihomo.yaml"
+VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log" \
+VP_LIB_DIR="$TMP/dns-usr" VP_CORE_BIN="$TMP/dns-usr/bin/mihomo" \
+VP_CORE_BACKUP_BIN="$TMP/dns-usr/bin/mihomo.previous" VP_SKIP_SERVICE=1 \
+sh "$ROOT/vp.sh" reality-add numbered-node 25433 www.amd.com >/dev/null
+menu_output="$(printf '3\n1\n1\n\n0\n' | \
+  VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log" \
+  VP_LIB_DIR="$TMP/dns-usr" VP_CORE_BIN="$TMP/dns-usr/bin/mihomo" \
+  VP_CORE_BACKUP_BIN="$TMP/dns-usr/bin/mihomo.previous" VP_SKIP_SERVICE=1 \
+  sh "$ROOT/vp.sh")"
+printf '%s\n' "$menu_output" | grep -q 'vless://'
 
 printf 'TEST_VALUE=before\n' >> "$TMP/etc/state.env"
 VP_CONFIG_DIR="$TMP/etc" VP_DATA_DIR="$TMP/lib" VP_LOG_DIR="$TMP/log" VP_LIB_DIR="$TMP/usr-lib" \

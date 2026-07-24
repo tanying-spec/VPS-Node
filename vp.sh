@@ -2,7 +2,7 @@
 
 set -u
 
-VP_VERSION="0.2.0-dev.3"
+VP_VERSION="0.2.0-dev.4"
 VP_CONFIG_DIR="${VP_CONFIG_DIR:-/etc/vps-node}"
 VP_DATA_DIR="${VP_DATA_DIR:-/var/lib/vps-node}"
 VP_LOG_DIR="${VP_LOG_DIR:-/var/log/vps-node}"
@@ -977,6 +977,18 @@ show_nodes() {
   awk -F'|' '{printf "%d. %s  协议=%s  端口=%s\n", NR,$2,$1,$3}' "$VP_NODES_DB"
 }
 
+resolve_node_selector() {
+  selector="$1"
+  [ -n "$selector" ] || return 1
+  resolved="$(awk -F'|' -v n="$selector" '$2==n{print $2;exit}' "$VP_NODES_DB")"
+  if [ -n "$resolved" ]; then
+    printf '%s' "$resolved"
+    return 0
+  fi
+  case "$selector" in *[!0-9]*) return 1 ;; esac
+  awk -F'|' -v row="$selector" 'NR==row{print $2;exit}' "$VP_NODES_DB"
+}
+
 delete_node() {
   need_root || return 1
   target="${1:-}"
@@ -1854,9 +1866,11 @@ interactive_argo_setup() {
 interactive_node_action() {
   show_nodes
   [ -s "$VP_NODES_DB" ] || return 0
-  printf '请输入节点名称：'
-  read -r target || true
-  [ -n "$target" ] || return 0
+  printf '请输入节点编号或名称：'
+  read -r selector || true
+  [ -n "$selector" ] || return 0
+  target="$(resolve_node_selector "$selector")"
+  [ -n "$target" ] || { error "未找到节点：$selector。"; return 1; }
   printf '1. 显示链接\n2. 端到端测试\n3. 轮换凭据\n4. 完成凭据切换\n5. 删除节点\n0. 返回\n请选择：'
   read -r action || true
   case "$action" in

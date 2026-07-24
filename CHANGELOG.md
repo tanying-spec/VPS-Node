@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.0-dev.4
+
+- Fixed node management so the interactive menu accepts either the displayed number or the node name.
+
 ## 0.2.0-dev.3
 
 - Added adaptive DNS upstream detection with public-DNS preference and system fallback.
