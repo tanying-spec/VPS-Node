@@ -2,7 +2,7 @@
 
 set -u
 
-VP_VERSION="0.2.0-dev.18"
+VP_VERSION="0.2.0-dev.19"
 VP_CONFIG_DIR="${VP_CONFIG_DIR:-/etc/vps-node}"
 VP_DATA_DIR="${VP_DATA_DIR:-/var/lib/vps-node}"
 VP_LOG_DIR="${VP_LOG_DIR:-/var/log/vps-node}"
@@ -40,6 +40,7 @@ VP_WATCHDOG_RUNNER="${VP_WATCHDOG_RUNNER:-$VP_LIB_DIR/bin/watchdog-run}"
 VP_WATCHDOG_SERVICE="${VP_WATCHDOG_SERVICE:-vps-node-watchdog}"
 VP_CLI_PATH="${VP_CLI_PATH:-/usr/local/bin/vp}"
 VP_CLI_BACKUP_PATH="${VP_CLI_BACKUP_PATH:-$VP_CLI_PATH.previous}"
+VP_CLI_BACKUP_SHA256="${VP_CLI_BACKUP_SHA256:-$VP_CLI_BACKUP_PATH.sha256}"
 VP_REPO="${VP_REPO:-tanying-spec/VPS-Node}"
 VP_REF="${VP_REF:-main}"
 VP_CURL_BIN="${VP_CURL_BIN:-curl}"
@@ -2355,7 +2356,15 @@ update_cli() {
     return 0
   fi
   mkdir -p "$(dirname "$VP_CLI_PATH")"
-  [ -f "$VP_CLI_PATH" ] && cp -p "$VP_CLI_PATH" "$VP_CLI_BACKUP_PATH"
+  if [ -f "$VP_CLI_PATH" ]; then
+    cp -p "$VP_CLI_PATH" "$VP_CLI_BACKUP_PATH" || { cleanup_update; trap - EXIT HUP INT TERM; return 1; }
+    previous_hash="$(sha256_file "$VP_CLI_BACKUP_PATH" 2>/dev/null)"
+    [ -n "$previous_hash" ] || { rm -f "$VP_CLI_BACKUP_PATH"; cleanup_update; trap - EXIT HUP INT TERM; error "无法校验当前管理脚本，更新已取消。"; return 1; }
+    printf '%s  %s\n' "$previous_hash" "$(basename "$VP_CLI_BACKUP_PATH")" > "$VP_CLI_BACKUP_SHA256"
+    chmod 600 "$VP_CLI_BACKUP_SHA256"
+  else
+    rm -f "$VP_CLI_BACKUP_PATH" "$VP_CLI_BACKUP_SHA256"
+  fi
   chmod 755 "$candidate"
   mv "$candidate" "$VP_CLI_PATH"
   rm -f "$sidecar"
@@ -2366,6 +2375,14 @@ update_cli() {
 rollback_cli() {
   need_root || return 1
   [ -f "$VP_CLI_BACKUP_PATH" ] || { error "没有可回滚的管理脚本。"; return 1; }
+  if [ -r "$VP_CLI_BACKUP_SHA256" ]; then
+    verify_script_sidecar "$VP_CLI_BACKUP_PATH" "$VP_CLI_BACKUP_SHA256" || {
+      error "备份管理脚本 SHA-256 校验失败，拒绝回滚。"
+      return 1
+    }
+  else
+    warn "旧版回滚文件没有 SHA-256；本次将执行语法与版本检查，成功交换后自动补齐校验。"
+  fi
   sh -n "$VP_CLI_BACKUP_PATH" || { error "备份脚本语法检查失败。"; return 1; }
   current_tmp="$(mktemp /tmp/vp-current.XXXXXX)" || return 1
   [ -f "$VP_CLI_PATH" ] && cp -p "$VP_CLI_PATH" "$current_tmp" || : > "$current_tmp"
@@ -2377,7 +2394,20 @@ rollback_cli() {
     error "回滚版本无法运行，已恢复当前版本。"
     return 1
   fi
-  [ -s "$current_tmp" ] && mv "$current_tmp" "$VP_CLI_BACKUP_PATH" || rm -f "$current_tmp"
+  if [ -s "$current_tmp" ]; then
+    replacement_hash="$(sha256_file "$current_tmp" 2>/dev/null)"
+    [ -n "$replacement_hash" ] || {
+      cp -p "$current_tmp" "$VP_CLI_PATH"
+      rm -f "$current_tmp"
+      error "无法为交换后的回滚版本生成 SHA-256，已恢复当前版本。"
+      return 1
+    }
+    mv "$current_tmp" "$VP_CLI_BACKUP_PATH"
+    printf '%s  %s\n' "$replacement_hash" "$(basename "$VP_CLI_BACKUP_PATH")" > "$VP_CLI_BACKUP_SHA256"
+    chmod 600 "$VP_CLI_BACKUP_SHA256"
+  else
+    rm -f "$current_tmp" "$VP_CLI_BACKUP_PATH" "$VP_CLI_BACKUP_SHA256"
+  fi
   ok "管理脚本已回滚到 $(sh "$VP_CLI_PATH" version)。"
 }
 

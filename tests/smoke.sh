@@ -5,6 +5,7 @@ set -eu
 ROOT="$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)"
 TMP="$(mktemp -d /tmp/vps-node-test.XXXXXX)"
 trap 'rm -rf "$TMP"' EXIT HUP INT TERM
+CURRENT_VERSION="$(sh "$ROOT/vp.sh" version)"
 
 VP_CONFIG_DIR="$TMP/etc" \
 VP_DATA_DIR="$TMP/lib" \
@@ -401,6 +402,41 @@ if VP_CONFIG_DIR=/etc VP_DATA_DIR="$TMP/safe-lib" VP_LOG_DIR="$TMP/safe-log" \
   printf 'dangerous uninstall path unexpectedly accepted\n' >&2
   exit 1
 fi
+
+update_root="$TMP/update"
+mkdir -p "$update_root/good" "$update_root/bad"
+cp "$ROOT/vp.sh" "$update_root/installed-vp"
+chmod 755 "$update_root/installed-vp"
+sed 's/^VP_VERSION=.*/VP_VERSION="0.2.0-update-test"/' "$ROOT/vp.sh" > "$update_root/good/vp.sh"
+printf '%s  vp.sh\n' "$(sha256sum "$update_root/good/vp.sh" | awk '{print $1}')" > "$update_root/good/vp.sh.sha256"
+cp "$update_root/good/vp.sh" "$update_root/bad/vp.sh"
+printf '%064d  vp.sh\n' 0 > "$update_root/bad/vp.sh.sha256"
+installed_hash="$(sha256sum "$update_root/installed-vp" | awk '{print $1}')"
+if VP_CONFIG_DIR="$TMP/etc" VP_CLI_PATH="$update_root/installed-vp" \
+  VP_CLI_BACKUP_PATH="$update_root/installed-vp.previous" VP_UPDATE_SOURCE_DIR="$update_root/bad" \
+  sh "$ROOT/vp.sh" update >/dev/null 2>&1; then
+  printf 'bad update checksum unexpectedly accepted\n' >&2
+  exit 1
+fi
+[ "$(sha256sum "$update_root/installed-vp" | awk '{print $1}')" = "$installed_hash" ]
+VP_CONFIG_DIR="$TMP/etc" VP_CLI_PATH="$update_root/installed-vp" \
+VP_CLI_BACKUP_PATH="$update_root/installed-vp.previous" VP_UPDATE_SOURCE_DIR="$update_root/good" \
+sh "$ROOT/vp.sh" update >/dev/null
+[ "$(sh "$update_root/installed-vp" version)" = '0.2.0-update-test' ]
+(cd "$update_root" && sha256sum -c installed-vp.previous.sha256 >/dev/null)
+VP_CONFIG_DIR="$TMP/etc" VP_CLI_PATH="$update_root/installed-vp" \
+VP_CLI_BACKUP_PATH="$update_root/installed-vp.previous" sh "$ROOT/vp.sh" rollback >/dev/null
+[ "$(sh "$update_root/installed-vp" version)" = "$CURRENT_VERSION" ]
+VP_CONFIG_DIR="$TMP/etc" VP_CLI_PATH="$update_root/installed-vp" \
+VP_CLI_BACKUP_PATH="$update_root/installed-vp.previous" VP_UPDATE_SOURCE_DIR="$update_root/good" \
+sh "$ROOT/vp.sh" update >/dev/null
+printf '\n# harmless syntax-preserving corruption\n' >> "$update_root/installed-vp.previous"
+if VP_CONFIG_DIR="$TMP/etc" VP_CLI_PATH="$update_root/installed-vp" \
+  VP_CLI_BACKUP_PATH="$update_root/installed-vp.previous" sh "$ROOT/vp.sh" rollback >/dev/null 2>&1; then
+  printf 'corrupted rollback script unexpectedly accepted\n' >&2
+  exit 1
+fi
+[ "$(sh "$update_root/installed-vp" version)" = '0.2.0-update-test' ]
 
 printf 'TEST_VALUE=before\n' >> "$TMP/etc/state.env"
 VP_CONFIG_DIR="$TMP/etc" VP_DATA_DIR="$TMP/lib" VP_LOG_DIR="$TMP/log" VP_LIB_DIR="$TMP/usr-lib" \

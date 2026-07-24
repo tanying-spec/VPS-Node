@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.0-dev.19
+
+- Installer and self-update now create a permission-restricted SHA-256 sidecar for the previous management script.
+- Rollback verifies the stored script before executing it and refuses syntax-preserving corruption; successful swaps regenerate the checksum for the new rollback target.
+- Added complete bad-update rejection, update, rollback, checksum-tamper rejection and reinstall-backup tests.
+
 ## 0.2.0-dev.18
 
 - Backup restore now accepts only the documented manifest/config/data layout and rejects unexpected top-level paths.

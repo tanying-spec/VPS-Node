@@ -5,6 +5,8 @@ set -eu
 REPO="${VP_REPO:-tanying-spec/VPS-Node}"
 REF="${VP_REF:-main}"
 INSTALL_PATH="${VP_INSTALL_PATH:-/usr/local/bin/vp}"
+INSTALL_BACKUP_PATH="${VP_INSTALL_BACKUP_PATH:-$INSTALL_PATH.previous}"
+INSTALL_BACKUP_SHA256="${VP_INSTALL_BACKUP_SHA256:-$INSTALL_BACKUP_PATH.sha256}"
 MODE=install
 
 die() { printf '\033[31m[ERROR]\033[0m %s\n' "$*" >&2; exit 1; }
@@ -119,7 +121,7 @@ system_preflight() {
   [ "$port_tool" = available ] || preflight_warn "缺少 ss，暂时无法检查默认保留端口。"
 
   if [ -e "$INSTALL_PATH" ]; then
-    preflight_warn "检测到现有管理脚本；正式安装会先备份为 $INSTALL_PATH.previous。"
+    preflight_warn "检测到现有管理脚本；正式安装会先备份为 $INSTALL_BACKUP_PATH 并校验。"
   else
     ok "未发现旧的 VPS-Node 管理脚本。"
   fi
@@ -148,7 +150,7 @@ show_install_plan() {
   printf '  1. 从 GitHub 解析 %s/%s 的精确提交\n' "$REPO" "$REF"
   printf '  2. 下载 vp.sh 与 SHA-256 并执行语法校验\n'
   printf '  3. 将管理脚本安装到 %s\n' "$INSTALL_PATH"
-  printf '  4. 如存在旧脚本，保留为 %s.previous\n' "$INSTALL_PATH"
+  printf '  4. 如存在旧脚本，保留为 %s 并生成 SHA-256\n' "$INSTALL_BACKUP_PATH"
   printf '  5. 初始化 VPS-Node 自己的状态目录\n'
   printf '\n明确不会执行：\n'
   printf '  - 不安装或启动 Mihomo/cloudflared 内核\n'
@@ -222,7 +224,14 @@ case "$expected" in ''|*[!0-9a-f]*) die "SHA-256 文件格式无效。" ;; esac
 sh -n "$tmp" || die "脚本语法检查失败。"
 chmod 755 "$tmp"
 mkdir -p "$(dirname "$INSTALL_PATH")"
-[ -f "$INSTALL_PATH" ] && cp "$INSTALL_PATH" "$INSTALL_PATH.previous"
+if [ -f "$INSTALL_PATH" ]; then
+  cp "$INSTALL_PATH" "$INSTALL_BACKUP_PATH" || die "无法备份现有管理脚本。"
+  backup_hash="$(sha256_file "$INSTALL_BACKUP_PATH")" || die "无法校验现有管理脚本备份。"
+  printf '%s  %s\n' "$backup_hash" "$(basename "$INSTALL_BACKUP_PATH")" > "$INSTALL_BACKUP_SHA256"
+  chmod 600 "$INSTALL_BACKUP_SHA256"
+else
+  rm -f "$INSTALL_BACKUP_PATH" "$INSTALL_BACKUP_SHA256"
+fi
 mv "$tmp" "$INSTALL_PATH"
 rm -f "$checksum_tmp"
 trap - EXIT HUP INT TERM

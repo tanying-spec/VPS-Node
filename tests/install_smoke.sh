@@ -38,4 +38,12 @@ sh ./install.sh >/dev/null
 [ -f "$TMP/etc/state.env" ]
 "$TMP/install/vp" version | grep -Eq '^0\.'
 
+first_install_hash="$(sha256sum "$TMP/install/vp" | awk '{print $1}')"
+PATH="$TMP/bin:$PATH" VP_LOCAL_SOURCE=1 VP_INSTALL_PATH="$TMP/install/vp" \
+VP_CONFIG_DIR="$TMP/etc" VP_DATA_DIR="$TMP/lib" VP_LOG_DIR="$TMP/log" VP_LIB_DIR="$TMP/usr" \
+sh ./install.sh >/dev/null
+[ "$(sha256sum "$TMP/install/vp.previous" | awk '{print $1}')" = "$first_install_hash" ]
+(cd "$TMP/install" && sha256sum -c vp.previous.sha256 >/dev/null)
+[ "$(stat -c '%a' "$TMP/install/vp.previous.sha256")" = 600 ]
+
 printf 'install-smoke: ok\n'
