@@ -25,6 +25,18 @@ chmod 600 /root/.ssh/authorized_keys
 powershell -ExecutionPolicy Bypass -File .\tests\run_authorized_host.ps1 -SkipMemoryProfiles
 ```
 
+如需由同一个固定入口同时执行完全独立的 Cloudflare Tunnel 公网验收，可使用：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\tests\run_authorized_host.ps1 `
+  -TunnelTokenFile /root/independent-test.token `
+  -TunnelHost test.example.com `
+  -TunnelPath /private-test-path `
+  -TunnelOriginPort 25443
+```
+
+四项必须同时提供。`TunnelTokenFile` 是测试机上的绝对文件路径，不是 Token 内容，并且不能使用正式 `/etc/cloudflared/token`。Public Hostname 必须预先指向该固定源站端口。可先追加 `-ValidateOnly` 离线检查参数；该模式不会连接测试机、不会读取 Token 文件。
+
 脚本中的目标 IP 为常量，不能通过环境变量改成其他主机。旧的非隔离系统测试已经删除。
 
 验收脚本使用：

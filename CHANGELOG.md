@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.0-dev.38
+
+- Extended the fixed authorized-host runner with optional independent Cloudflare Tunnel public-edge acceptance using only a remote token file path, host, path and fixed origin port supplied together.
+- Added offline `-ValidateOnly` parameter checks, including rejection of partial inputs, relative/formal token paths, malformed hosts and paths, and unsafe origin ports without reading token content or connecting to a host.
+- Cloudflared is discovered read-only only when public-edge acceptance is requested; executable discovery now handles empty output safely.
+- CI checks all four public-edge parameters, forbids plaintext-token parameters and exercises valid and invalid parameter combinations.
+
 ## 0.2.0-dev.37
 
 - Added a Windows PowerShell authorized-host runner fixed to `134.209.180.134:18750`; host and port are constants rather than user-overridable parameters.

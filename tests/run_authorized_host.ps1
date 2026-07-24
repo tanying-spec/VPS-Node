@@ -2,6 +2,11 @@
 param(
     [string]$KeyPath = "$HOME\.ssh\codex_u683775765_62_72_48_31",
     [string]$EvidenceDirectory = "",
+    [string]$TunnelTokenFile = "",
+    [string]$TunnelHost = "",
+    [string]$TunnelPath = "",
+    [int]$TunnelOriginPort = 0,
+    [switch]$ValidateOnly,
     [switch]$SkipMemoryProfiles
 )
 
@@ -90,6 +95,31 @@ function Assert-EvidenceChecksums([string]$Directory) {
     }
 }
 
+$TunnelInputCount = 0
+foreach ($tunnelInputPresent in @(
+    -not [string]::IsNullOrWhiteSpace($TunnelTokenFile),
+    -not [string]::IsNullOrWhiteSpace($TunnelHost),
+    -not [string]::IsNullOrWhiteSpace($TunnelPath),
+    $TunnelOriginPort -ne 0
+)) {
+    if ($tunnelInputPresent) { $TunnelInputCount++ }
+}
+if ($TunnelInputCount -ne 0 -and $TunnelInputCount -ne 4) {
+    throw 'Independent Tunnel acceptance requires TunnelTokenFile, TunnelHost, TunnelPath and TunnelOriginPort together.'
+}
+if ($TunnelInputCount -eq 4) {
+    if ($TunnelTokenFile -notmatch '^/') { throw 'TunnelTokenFile must be an absolute path on the authorized host.' }
+    if ($TunnelTokenFile -match "[\r\n]") { throw 'TunnelTokenFile contains an invalid newline.' }
+    if ($TunnelTokenFile -eq '/etc/cloudflared/token') { throw 'TunnelTokenFile must not reference the formal Cloudflare Tunnel token.' }
+    if ($TunnelHost -notmatch '^[A-Za-z0-9.-]+\.[A-Za-z]{2,63}$') { throw 'TunnelHost is invalid.' }
+    if ($TunnelHost.Contains('..') -or $TunnelHost.StartsWith('.') -or $TunnelHost.EndsWith('.')) { throw 'TunnelHost is invalid.' }
+    if (-not $TunnelPath.StartsWith('/') -or $TunnelPath -match "[\r\n]") { throw 'TunnelPath must begin with / and contain no newline.' }
+    if ($TunnelOriginPort -lt 1024 -or $TunnelOriginPort -gt 65535) { throw 'TunnelOriginPort must be between 1024 and 65535.' }
+}
+if ($ValidateOnly) {
+    Write-Host 'Authorized-host runner parameters are valid; no network connection was attempted.'
+    return
+}
 if (-not (Test-Path -LiteralPath $KeyPath -PathType Leaf)) {
     throw "SSH private key does not exist: $KeyPath"
 }
@@ -132,13 +162,39 @@ done
 exit 1
 '@
     $discovery = Invoke-AuthorizedSsh $discover
-    $MihomoPath = ($discovery.Output | Where-Object { $_ -match '^/' } | Select-Object -First 1).Trim()
+    $MihomoPath = [string]($discovery.Output | Where-Object { $_ -match '^/' } | Select-Object -First 1)
+    $MihomoPath = $MihomoPath.Trim()
     if ([string]::IsNullOrWhiteSpace($MihomoPath)) { throw 'Unable to discover the formal Mihomo executable read-only.' }
     Write-Host 'Mihomo discovered; starting isolated acceptance without reading or changing formal credentials.'
 
+    $acceptanceEnvironment = "VP_TEST_MIHOMO_BIN=$(Quote-Sh $MihomoPath) " +
+        "VP_ACCEPTANCE_EVIDENCE_DIR=$(Quote-Sh "$RemoteRoot/evidence") "
+    if ($TunnelInputCount -eq 4) {
+        $discoverCloudflared = @'
+set -eu
+for pid in $(pidof cloudflared 2>/dev/null || true); do
+  candidate=$(readlink -f "/proc/$pid/exe" 2>/dev/null || true)
+  if [ -n "$candidate" ] && [ -x "$candidate" ]; then printf '%s\n' "$candidate"; exit 0; fi
+done
+for candidate in "$(command -v cloudflared 2>/dev/null || true)" /usr/local/bin/cloudflared /usr/bin/cloudflared /etc/cloudflared/cloudflared; do
+  if [ -n "$candidate" ] && [ -x "$candidate" ]; then printf '%s\n' "$candidate"; exit 0; fi
+done
+exit 1
+'@
+        $cloudflaredDiscovery = Invoke-AuthorizedSsh $discoverCloudflared
+        $CloudflaredPath = [string]($cloudflaredDiscovery.Output | Where-Object { $_ -match '^/' } | Select-Object -First 1)
+        $CloudflaredPath = $CloudflaredPath.Trim()
+        if ([string]::IsNullOrWhiteSpace($CloudflaredPath)) { throw 'Unable to discover cloudflared read-only.' }
+        $acceptanceEnvironment += "VP_TEST_CLOUDFLARED_BIN=$(Quote-Sh $CloudflaredPath) " +
+            "VP_TEST_TUNNEL_TOKEN_FILE=$(Quote-Sh $TunnelTokenFile) " +
+            "VP_TEST_ARGO_HOST=$(Quote-Sh $TunnelHost) " +
+            "VP_TEST_ARGO_PATH=$(Quote-Sh $TunnelPath) " +
+            "VP_TEST_ARGO_ORIGIN_PORT=$(Quote-Sh ([string]$TunnelOriginPort)) "
+        Write-Host 'Independent Cloudflare Tunnel inputs validated; public edge acceptance is enabled.'
+    }
+
     $acceptanceCommand = "set -eu; cd $(Quote-Sh "$RemoteRoot/source"); " +
-        "VP_TEST_MIHOMO_BIN=$(Quote-Sh $MihomoPath) " +
-        "VP_ACCEPTANCE_EVIDENCE_DIR=$(Quote-Sh "$RemoteRoot/evidence") " +
+        $acceptanceEnvironment +
         "sh tests/isolated_acceptance.sh"
     $acceptance = Invoke-AuthorizedSsh $acceptanceCommand
     $acceptance.Output | ForEach-Object { Write-Host $_ }
