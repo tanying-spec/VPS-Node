@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.0-dev.5
+
+- Added a clearly visible uninstall entry to the main interactive menu with explicit confirmation.
+
 ## 0.2.0-dev.4
 
 - Fixed node management so the interactive menu accepts either the displayed number or the node name.

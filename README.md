@@ -38,6 +38,7 @@ vp restore /path/to/backup.tar.gz
 vp maintain
 vp update
 vp rollback
+vp uninstall
 ```
 
 普通用户可以直接运行 `vp`，首页菜单会引导创建主节点、备用节点、测试、修复、维护和迁移；命令参数适合高级用户和自动化。
@@ -64,3 +65,5 @@ Reality 从 VPS 内部使用公网 IP 测试时，如果宿主网络不支持 NA
 项目仍处于开发阶段，建议先在自己的测试 VPS 上验证域名、Tunnel ingress 和防火墙策略。
 
 只有设置 `VP_LOCAL_SOURCE=1` 时安装器才会读取当前目录的 `vp.sh`；普通远程一键安装始终从 GitHub 精确提交下载，避免误用当前目录中的旧文件。
+
+卸载可从首页选择“卸载 VPS-Node”，也可以执行 `vp uninstall`。输入 `DELETE` 后会删除 VPS-Node 自己的服务、状态、凭据、备份和管理脚本。

@@ -59,6 +59,22 @@ menu_output="$(printf '3\n1\n1\n\n0\n' | \
   sh "$ROOT/vp.sh")"
 printf '%s\n' "$menu_output" | grep -q 'vless://'
 
+uninstall_root="$TMP/uninstall"
+mkdir -p "$uninstall_root"
+: > "$uninstall_root/vp"
+VP_CONFIG_DIR="$uninstall_root/etc" VP_DATA_DIR="$uninstall_root/lib" \
+VP_LOG_DIR="$uninstall_root/log" VP_LIB_DIR="$uninstall_root/usr" \
+VP_CLI_PATH="$uninstall_root/vp" VP_CLI_BACKUP_PATH="$uninstall_root/vp.previous" \
+VP_SKIP_SERVICE=1 sh "$ROOT/vp.sh" init >/dev/null
+printf '11\nDELETE\n' | \
+  VP_CONFIG_DIR="$uninstall_root/etc" VP_DATA_DIR="$uninstall_root/lib" \
+  VP_LOG_DIR="$uninstall_root/log" VP_LIB_DIR="$uninstall_root/usr" \
+  VP_CLI_PATH="$uninstall_root/vp" VP_CLI_BACKUP_PATH="$uninstall_root/vp.previous" \
+  VP_SKIP_SERVICE=1 sh "$ROOT/vp.sh" >/dev/null 2>&1
+[ ! -e "$uninstall_root/etc" ]
+[ ! -e "$uninstall_root/lib" ]
+[ ! -e "$uninstall_root/vp" ]
+
 printf 'TEST_VALUE=before\n' >> "$TMP/etc/state.env"
 VP_CONFIG_DIR="$TMP/etc" VP_DATA_DIR="$TMP/lib" VP_LOG_DIR="$TMP/log" VP_LIB_DIR="$TMP/usr-lib" \
 VP_ALLOW_TEST_HOOKS=1 sh "$ROOT/vp.sh" debug-tx commit TEST_VALUE committed

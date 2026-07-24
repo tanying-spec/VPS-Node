@@ -2,7 +2,7 @@
 
 set -u
 
-VP_VERSION="0.2.0-dev.4"
+VP_VERSION="0.2.0-dev.5"
 VP_CONFIG_DIR="${VP_CONFIG_DIR:-/etc/vps-node}"
 VP_DATA_DIR="${VP_DATA_DIR:-/var/lib/vps-node}"
 VP_LOG_DIR="${VP_LOG_DIR:-/var/log/vps-node}"
@@ -1792,7 +1792,7 @@ uninstall_project() {
     printf '请输入 DELETE 确认：'
     read -r answer || true
   fi
-  [ "$answer" = "DELETE" ] || { warn "已取消。"; return 0; }
+  [ "$answer" = "DELETE" ] || { warn "已取消。"; return 2; }
   if [ "${VP_SKIP_SERVICE:-0}" != "1" ]; then
     case "$(service_manager)" in
       systemd)
@@ -1940,6 +1940,7 @@ menu() {
     printf '8. 更新与回滚\n'
     printf '9. 高级设置\n'
     printf '10. 刷新状态\n'
+    printf '11. 卸载 VPS-Node\n'
     printf '0. 退出\n'
     printf '请选择：'
     read -r choice || return 0
@@ -1954,6 +1955,12 @@ menu() {
       8) interactive_update; pause_screen ;;
       9) advanced_menu; pause_screen ;;
       10) ;;
+      11)
+        if uninstall_project; then
+          return 0
+        fi
+        pause_screen
+        ;;
       0) return 0 ;;
       *) warn "无效选择。" ;;
     esac
