@@ -767,6 +767,71 @@ EOF
   esac
 }
 
+test_node_end_to_end() {
+  target="${1:-}"
+  [ -x "$VP_CORE_BIN" ] || { error "代理核心尚未安装。"; return 1; }
+  [ -n "$target" ] || { error "请指定节点名称。"; return 1; }
+  record="$(awk -F'|' -v n="$target" '$2==n{print;exit}' "$VP_NODES_DB" 2>/dev/null)"
+  [ -n "$record" ] || { error "未找到节点。"; return 1; }
+  IFS='|' read -r proto name port uuid value1 value2 private public short_id <<EOF
+$record
+EOF
+  client_port="$(choose_port)" || { error "无法分配测试端口。"; return 1; }
+  test_dir="$(mktemp -d /tmp/vp-node-test.XXXXXX)" || return 1
+  client_pid=""
+  cleanup_node_test() {
+    if [ -n "$client_pid" ]; then
+      kill "$client_pid" 2>/dev/null || true
+      wait "$client_pid" 2>/dev/null || true
+    fi
+    rm -rf "$test_dir"
+  }
+  trap cleanup_node_test EXIT HUP INT TERM
+  mkdir -p "$test_dir/data"
+  {
+    printf 'mixed-port: %s\nallow-lan: false\nmode: rule\nlog-level: warning\n' "$client_port"
+    printf 'proxies:\n'
+    case "$proto" in
+      reality)
+        server="${VP_TEST_SERVER:-$(public_ip)}"
+        printf "  - name: 'target'\n    type: vless\n    server: '%s'\n    port: %s\n" "$(yaml_quote "$server")" "$port"
+        printf "    uuid: '%s'\n    network: tcp\n    tls: true\n" "$(yaml_quote "$uuid")"
+        printf "    servername: '%s'\n    client-fingerprint: chrome\n" "$(yaml_quote "$value1")"
+        printf "    reality-opts:\n      public-key: '%s'\n      short-id: '%s'\n" "$(yaml_quote "$public")" "$(yaml_quote "$short_id")"
+        ;;
+      argo)
+        path="$value1"; host="$value2"
+        printf "  - name: 'target'\n    type: vless\n    server: '%s'\n    port: 443\n" "$(yaml_quote "$host")"
+        printf "    uuid: '%s'\n    network: ws\n    tls: true\n    servername: '%s'\n    client-fingerprint: chrome\n" "$(yaml_quote "$uuid")" "$(yaml_quote "$host")"
+        printf "    ws-opts:\n      path: '%s'\n      headers:\n        Host: '%s'\n" "$(yaml_quote "$path")" "$(yaml_quote "$host")"
+        ;;
+      *) cleanup_node_test; trap - EXIT HUP INT TERM; error "暂不支持测试该协议。"; return 1 ;;
+    esac
+    printf "proxy-groups:\n  - name: 'FINAL'\n    type: select\n    proxies:\n      - target\nrules:\n  - MATCH,FINAL\n"
+  } > "$test_dir/client.yaml"
+  chmod 600 "$test_dir/client.yaml"
+  if ! "$VP_CORE_BIN" -t -d "$test_dir/data" -f "$test_dir/client.yaml" >/dev/null 2>&1; then
+    cleanup_node_test; trap - EXIT HUP INT TERM
+    error "测试客户端配置生成失败。"
+    return 1
+  fi
+  "$VP_CORE_BIN" -d "$test_dir/data" -f "$test_dir/client.yaml" > "$test_dir/client.log" 2>&1 &
+  client_pid=$!
+  sleep 2
+  result="$(curl -sS -o /dev/null -w '%{http_code}|%{time_connect}|%{time_total}' --max-time 25 --proxy "http://127.0.0.1:$client_port" https://cp.cloudflare.com/generate_204 2>/dev/null || true)"
+  IFS='|' read -r http_code connect_time total_time <<EOF
+$result
+EOF
+  cleanup_node_test
+  trap - EXIT HUP INT TERM
+  if [ "$http_code" = "204" ]; then
+    ok "节点 $name 端到端测试成功：连接 ${connect_time}s，总耗时 ${total_time}s。"
+    return 0
+  fi
+  error "节点 $name 端到端测试失败（HTTP ${http_code:-无响应}）。"
+  return 1
+}
+
 node_count() {
   if [ -r "$VP_NODES_DB" ]; then
     awk 'NF { n++ } END { print n + 0 }' "$VP_NODES_DB" 2>/dev/null
@@ -1052,6 +1117,7 @@ case "${1:-}" in
   argo-add|add-argo) shift; argo_add "$@" ;;
   nodes|list) show_nodes ;;
   link) shift; show_node_link "$@" ;;
+  test-node|test) shift; test_node_end_to_end "$@" ;;
   status) show_status ;;
   doctor) doctor ;;
   health|check) layered_health_check ;;
@@ -1060,7 +1126,7 @@ case "${1:-}" in
   uninstall) uninstall_project ;;
   debug-tx) shift; debug_transaction "$@" ;;
   help|-h|--help)
-    printf '用法：vp [status|doctor|health|repair|init|core-install|reality-add|tunnel-install|argo-add|nodes|link|uninstall|version]\n'
+    printf '用法：vp [status|doctor|health|repair|init|core-install|reality-add|tunnel-install|argo-add|nodes|link|test-node|uninstall|version]\n'
     ;;
   '') menu ;;
   *) error "未知命令：$1"; exit 2 ;;
