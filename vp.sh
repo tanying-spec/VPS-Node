@@ -2,7 +2,7 @@
 
 set -u
 
-VP_VERSION="0.2.0-dev.79"
+VP_VERSION="0.2.0-dev.80"
 VP_CONFIG_DIR="${VP_CONFIG_DIR:-/etc/vps-node}"
 VP_DATA_DIR="${VP_DATA_DIR:-/var/lib/vps-node}"
 VP_LOG_DIR="${VP_LOG_DIR:-/var/log/vps-node}"
@@ -2418,8 +2418,58 @@ network_rollback() {
   [ "$(managed_file_state "$VP_SYSCTL_CONFIG")" = "$approved_network_config_state" ] || { error "持久化网络配置在确认期间发生变化，已中止。"; return 1; }
   [ "$(network_sysctl_value net.ipv4.tcp_congestion_control || true)" = "$rollback_current_cc" ] || { error "拥塞控制参数在确认期间发生变化，已中止。"; return 1; }
   [ "$(network_sysctl_value net.core.default_qdisc || true)" = "$rollback_current_qdisc" ] || { error "队列规则在确认期间发生变化，已中止。"; return 1; }
-  network_restore_values "$before_cc" "$before_qdisc" || { error "无法恢复原网络参数。"; return 1; }
-  rm -f "$VP_SYSCTL_CONFIG" "$VP_NETWORK_SNAPSHOT"
+  rollback_snapshot_stage="$(mktemp "$(dirname "$VP_NETWORK_SNAPSHOT")/.vps-node-network-rollback-snapshot.XXXXXX")" || return 1
+  cp -p "$VP_NETWORK_SNAPSHOT" "$rollback_snapshot_stage" || { rm -f "$rollback_snapshot_stage"; return 1; }
+  rollback_config_stage=""
+  if [ -f "$VP_SYSCTL_CONFIG" ]; then
+    rollback_config_stage="$(mktemp "$(dirname "$VP_SYSCTL_CONFIG")/.vps-node-network-rollback-config.XXXXXX")" || { rm -f "$rollback_snapshot_stage"; return 1; }
+    cp -p "$VP_SYSCTL_CONFIG" "$rollback_config_stage" || { rm -f "$rollback_snapshot_stage" "$rollback_config_stage"; return 1; }
+  fi
+  network_rollback_cleanup_active=1
+  restore_interrupted_network_rollback() {
+    if [ "${network_rollback_cleanup_active:-0}" != 1 ]; then
+      rm -f "$rollback_snapshot_stage" "$rollback_config_stage"
+      return 0
+    fi
+    network_restore_values "$rollback_current_cc" "$rollback_current_qdisc" >/dev/null 2>&1 || true
+    cp -p "$rollback_snapshot_stage" "$VP_NETWORK_SNAPSHOT" >/dev/null 2>&1 || true
+    if [ -n "$rollback_config_stage" ]; then
+      cp -p "$rollback_config_stage" "$VP_SYSCTL_CONFIG" >/dev/null 2>&1 || true
+    else
+      rm -f "$VP_SYSCTL_CONFIG"
+    fi
+    rm -f "$rollback_snapshot_stage" "$rollback_config_stage"
+    network_rollback_cleanup_active=0
+  }
+  trap restore_interrupted_network_rollback EXIT
+  trap 'restore_interrupted_network_rollback; exit 130' HUP INT TERM
+  if ! network_restore_values "$before_cc" "$before_qdisc"; then
+    restore_interrupted_network_rollback
+    trap - EXIT HUP INT TERM
+    error "无法恢复原网络参数。"
+    return 1
+  fi
+  rm -f "$VP_SYSCTL_CONFIG" || {
+    restore_interrupted_network_rollback
+    trap - EXIT HUP INT TERM
+    error "无法移除持久化网络配置，已恢复回滚前状态。"
+    return 1
+  }
+  if [ "${VP_ALLOW_TEST_HOOKS:-0}" = 1 ] && [ "${VP_TEST_NETWORK_ROLLBACK_REMOVE_FAIL:-0}" = 1 ]; then
+    restore_interrupted_network_rollback
+    trap - EXIT HUP INT TERM
+    error "测试注入：持久化文件部分删除，已恢复回滚前状态。"
+    return 1
+  fi
+  rm -f "$VP_NETWORK_SNAPSHOT" || {
+    restore_interrupted_network_rollback
+    trap - EXIT HUP INT TERM
+    error "无法移除网络回滚记录，已恢复回滚前状态。"
+    return 1
+  }
+  network_rollback_cleanup_active=0
+  rm -f "$rollback_snapshot_stage" "$rollback_config_stage"
+  trap - EXIT HUP INT TERM
   stability_event recovered network "saved network tuning rolled back"
   [ "$quiet" -eq 1 ] || ok "已恢复网络优化前参数：$before_cc / $before_qdisc。"
 }

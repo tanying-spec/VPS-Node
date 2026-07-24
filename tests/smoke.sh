@@ -635,6 +635,19 @@ grep -q '^CC=bbr$' "$sysctl_state"
 grep -q '^QDISC=fq$' "$sysctl_state"
 [ "$(sha256sum "$network_config" | awk '{print $1}')" = "$network_config_hash_before_cancel" ]
 [ "$(sha256sum "$network_snapshot" | awk '{print $1}')" = "$network_snapshot_hash_before_cancel" ]
+if VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log" \
+  VP_LIB_DIR="$TMP/dns-usr" VP_SYSCTL_BIN="$fake_sysctl" VP_FAKE_SYSCTL_STATE="$sysctl_state" \
+  VP_SYSCTL_CONFIG="$network_config" VP_NETWORK_SNAPSHOT="$network_snapshot" \
+  VP_NETWORK_ROLLBACK_CONFIRM=ROLLBACK VP_ALLOW_TEST_HOOKS=1 \
+  VP_TEST_NETWORK_ROLLBACK_REMOVE_FAIL=1 sh "$ROOT/vp.sh" network-rollback >/dev/null 2>&1; then
+  printf 'partially removed network persistence unexpectedly succeeded\n' >&2
+  exit 1
+fi
+grep -q '^CC=bbr$' "$sysctl_state"
+grep -q '^QDISC=fq$' "$sysctl_state"
+[ "$(sha256sum "$network_config" | awk '{print $1}')" = "$network_config_hash_before_cancel" ]
+[ "$(sha256sum "$network_snapshot" | awk '{print $1}')" = "$network_snapshot_hash_before_cancel" ]
+! find "$TMP" -name '.vps-node-network-rollback-*' -type f | grep -q .
 sysctl_fail_once="$TMP/fake-sysctl-failed-once"
 if VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log" \
   VP_LIB_DIR="$TMP/dns-usr" VP_SYSCTL_BIN="$fake_sysctl" VP_FAKE_SYSCTL_STATE="$sysctl_state" \

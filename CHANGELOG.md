@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.0-dev.80
+
+- Network rollback now stages exact copies of the rollback snapshot and persistent sysctl configuration before touching live kernel values.
+- Live congestion/qdisc restoration and removal of both persistence files form one compensated transaction protected by `EXIT`, `HUP`, `INT` and `TERM` cleanup.
+- A partial file-removal failure restores the pre-rollback live values and both files with their modes instead of leaving split runtime/persistence state.
+- Fault-injection tests prove parameter and file hashes are unchanged after a removal failure and no rollback-stage files remain.
+
 ## 0.2.0-dev.79
 
 - Manual `vp network-rollback` now previews current/restored congestion control and qdisc values plus the host-global and persistence-file impact before requiring `ROLLBACK`.
