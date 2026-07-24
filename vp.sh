@@ -842,6 +842,178 @@ doctor() {
   [ "$errors" -eq 0 ]
 }
 
+health_ok() {
+  ok "$*"
+}
+
+health_warn() {
+  warn "$*"
+  HEALTH_WARNINGS=$((HEALTH_WARNINGS + 1))
+}
+
+health_error() {
+  error "$*"
+  HEALTH_ERRORS=$((HEALTH_ERRORS + 1))
+}
+
+file_mode() {
+  stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1" 2>/dev/null
+}
+
+tunnel_connection_count() {
+  curl -fsS --max-time 3 "http://127.0.0.1:$VP_TUNNEL_METRICS_PORT/metrics" 2>/dev/null |
+    awk '/^cloudflared_tunnel_ha_connections / {sum += $2} END {print sum + 0}'
+}
+
+layered_health_check() {
+  HEALTH_ERRORS=0
+  HEALTH_WARNINGS=0
+  printf '\nVPS-Node 分层健康检查\n'
+  printf '%s\n' '----------------------------------------'
+
+  if [ -d "$VP_TX_ACTIVE" ]; then
+    tx_pid="$(cat "$VP_TX_ACTIVE/pid" 2>/dev/null || true)"
+    if pid_is_alive "$tx_pid"; then
+      health_warn "配置层：存在正在运行的事务。"
+    else
+      health_error "配置层：发现被中断的事务，执行 vp repair 可恢复。"
+    fi
+  else
+    health_ok "配置层：没有未完成事务。"
+  fi
+
+  permission_bad=0
+  for protected in "$VP_NODES_DB" "$VP_STATE_FILE" "$VP_CORE_ENV" "$VP_TUNNEL_TOKEN_FILE"; do
+    [ -e "$protected" ] || continue
+    [ "$(file_mode "$protected")" = "600" ] || permission_bad=$((permission_bad + 1))
+  done
+  if [ "$permission_bad" -eq 0 ]; then
+    health_ok "权限层：敏感状态权限正常。"
+  else
+    health_error "权限层：$permission_bad 个文件权限不安全。"
+  fi
+
+  if [ -x "$VP_CORE_BIN" ]; then
+    if [ -f "$VP_CORE_CONFIG" ] && "$VP_CORE_BIN" -t -d "$VP_CONFIG_DIR" -f "$VP_CORE_CONFIG" >/dev/null 2>&1; then
+      health_ok "内核配置层：Mihomo 配置有效。"
+    else
+      health_error "内核配置层：Mihomo 配置无效或缺失。"
+    fi
+    if [ "${VP_SKIP_SERVICE:-0}" = "1" ]; then
+      health_warn "进程层：隔离模式未检查常驻服务。"
+    elif core_process_running; then
+      health_ok "进程层：代理核心正在运行。"
+    else
+      health_error "进程层：代理核心未运行。"
+    fi
+  else
+    health_warn "内核配置层：尚未安装代理核心。"
+  fi
+
+  node_total=0
+  node_listening=0
+  if [ -r "$VP_NODES_DB" ]; then
+    while IFS='|' read -r proto name port rest; do
+      [ -n "$proto" ] || continue
+      node_total=$((node_total + 1))
+      port_in_use "$port" && node_listening=$((node_listening + 1))
+    done < "$VP_NODES_DB"
+  fi
+  if [ "$node_total" -eq 0 ]; then
+    health_warn "监听层：当前没有节点。"
+  elif [ "$node_listening" -eq "$node_total" ]; then
+    health_ok "监听层：$node_total 个节点端口均已监听。"
+  else
+    health_error "监听层：$node_listening/$node_total 个节点端口正在监听。"
+  fi
+
+  if dns_probe; then
+    health_ok "DNS 层：系统解析正常。"
+  else
+    health_error "DNS 层：系统 DNS 无法解析。"
+  fi
+  if command -v curl >/dev/null 2>&1 && [ "$(curl -sS -o /dev/null -w '%{http_code}' --max-time 10 https://cp.cloudflare.com/generate_204 2>/dev/null)" = "204" ]; then
+    health_ok "公网层：服务器直接出站正常。"
+  else
+    health_error "公网层：服务器无法完成 HTTPS 出站。"
+  fi
+
+  if [ -s "$VP_TUNNEL_TOKEN_FILE" ]; then
+    if [ "$(service_state "$VP_TUNNEL_SERVICE")" = "active" ]; then
+      health_ok "Tunnel 进程层：服务正在运行。"
+    else
+      health_error "Tunnel 进程层：已配置 Token，但服务未运行。"
+    fi
+    edge_connections="$(tunnel_connection_count 2>/dev/null || printf 0)"
+    case "$edge_connections" in ''|*[!0-9]*) edge_connections=0 ;; esac
+    if [ "$edge_connections" -gt 0 ]; then
+      health_ok "Tunnel 边缘层：$edge_connections 条连接。"
+    else
+      health_error "Tunnel 边缘层：没有 Cloudflare 边缘连接。"
+    fi
+  else
+    health_warn "Tunnel 层：尚未配置备用线路。"
+  fi
+
+  memory_events="$(cgroup_file memory.events 2>/dev/null || true)"
+  oom_kills="$(awk '$1=="oom_kill"{print $2;exit}' "$memory_events" 2>/dev/null)"
+  case "$oom_kills" in ''|*[!0-9]*) oom_kills=0 ;; esac
+  if [ "$oom_kills" -gt 0 ]; then
+    health_warn "资源层：cgroup 历史累计发生 $oom_kills 次 OOM Kill。"
+  else
+    health_ok "资源层：未记录 OOM Kill。"
+  fi
+
+  printf '%s\n' '----------------------------------------'
+  if [ "$HEALTH_ERRORS" -eq 0 ]; then
+    ok "健康检查完成：0 个错误，$HEALTH_WARNINGS 个警告。"
+    return 0
+  fi
+  error "健康检查完成：$HEALTH_ERRORS 个错误，$HEALTH_WARNINGS 个警告。"
+  return 1
+}
+
+safe_repair() {
+  need_root || return 1
+  repaired=0
+  if [ -d "$VP_TX_ACTIVE" ]; then
+    recover_state_transaction || return 1
+    repaired=$((repaired + 1))
+  fi
+  for protected in "$VP_NODES_DB" "$VP_STATE_FILE" "$VP_CORE_ENV" "$VP_TUNNEL_TOKEN_FILE"; do
+    [ -e "$protected" ] || continue
+    if [ "$(file_mode "$protected")" != "600" ]; then
+      chmod 600 "$protected"
+      repaired=$((repaired + 1))
+    fi
+  done
+  if [ -x "$VP_CORE_BIN" ] && [ -r "$VP_NODES_DB" ]; then
+    repair_tmp="$(mktemp /tmp/vp-repair-config.XXXXXX)" || return 1
+    render_mihomo_config "$VP_NODES_DB" "$repair_tmp"
+    if "$VP_CORE_BIN" -t -d "$VP_CONFIG_DIR" -f "$repair_tmp" >/dev/null 2>&1; then
+      if ! cmp -s "$repair_tmp" "$VP_CORE_CONFIG" 2>/dev/null; then
+        mkdir -p "$VP_GENERATED_DIR"
+        mv "$repair_tmp" "$VP_CORE_CONFIG"
+        chmod 600 "$VP_CORE_CONFIG"
+        repaired=$((repaired + 1))
+      else
+        rm -f "$repair_tmp"
+      fi
+      if [ "${VP_SKIP_SERVICE:-0}" != "1" ] && ! core_process_running; then
+        core_service_restart && repaired=$((repaired + 1))
+      fi
+    else
+      rm -f "$repair_tmp"
+      error "根据节点数据库重新生成的配置仍然无效，未覆盖当前配置。"
+      return 1
+    fi
+  fi
+  if [ -s "$VP_TUNNEL_TOKEN_FILE" ] && [ "${VP_SKIP_SERVICE:-0}" != "1" ] && [ "$(service_state "$VP_TUNNEL_SERVICE")" != "active" ]; then
+    tunnel_service_restart && repaired=$((repaired + 1))
+  fi
+  ok "安全修复完成：执行了 $repaired 项修改。"
+}
+
 uninstall_project() {
   need_root || return 1
   warn "该操作将删除 VPS-Node 的状态和凭据。"
@@ -881,12 +1053,14 @@ case "${1:-}" in
   nodes|list) show_nodes ;;
   link) shift; show_node_link "$@" ;;
   status) show_status ;;
-  doctor|health|check) doctor ;;
+  doctor) doctor ;;
+  health|check) layered_health_check ;;
+  repair|fix) safe_repair ;;
   version|--version|-V) printf '%s\n' "$VP_VERSION" ;;
   uninstall) uninstall_project ;;
   debug-tx) shift; debug_transaction "$@" ;;
   help|-h|--help)
-    printf '用法：vp [status|doctor|init|core-install|reality-add|tunnel-install|argo-add|nodes|link|uninstall|version]\n'
+    printf '用法：vp [status|doctor|health|repair|init|core-install|reality-add|tunnel-install|argo-add|nodes|link|uninstall|version]\n'
     ;;
   '') menu ;;
   *) error "未知命令：$1"; exit 2 ;;
