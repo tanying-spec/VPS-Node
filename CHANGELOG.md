@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.0-dev.35
+
+- Added `vp update --check` / `--dry-run`: it downloads and verifies the exact candidate, then reports current/candidate versions, change direction and immutable source without changing CLI or rollback files.
+- Online update now stages and transactionally exchanges the previous CLI and checksum before atomically replacing the active CLI; any intermediate failure restores the exact prior rollback point while leaving the active CLI unchanged.
+- Fault-injection tests cover failures after previous-CLI exchange and after checksum exchange, proving all pre-existing file hashes survive.
+- The numbered update menu separates read-only checking from applying an update and requires typing `UPDATE` before replacement.
+
 ## 0.2.0-dev.34
 
 - CLI rollback validates and stages the target version before replacing the active script, then exchanges active CLI, previous CLI and checksum through same-directory atomic moves.

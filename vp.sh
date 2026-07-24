@@ -2,7 +2,7 @@
 
 set -u
 
-VP_VERSION="0.2.0-dev.34"
+VP_VERSION="0.2.0-dev.35"
 VP_CONFIG_DIR="${VP_CONFIG_DIR:-/etc/vps-node}"
 VP_DATA_DIR="${VP_DATA_DIR:-/var/lib/vps-node}"
 VP_LOG_DIR="${VP_LOG_DIR:-/var/log/vps-node}"
@@ -2838,14 +2838,36 @@ verify_script_sidecar() {
 }
 
 update_cli() {
-  update_option="${1:-}"
-  case "$update_option" in ''|--allow-downgrade) ;; *) error "用法：vp update [--allow-downgrade]"; return 2 ;; esac
-  need_root || return 1
+  update_mode=apply
+  allow_downgrade=0
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --check|--dry-run) update_mode=check ;;
+      --allow-downgrade) allow_downgrade=1 ;;
+      *) error "用法：vp update [--check] [--allow-downgrade]"; return 2 ;;
+    esac
+    shift
+  done
+  [ "$update_mode" = check ] || need_root || return 1
   command -v curl >/dev/null 2>&1 || { error "缺少 curl。"; return 1; }
   candidate="$(mktemp /tmp/vp-update.XXXXXX)" || return 1
   sidecar="$(mktemp /tmp/vp-update-sha.XXXXXX)" || { rm -f "$candidate"; return 1; }
-  cleanup_update() { rm -f "$candidate" "$sidecar"; }
-  trap cleanup_update EXIT HUP INT TERM
+  cleanup_update() {
+    for update_file in "$candidate" "$sidecar" "${install_stage:-}" "${prior_backup_snapshot:-}" \
+      "${prior_sidecar_snapshot:-}" "${new_backup_stage:-}" "${new_sidecar_stage:-}"; do
+      [ -n "$update_file" ] && rm -f "$update_file"
+    done
+  }
+  update_rollback_mutated=0
+  update_committed=0
+  abort_update() {
+    if [ "$update_rollback_mutated" = 1 ] && [ "$update_committed" != 1 ]; then
+      restore_update_rollback_point >/dev/null 2>&1 || true
+      update_rollback_mutated=0
+    fi
+    cleanup_update
+  }
+  trap abort_update EXIT HUP INT TERM
   source_revision="$(download_update_candidate "$candidate" "$sidecar")" || { cleanup_update; trap - EXIT HUP INT TERM; error "更新文件下载失败。"; return 1; }
   verify_script_sidecar "$candidate" "$sidecar" || { cleanup_update; trap - EXIT HUP INT TERM; error "更新脚本 SHA-256 校验失败。"; return 1; }
   sh -n "$candidate" || { cleanup_update; trap - EXIT HUP INT TERM; error "更新脚本语法检查失败。"; return 1; }
@@ -2857,6 +2879,7 @@ update_cli() {
     return 0
   fi
   current_version=""
+  update_action=install
   if [ -f "$VP_CLI_PATH" ]; then
     current_version="$(VP_CONFIG_DIR="$VP_CONFIG_DIR" sh "$VP_CLI_PATH" version 2>/dev/null || true)"
     current_key="$(version_key "$current_version" 2>/dev/null)" || { cleanup_update; trap - EXIT HUP INT TERM; error "当前管理脚本版本号无效，拒绝在线覆盖；请先诊断或手工恢复。"; return 1; }
@@ -2865,28 +2888,95 @@ update_cli() {
       error "候选脚本与当前版本号相同但内容不同，拒绝覆盖。"
       return 1
     fi
-    if version_key_is_older "$candidate_key" "$current_key" && [ "$update_option" != --allow-downgrade ]; then
+    if version_key_is_older "$candidate_key" "$current_key"; then
+      update_action=downgrade
+    else
+      update_action=upgrade
+    fi
+    if [ "$update_action" = downgrade ] && [ "$allow_downgrade" != 1 ]; then
       cleanup_update; trap - EXIT HUP INT TERM
       error "候选版本 $candidate_version 低于当前版本 $current_version；如确认需要降级，请执行 vp update --allow-downgrade。"
       return 1
     fi
   fi
-  mkdir -p "$(dirname "$VP_CLI_PATH")"
-  install_stage="$(mktemp "$(dirname "$VP_CLI_PATH")/.vp-update.XXXXXX")" || { cleanup_update; trap - EXIT HUP INT TERM; return 1; }
+  printf '更新检查：\n'
+  case "$update_action" in install) update_action_label=安装 ;; upgrade) update_action_label=升级 ;; downgrade) update_action_label=降级 ;; esac
+  printf '  当前版本：%s\n' "${current_version:-未安装}"
+  printf '  候选版本：%s\n' "$candidate_version"
+  printf '  变更类型：%s\n' "$update_action_label"
+  printf '  精确来源：%s/%s @ %s\n' "$VP_REPO" "$VP_REF" "$source_revision"
+  printf '  完整性：SHA-256 与脚本语法已通过\n'
+  if [ "$update_mode" = check ]; then
+    cleanup_update; trap - EXIT HUP INT TERM
+    ok "只读检查完成，未修改管理脚本或回滚文件。"
+    return 0
+  fi
+  if [ "$VP_CLI_PATH" = "$VP_CLI_BACKUP_PATH" ] || [ "$VP_CLI_PATH" = "$VP_CLI_BACKUP_SHA256" ] || \
+     [ "$VP_CLI_BACKUP_PATH" = "$VP_CLI_BACKUP_SHA256" ]; then
+    cleanup_update; trap - EXIT HUP INT TERM
+    error "当前脚本、回滚脚本和校验文件路径必须彼此不同。"
+    return 1
+  fi
+  cli_dir="$(dirname "$VP_CLI_PATH")"
+  backup_dir="$(dirname "$VP_CLI_BACKUP_PATH")"
+  sidecar_dir="$(dirname "$VP_CLI_BACKUP_SHA256")"
+  mkdir -p "$cli_dir" "$backup_dir" "$sidecar_dir" || { cleanup_update; trap - EXIT HUP INT TERM; return 1; }
+  install_stage="$(mktemp "$cli_dir/.vp-update.XXXXXX")" || { cleanup_update; trap - EXIT HUP INT TERM; return 1; }
   cp "$candidate" "$install_stage" || { rm -f "$install_stage"; cleanup_update; trap - EXIT HUP INT TERM; return 1; }
   chmod 755 "$install_stage" || { rm -f "$install_stage"; cleanup_update; trap - EXIT HUP INT TERM; return 1; }
+  prior_backup_snapshot="$(mktemp /tmp/vp-update-backup.XXXXXX)" || { cleanup_update; trap - EXIT HUP INT TERM; return 1; }
+  prior_sidecar_snapshot="$(mktemp /tmp/vp-update-sidecar.XXXXXX)" || { cleanup_update; trap - EXIT HUP INT TERM; return 1; }
+  prior_backup_present=0
+  prior_sidecar_present=0
+  [ -f "$VP_CLI_BACKUP_PATH" ] && { cp -p "$VP_CLI_BACKUP_PATH" "$prior_backup_snapshot" || { cleanup_update; trap - EXIT HUP INT TERM; return 1; }; prior_backup_present=1; }
+  [ -f "$VP_CLI_BACKUP_SHA256" ] && { cp -p "$VP_CLI_BACKUP_SHA256" "$prior_sidecar_snapshot" || { cleanup_update; trap - EXIT HUP INT TERM; return 1; }; prior_sidecar_present=1; }
+  restore_update_rollback_point() {
+    if [ "$prior_backup_present" = 1 ]; then
+      update_backup_restore="$(mktemp "$backup_dir/.vp-update-backup-restore.XXXXXX")" || return 1
+      cp -p "$prior_backup_snapshot" "$update_backup_restore" && mv "$update_backup_restore" "$VP_CLI_BACKUP_PATH" || return 1
+    else
+      rm -f "$VP_CLI_BACKUP_PATH"
+    fi
+    if [ "$prior_sidecar_present" = 1 ]; then
+      update_sidecar_restore="$(mktemp "$sidecar_dir/.vp-update-sidecar-restore.XXXXXX")" || return 1
+      cp -p "$prior_sidecar_snapshot" "$update_sidecar_restore" && mv "$update_sidecar_restore" "$VP_CLI_BACKUP_SHA256" || return 1
+    else
+      rm -f "$VP_CLI_BACKUP_SHA256"
+    fi
+  }
   if [ -f "$VP_CLI_PATH" ]; then
-    cp -p "$VP_CLI_PATH" "$VP_CLI_BACKUP_PATH" || { cleanup_update; trap - EXIT HUP INT TERM; return 1; }
-    previous_hash="$(sha256_file "$VP_CLI_BACKUP_PATH" 2>/dev/null)"
-    [ -n "$previous_hash" ] || { rm -f "$VP_CLI_BACKUP_PATH"; cleanup_update; trap - EXIT HUP INT TERM; error "无法校验当前管理脚本，更新已取消。"; return 1; }
-    printf '%s  %s\n' "$previous_hash" "$(basename "$VP_CLI_BACKUP_PATH")" > "$VP_CLI_BACKUP_SHA256"
-    chmod 600 "$VP_CLI_BACKUP_SHA256"
-  else
+    previous_hash="$(sha256_file "$VP_CLI_PATH" 2>/dev/null)"
+    [ -n "$previous_hash" ] || { cleanup_update; trap - EXIT HUP INT TERM; error "无法校验当前管理脚本，更新已取消。"; return 1; }
+    new_backup_stage="$(mktemp "$backup_dir/.vp-update-previous.XXXXXX")" || { cleanup_update; trap - EXIT HUP INT TERM; return 1; }
+    cp -p "$VP_CLI_PATH" "$new_backup_stage" || { cleanup_update; trap - EXIT HUP INT TERM; return 1; }
+    new_sidecar_stage="$(mktemp "$sidecar_dir/.vp-update-previous-sha.XXXXXX")" || { cleanup_update; trap - EXIT HUP INT TERM; return 1; }
+    printf '%s  %s\n' "$previous_hash" "$(basename "$VP_CLI_BACKUP_PATH")" > "$new_sidecar_stage" || { cleanup_update; trap - EXIT HUP INT TERM; return 1; }
+    chmod 600 "$new_sidecar_stage" || { cleanup_update; trap - EXIT HUP INT TERM; return 1; }
+    mv "$new_backup_stage" "$VP_CLI_BACKUP_PATH" || { restore_update_rollback_point || true; cleanup_update; trap - EXIT HUP INT TERM; return 1; }
+    new_backup_stage=""
+    update_rollback_mutated=1
+    if [ "${VP_ALLOW_TEST_HOOKS:-0}" = 1 ] && [ "${VP_TEST_CLI_UPDATE_FAIL_PHASE:-}" = after-backup ]; then
+      restore_update_rollback_point || true
+      cleanup_update; trap - EXIT HUP INT TERM
+      error "测试注入：更新回滚脚本交换后失败，已恢复原状态。"
+      return 1
+    fi
+    mv "$new_sidecar_stage" "$VP_CLI_BACKUP_SHA256" || { restore_update_rollback_point || true; cleanup_update; trap - EXIT HUP INT TERM; return 1; }
+    new_sidecar_stage=""
+    if [ "${VP_ALLOW_TEST_HOOKS:-0}" = 1 ] && [ "${VP_TEST_CLI_UPDATE_FAIL_PHASE:-}" = after-sidecar ]; then
+      restore_update_rollback_point || true
+      cleanup_update; trap - EXIT HUP INT TERM
+      error "测试注入：更新校验文件交换后失败，已恢复原状态。"
+      return 1
+    fi
+  fi
+  mv "$install_stage" "$VP_CLI_PATH" || { restore_update_rollback_point || true; cleanup_update; trap - EXIT HUP INT TERM; return 1; }
+  install_stage=""
+  update_committed=1
+  if [ -z "$current_version" ]; then
     rm -f "$VP_CLI_BACKUP_PATH" "$VP_CLI_BACKUP_SHA256"
   fi
-  mv "$install_stage" "$VP_CLI_PATH" || { rm -f "$install_stage"; cleanup_update; trap - EXIT HUP INT TERM; return 1; }
-  rm -f "$candidate"
-  rm -f "$sidecar"
+  cleanup_update
   trap - EXIT HUP INT TERM
   ok "管理脚本已更新到 $candidate_version（来源 $source_revision）。"
 }
@@ -3682,9 +3772,19 @@ interactive_backup() {
 interactive_update() {
   show_cli_version_status
   printf '\n'
-  printf '1. 检查并更新管理脚本\n2. 回滚上一个管理脚本\n0. 返回\n请选择：'
+  printf '1. 只读检查是否有更新\n2. 应用已验证的更新\n3. 回滚上一个管理脚本\n0. 返回\n请选择：'
   read -r action || true
-  case "$action" in 1) update_cli ;; 2) rollback_cli ;; 0) return 0 ;; *) warn "无效选择。" ;; esac
+  case "$action" in
+    1) update_cli --check ;;
+    2)
+      printf '输入 UPDATE 确认替换管理脚本（节点与服务不会改变）：'
+      read -r update_confirm || true
+      [ "$update_confirm" = UPDATE ] && update_cli || warn "已取消更新。"
+      ;;
+    3) rollback_cli ;;
+    0) return 0 ;;
+    *) warn "无效选择。" ;;
+  esac
 }
 
 advanced_menu() {

@@ -650,6 +650,16 @@ cp "$ROOT/vp.sh" "$update_root/same/vp.sh"
 printf '\n# same-version-different-content\n' >> "$update_root/same/vp.sh"
 printf '%s  vp.sh\n' "$(sha256sum "$update_root/same/vp.sh" | awk '{print $1}')" > "$update_root/same/vp.sh.sha256"
 installed_hash="$(sha256sum "$update_root/installed-vp" | awk '{print $1}')"
+preview_output="$(VP_CONFIG_DIR="$TMP/etc" VP_CLI_PATH="$update_root/installed-vp" \
+  VP_CLI_BACKUP_PATH="$update_root/installed-vp.previous" VP_UPDATE_SOURCE_DIR="$update_root/good" \
+  VP_ALLOW_TEST_HOOKS=1 sh "$ROOT/vp.sh" update --check)"
+printf '%s\n' "$preview_output" | grep -q "当前版本：$CURRENT_VERSION"
+printf '%s\n' "$preview_output" | grep -q '候选版本：0.2.0-dev.99'
+printf '%s\n' "$preview_output" | grep -q '变更类型：升级'
+printf '%s\n' "$preview_output" | grep -q '只读检查完成，未修改管理脚本或回滚文件'
+[ "$(sha256sum "$update_root/installed-vp" | awk '{print $1}')" = "$installed_hash" ]
+[ ! -e "$update_root/installed-vp.previous" ]
+[ ! -e "$update_root/installed-vp.previous.sha256" ]
 if VP_CONFIG_DIR="$TMP/etc" VP_CLI_PATH="$update_root/installed-vp" \
   VP_CLI_BACKUP_PATH="$update_root/installed-vp.previous" VP_UPDATE_SOURCE_DIR="$update_root/good" \
   sh "$ROOT/vp.sh" update >/dev/null 2>&1; then
@@ -685,6 +695,22 @@ if VP_CONFIG_DIR="$TMP/etc" VP_CLI_PATH="$update_root/installed-vp" \
   exit 1
 fi
 [ "$(sha256sum "$update_root/installed-vp" | awk '{print $1}')" = "$installed_hash" ]
+cp "$update_root/lower/vp.sh" "$update_root/installed-vp.previous"
+printf '%s  installed-vp.previous\n' "$(sha256sum "$update_root/installed-vp.previous" | awk '{print $1}')" > "$update_root/installed-vp.previous.sha256"
+prior_update_backup_hash="$(sha256sum "$update_root/installed-vp.previous" | awk '{print $1}')"
+prior_update_sidecar_hash="$(sha256sum "$update_root/installed-vp.previous.sha256" | awk '{print $1}')"
+for update_fail_phase in after-backup after-sidecar; do
+  if VP_CONFIG_DIR="$TMP/etc" VP_CLI_PATH="$update_root/installed-vp" \
+    VP_CLI_BACKUP_PATH="$update_root/installed-vp.previous" VP_UPDATE_SOURCE_DIR="$update_root/good" \
+    VP_ALLOW_TEST_HOOKS=1 VP_TEST_CLI_UPDATE_FAIL_PHASE="$update_fail_phase" \
+    sh "$ROOT/vp.sh" update >/dev/null 2>&1; then
+    printf 'injected CLI update failure unexpectedly succeeded: %s\n' "$update_fail_phase" >&2
+    exit 1
+  fi
+  [ "$(sha256sum "$update_root/installed-vp" | awk '{print $1}')" = "$installed_hash" ]
+  [ "$(sha256sum "$update_root/installed-vp.previous" | awk '{print $1}')" = "$prior_update_backup_hash" ]
+  [ "$(sha256sum "$update_root/installed-vp.previous.sha256" | awk '{print $1}')" = "$prior_update_sidecar_hash" ]
+done
 VP_CONFIG_DIR="$TMP/etc" VP_CLI_PATH="$update_root/installed-vp" \
 VP_CLI_BACKUP_PATH="$update_root/installed-vp.previous" VP_UPDATE_SOURCE_DIR="$update_root/good" \
 VP_ALLOW_TEST_HOOKS=1 \

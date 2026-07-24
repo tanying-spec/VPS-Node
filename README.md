@@ -1,5 +1,6 @@
 # VPS-Node
 
+> `0.2.0-dev.35` 新增 `vp update --check` 只读更新检查，显示当前/候选版本、升级或降级方向、精确提交来源和完整性结论且不写文件；正式更新把当前 CLI、上一版 CLI 和校验文件纳入完整事务，中途失败恢复原回滚点，编号菜单会先检查并要求输入 `UPDATE` 才应用。
 > `0.2.0-dev.34` 回滚改为“先完整验证、再同目录原子交换”，在 CLI 或回滚文件交换后的故障都会恢复三个原文件；首页、更新菜单及 `vp version-status` 会显示当前版本、可回滚版本和校验状态，损坏回滚文件会明确警告并禁止执行。
 > `0.2.0-dev.33` 加固安装、更新和降级：本地测试源不能进入生产路径，非官方仓库必须显式授权；更新拒绝同版本不同内容和隐式降级，确需降级必须使用 `vp update --allow-downgrade`；安装初始化失败会恢复原管理脚本及原有回滚文件，替换过程改为目标目录内原子切换。
 > `0.2.0-dev.32` 加固 Mihomo/cloudflared 供应链下载：Release JSON 不再依赖换行或字段顺序，资产必须精确匹配架构且唯一，下载地址必须来自对应官方 GitHub Release，SHA-256 必须是完整 64 位；任何歧义或异常都会在下载前拒绝。
@@ -115,7 +116,10 @@ vp restore /path/to/backup.tar.gz --apply
 vp migrate-mh /etc/mihomo/nodes.db --dry-run
 vp migrate-mh /etc/mihomo/nodes.db --apply
 vp maintain
+vp version-status
+vp update --check
 vp update
+vp update --allow-downgrade
 vp rollback
 vp uninstall
 ```

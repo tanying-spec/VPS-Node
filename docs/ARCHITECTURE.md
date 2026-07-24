@@ -38,8 +38,10 @@ prepare -> validate -> activate -> verify -> commit
 ## 更新链
 
 ```text
-GitHub Commit API -> 精确 SHA -> raw 文件 -> SHA-256 -> sh -n -> 原子替换
+GitHub Commit API -> 顶层精确 SHA -> raw 文件 -> SHA-256 -> sh -n -> 版本/方向检查 -> 只读预览或三文件事务替换
 ```
+
+三文件事务先暂存候选 CLI、当前 CLI 的回滚副本及其校验文件；回滚点两步交换期间发生失败会恢复原回滚点，活动 CLI 只在最后一步通过同目录 `mv` 提交。
 
 Release 二进制通过 GitHub Release API 的资产级 digest 校验，缺少 digest 时拒绝安装。
 
