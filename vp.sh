@@ -2,7 +2,7 @@
 
 set -u
 
-VP_VERSION="0.2.0-dev.11"
+VP_VERSION="0.2.0-dev.12"
 VP_CONFIG_DIR="${VP_CONFIG_DIR:-/etc/vps-node}"
 VP_DATA_DIR="${VP_DATA_DIR:-/var/lib/vps-node}"
 VP_LOG_DIR="${VP_LOG_DIR:-/var/log/vps-node}"
@@ -46,6 +46,7 @@ VP_CURL_BIN="${VP_CURL_BIN:-curl}"
 VP_SYSCTL_BIN="${VP_SYSCTL_BIN:-sysctl}"
 VP_SYSCTL_CONFIG="${VP_SYSCTL_CONFIG:-/etc/sysctl.d/99-vps-node-network.conf}"
 VP_NETWORK_SNAPSHOT="${VP_NETWORK_SNAPSHOT:-$VP_DATA_DIR/network-before.env}"
+VP_OOM_STATE_FILE="${VP_OOM_STATE_FILE:-$VP_DATA_DIR/oom-kill.count}"
 
 is_tty() { [ -t 1 ]; }
 color() { is_tty && printf '\033[%sm' "$1" || true; }
@@ -280,6 +281,109 @@ bytes_to_mib() {
   case "$value" in ''|*[!0-9]*) printf '0' ;; *) awk -v n="$value" 'BEGIN { printf "%.1f", n / 1048576 }' ;; esac
 }
 
+cpuset_cpu_count() {
+  cpuset_text="$1"
+  [ -n "$cpuset_text" ] || return 1
+  printf '%s\n' "$cpuset_text" | awk -F',' '
+    {
+      total=0
+      for(i=1;i<=NF;i++) {
+        if($i ~ /^[0-9]+$/) total++
+        else if($i ~ /^[0-9]+-[0-9]+$/) {
+          split($i,r,"-"); if(r[2]>=r[1]) total += r[2]-r[1]+1
+        } else exit 2
+      }
+      if(total>0) print total; else exit 1
+    }
+  '
+}
+
+cpu_snapshot() {
+  CPU_HOST_COUNT="${VP_CPU_COUNT_OVERRIDE:-$(getconf _NPROCESSORS_ONLN 2>/dev/null || printf 1)}"
+  case "$CPU_HOST_COUNT" in ''|*[!0-9]*) CPU_HOST_COUNT=1 ;; esac
+  [ "$CPU_HOST_COUNT" -ge 1 ] || CPU_HOST_COUNT=1
+  CPU_EFFECTIVE_COUNT="$CPU_HOST_COUNT"
+  CPU_QUOTA_MILLI="${VP_CPU_QUOTA_MILLI_OVERRIDE:-0}"
+  CPU_SOURCE=host
+  [ -n "${VP_CPU_QUOTA_MILLI_OVERRIDE:-}" ] && CPU_SOURCE=override
+  if [ -z "${VP_CPU_QUOTA_MILLI_OVERRIDE:-}" ]; then
+    cpu_max_file="$(cgroup_file cpu.max 2>/dev/null || true)"
+    if [ -r "$cpu_max_file" ]; then
+      read -r cpu_quota cpu_period < "$cpu_max_file" || true
+      if [ "${cpu_quota:-max}" != max ]; then
+        CPU_QUOTA_MILLI="$(awk -v q="$cpu_quota" -v p="$cpu_period" 'BEGIN{if(q>0&&p>0)printf "%d",(q*1000+p-1)/p;else print 0}')"
+        CPU_SOURCE=cgroup-quota
+      fi
+    else
+      quota_file="$(cgroup_file cpu.cfs_quota_us 2>/dev/null || true)"
+      period_file="$(cgroup_file cpu.cfs_period_us 2>/dev/null || true)"
+      if [ ! -r "$quota_file" ] || [ ! -r "$period_file" ]; then
+        for cpu_v1_base in /sys/fs/cgroup/cpu /sys/fs/cgroup/cpu,cpuacct; do
+          if [ -r "$cpu_v1_base/cpu.cfs_quota_us" ] && [ -r "$cpu_v1_base/cpu.cfs_period_us" ]; then
+            quota_file="$cpu_v1_base/cpu.cfs_quota_us"
+            period_file="$cpu_v1_base/cpu.cfs_period_us"
+            break
+          fi
+        done
+      fi
+      if [ -r "$quota_file" ] && [ -r "$period_file" ]; then
+        cpu_quota="$(cat "$quota_file" 2>/dev/null || printf -1)"
+        cpu_period="$(cat "$period_file" 2>/dev/null || printf 0)"
+        if [ "$cpu_quota" -gt 0 ] 2>/dev/null; then
+          CPU_QUOTA_MILLI="$(awk -v q="$cpu_quota" -v p="$cpu_period" 'BEGIN{if(q>0&&p>0)printf "%d",(q*1000+p-1)/p;else print 0}')"
+          CPU_SOURCE=cgroup-quota
+        fi
+      fi
+    fi
+  fi
+  case "$CPU_QUOTA_MILLI" in ''|*[!0-9]*) CPU_QUOTA_MILLI=0 ;; esac
+  if [ "$CPU_QUOTA_MILLI" -gt 0 ]; then
+    quota_cpus=$(((CPU_QUOTA_MILLI + 999) / 1000))
+    [ "$quota_cpus" -ge 1 ] || quota_cpus=1
+    [ "$CPU_EFFECTIVE_COUNT" -le "$quota_cpus" ] || CPU_EFFECTIVE_COUNT="$quota_cpus"
+  fi
+  CPU_CPUSET_COUNT="${VP_CPUSET_COUNT_OVERRIDE:-0}"
+  if [ -z "${VP_CPUSET_COUNT_OVERRIDE:-}" ]; then
+    cpuset_file="$(cgroup_file cpuset.cpus.effective 2>/dev/null || cgroup_file cpuset.cpus 2>/dev/null || true)"
+    if [ ! -r "$cpuset_file" ]; then
+      for cpuset_v1_file in /sys/fs/cgroup/cpuset/cpuset.cpus /sys/fs/cgroup/cpuset.cpus; do
+        [ -r "$cpuset_v1_file" ] && { cpuset_file="$cpuset_v1_file"; break; }
+      done
+    fi
+    [ -r "$cpuset_file" ] && CPU_CPUSET_COUNT="$(cpuset_cpu_count "$(cat "$cpuset_file" 2>/dev/null)" 2>/dev/null || printf 0)"
+  fi
+  case "$CPU_CPUSET_COUNT" in ''|*[!0-9]*) CPU_CPUSET_COUNT=0 ;; esac
+  if [ "$CPU_CPUSET_COUNT" -gt 0 ] && [ "$CPU_EFFECTIVE_COUNT" -gt "$CPU_CPUSET_COUNT" ]; then
+    CPU_EFFECTIVE_COUNT="$CPU_CPUSET_COUNT"
+    CPU_SOURCE="$CPU_SOURCE+cpuset"
+  fi
+  [ "$CPU_EFFECTIVE_COUNT" -ge 1 ] || CPU_EFFECTIVE_COUNT=1
+}
+
+oom_snapshot() {
+  OOM_CURRENT="${VP_OOM_CURRENT_OVERRIDE:-0}"
+  OOM_PREVIOUS=0
+  OOM_DELTA=0
+  if [ -z "${VP_OOM_CURRENT_OVERRIDE:-}" ]; then
+    memory_events="$(cgroup_file memory.events 2>/dev/null || true)"
+    [ -r "$memory_events" ] && OOM_CURRENT="$(awk '$1=="oom_kill"{print $2;exit}' "$memory_events" 2>/dev/null)"
+  fi
+  case "$OOM_CURRENT" in ''|*[!0-9]*) OOM_CURRENT=0 ;; esac
+  if [ -r "$VP_OOM_STATE_FILE" ]; then
+    OOM_PREVIOUS="$(cat "$VP_OOM_STATE_FILE" 2>/dev/null || printf 0)"
+  else
+    OOM_PREVIOUS="$OOM_CURRENT"
+  fi
+  case "$OOM_PREVIOUS" in ''|*[!0-9]*) OOM_PREVIOUS=0 ;; esac
+  [ "$OOM_CURRENT" -ge "$OOM_PREVIOUS" ] && OOM_DELTA=$((OOM_CURRENT - OOM_PREVIOUS))
+}
+
+remember_oom_snapshot() {
+  mkdir -p "$(dirname "$VP_OOM_STATE_FILE")" 2>/dev/null || return 0
+  printf '%s\n' "$OOM_CURRENT" > "$VP_OOM_STATE_FILE" 2>/dev/null || return 0
+  chmod 600 "$VP_OOM_STATE_FILE" 2>/dev/null || true
+}
+
 dns_server_query_probe() {
   dns_server="$1"
   if command -v nslookup >/dev/null 2>&1; then
@@ -511,6 +615,7 @@ install_core_binary() {
 
 write_core_runtime_env() {
   memory_snapshot
+  cpu_snapshot
   detect_dns_profile
   limit_mib=$((MEM_LIMIT_BYTES / 1048576))
   case "$limit_mib" in ''|*[!0-9]*) limit_mib=0 ;; esac
@@ -518,9 +623,6 @@ write_core_runtime_env() {
   budget_mib=$((limit_mib * 60 / 100))
   [ "$budget_mib" -ge 32 ] || budget_mib=32
   [ "$budget_mib" -le 512 ] || budget_mib=512
-  cpu_count="${VP_CPU_COUNT_OVERRIDE:-$(getconf _NPROCESSORS_ONLN 2>/dev/null || printf 1)}"
-  case "$cpu_count" in ''|*[!0-9]*) cpu_count=1 ;; esac
-  [ "$cpu_count" -ge 1 ] || cpu_count=1
   if [ "$limit_mib" -le 96 ]; then
     gogc=50; gomaxprocs=1; profile=ultra-compact
   elif [ "$limit_mib" -le 160 ]; then
@@ -530,7 +632,12 @@ write_core_runtime_env() {
   elif [ "$limit_mib" -le 640 ]; then
     gogc=100; gomaxprocs=2; profile=standard
   else
-    gogc=100; gomaxprocs="$cpu_count"; [ "$gomaxprocs" -le 4 ] || gomaxprocs=4; profile=performance
+    gogc=100; gomaxprocs="$CPU_EFFECTIVE_COUNT"; [ "$gomaxprocs" -le 4 ] || gomaxprocs=4; profile=performance
+  fi
+  [ "$gomaxprocs" -le "$CPU_EFFECTIVE_COUNT" ] || gomaxprocs="$CPU_EFFECTIVE_COUNT"
+  if [ "$CPU_QUOTA_MILLI" -gt 0 ] && [ "$CPU_QUOTA_MILLI" -lt 1000 ] && [ "$limit_mib" -gt 160 ]; then
+    gogc=$((gogc + 20)); [ "$gogc" -le 120 ] || gogc=120
+    profile="$profile-cpu-limited"
   fi
   gomemlimit="${budget_mib}MiB"
   {
@@ -540,6 +647,11 @@ write_core_runtime_env() {
     printf 'GOMEMLIMIT=%s\n' "$gomemlimit"
     printf 'GOGC=%s\n' "$gogc"
     printf 'GOMAXPROCS=%s\n' "$gomaxprocs"
+    printf 'VP_CPU_SOURCE=%s\n' "$CPU_SOURCE"
+    printf 'VP_CPU_HOST_COUNT=%s\n' "$CPU_HOST_COUNT"
+    printf 'VP_CPU_EFFECTIVE_COUNT=%s\n' "$CPU_EFFECTIVE_COUNT"
+    printf 'VP_CPU_QUOTA_MILLI=%s\n' "$CPU_QUOTA_MILLI"
+    printf 'VP_CPUSET_COUNT=%s\n' "$CPU_CPUSET_COUNT"
     printf 'VP_DNS_MODE=%s\n' "$VP_DNS_MODE"
     printf 'VP_DNS_SERVERS=%s\n' "$VP_DNS_SERVERS"
     printf 'VP_DNS_PUBLIC_OK=%s\n' "$VP_DNS_PUBLIC_OK"
@@ -1731,6 +1843,11 @@ self_heal_once() {
   init_layout >/dev/null || return 1
   repaired=0
   failures=0
+  oom_snapshot
+  if [ "$OOM_DELTA" -gt 0 ]; then
+    stability_event warning memory "new oom kill detected"
+    remember_oom_snapshot
+  fi
   if [ "$had_transaction" -eq 1 ]; then
     stability_event recovered transaction "interrupted configuration restored"
     repaired=$((repaired + 1))
@@ -1839,6 +1956,8 @@ diagnostic_report() {
   case "$destination" in /*) ;; *) error "诊断报告必须使用绝对路径。"; return 1 ;; esac
   mkdir -p "$(dirname "$destination")" || return 1
   memory_snapshot
+  cpu_snapshot
+  oom_snapshot
   dns_result=failed
   dns_probe >/dev/null 2>&1 && dns_result=ok
   config_result=missing
@@ -1862,6 +1981,12 @@ diagnostic_report() {
     printf 'memory_total_mib=%s\n' "$(bytes_to_mib "$MEM_TOTAL_BYTES")"
     printf 'memory_limit_mib=%s\n' "$(bytes_to_mib "$MEM_LIMIT_BYTES")"
     printf 'swap_used_mib=%s\n' "$(bytes_to_mib "$MEM_SWAP_BYTES")"
+    printf 'cpu_source=%s\n' "$CPU_SOURCE"
+    printf 'cpu_host_count=%s\n' "$CPU_HOST_COUNT"
+    printf 'cpu_effective_count=%s\n' "$CPU_EFFECTIVE_COUNT"
+    printf 'cpu_quota_milli=%s\n' "$CPU_QUOTA_MILLI"
+    printf 'oom_kill_total=%s\n' "$OOM_CURRENT"
+    printf 'oom_kill_new=%s\n' "$OOM_DELTA"
     printf 'nodes_total=%s\n' "$(node_count)"
     printf 'rotations_active=%s\n' "$(rotation_count active)"
     printf 'rotations_expired=%s\n' "$(rotation_count expired)"
@@ -2020,6 +2145,8 @@ show_dashboard_summary() {
 
 show_status() {
   memory_snapshot
+  cpu_snapshot
+  oom_snapshot
   printf '\nVPS-Node %s\n' "$VP_VERSION"
   printf '%s\n' '----------------------------------------'
   show_dashboard_summary
@@ -2037,6 +2164,20 @@ show_status() {
     printf '  内存限制：宿主机管理\n'
   fi
   printf '  Swap：%s MiB\n' "$(bytes_to_mib "$MEM_SWAP_BYTES")"
+  printf '\nCPU（%s）：\n' "$CPU_SOURCE"
+  printf '  宿主可见 / 实际可用：%s / %s 核\n' "$CPU_HOST_COUNT" "$CPU_EFFECTIVE_COUNT"
+  if [ "$CPU_QUOTA_MILLI" -gt 0 ]; then
+    printf '  cgroup CPU 配额：%s 核\n' "$(awk -v n="$CPU_QUOTA_MILLI" 'BEGIN{printf "%.3f",n/1000}')"
+  else
+    printf '  cgroup CPU 配额：无限制或未识别\n'
+  fi
+  if [ "$OOM_DELTA" -gt 0 ]; then
+    printf '  OOM Kill：新增 %s 次（累计 %s）\n' "$OOM_DELTA" "$OOM_CURRENT"
+  elif [ "$OOM_CURRENT" -gt 0 ]; then
+    printf '  OOM Kill：无新增（累计 %s）\n' "$OOM_CURRENT"
+  else
+    printf '  OOM Kill：0\n'
+  fi
   if [ -r "$VP_CORE_ENV" ]; then
     printf '\n已应用的优化参数：\n'
     printf '  内存档位：%s\n' "$(awk -F= '$1=="VP_MEMORY_PROFILE"{print $2;exit}' "$VP_CORE_ENV" 2>/dev/null || printf '未知')"
@@ -2045,6 +2186,9 @@ show_status() {
     printf '  GOGC / GOMAXPROCS：%s / %s\n' \
       "$(awk -F= '$1=="GOGC"{print $2;exit}' "$VP_CORE_ENV" 2>/dev/null || printf '未知')" \
       "$(awk -F= '$1=="GOMAXPROCS"{print $2;exit}' "$VP_CORE_ENV" 2>/dev/null || printf '未知')"
+    printf '  CPU 实际档位：%s 核（配额 %s/1000）\n' \
+      "$(awk -F= '$1=="VP_CPU_EFFECTIVE_COUNT"{print $2;exit}' "$VP_CORE_ENV" 2>/dev/null || printf '未知')" \
+      "$(awk -F= '$1=="VP_CPU_QUOTA_MILLI"{print $2;exit}' "$VP_CORE_ENV" 2>/dev/null || printf '未知')"
     printf '  DNS 策略：%s（%s）\n' \
       "$(awk -F= '$1=="VP_DNS_MODE"{print $2;exit}' "$VP_CORE_ENV" 2>/dev/null || printf '未知')" \
       "$(awk -F= '$1=="VP_DNS_SERVERS"{print $2;exit}' "$VP_CORE_ENV" 2>/dev/null || printf '未检测')"
@@ -2243,14 +2387,15 @@ layered_health_check() {
     health_warn "Tunnel 层：尚未配置备用线路。"
   fi
 
-  memory_events="$(cgroup_file memory.events 2>/dev/null || true)"
-  oom_kills="$(awk '$1=="oom_kill"{print $2;exit}' "$memory_events" 2>/dev/null)"
-  case "$oom_kills" in ''|*[!0-9]*) oom_kills=0 ;; esac
-  if [ "$oom_kills" -gt 0 ]; then
-    health_warn "资源层：cgroup 历史累计发生 $oom_kills 次 OOM Kill。"
+  oom_snapshot
+  if [ "$OOM_DELTA" -gt 0 ]; then
+    health_error "资源层：自上次确认后新增 $OOM_DELTA 次 OOM Kill（累计 $OOM_CURRENT）。"
+  elif [ "$OOM_CURRENT" -gt 0 ]; then
+    health_warn "资源层：没有新增 OOM Kill，历史累计 $OOM_CURRENT 次。"
   else
     health_ok "资源层：未记录 OOM Kill。"
   fi
+  remember_oom_snapshot
 
   printf '%s\n' '----------------------------------------'
   if [ "$HEALTH_ERRORS" -eq 0 ]; then

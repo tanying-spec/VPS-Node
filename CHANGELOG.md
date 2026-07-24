@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.0-dev.12
+
+- Added cgroup v1/v2 CPU quota and cpuset-aware effective CPU detection.
+- Runtime profiles now cap `GOMAXPROCS` to actual CPU entitlement and reduce GC CPU overhead on sub-core containers without loosening ultra-low-memory profiles.
+- Added outcome-focused CPU details and OOM-kill delta reporting to the dashboard; health checks distinguish new OOM events from historical totals.
+- Added an evidence-based feature-gap audit against Mihomo-lite-argo and documented intentionally excluded multi-user overhead.
+
 ## 0.2.0-dev.11
 
 - Added `vp network-optimize --dry-run` to preview global network candidates and acceptance gates without changing the host.

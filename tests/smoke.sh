@@ -53,6 +53,28 @@ grep -q '^VP_DNS_MODE=system$' "$TMP/dns-etc/core.env"
 ! grep -q '1\.1\.1\.1\|8\.8\.8\.8' "$TMP/dns-etc/generated/mihomo.yaml"
 VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log" \
 VP_LIB_DIR="$TMP/dns-usr" VP_CORE_BIN="$TMP/dns-usr/bin/mihomo" \
+VP_CORE_BACKUP_BIN="$TMP/dns-usr/bin/mihomo.previous" VP_MEMORY_LIMIT_BYTES_OVERRIDE=$((512 * 1048576)) \
+VP_CPU_COUNT_OVERRIDE=8 VP_CPU_QUOTA_MILLI_OVERRIDE=500 VP_CPUSET_COUNT_OVERRIDE=4 VP_SKIP_SERVICE=1 \
+sh "$ROOT/vp.sh" repair >/dev/null
+grep -q '^VP_CPU_EFFECTIVE_COUNT=1$' "$TMP/dns-etc/core.env"
+grep -q '^VP_CPU_QUOTA_MILLI=500$' "$TMP/dns-etc/core.env"
+grep -q '^GOMAXPROCS=1$' "$TMP/dns-etc/core.env"
+grep -q '^VP_MEMORY_PROFILE=standard-cpu-limited$' "$TMP/dns-etc/core.env"
+VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log" \
+VP_LIB_DIR="$TMP/dns-usr" VP_CORE_BIN="$TMP/dns-usr/bin/mihomo" \
+VP_CORE_BACKUP_BIN="$TMP/dns-usr/bin/mihomo.previous" VP_MEMORY_LIMIT_BYTES_OVERRIDE=$((1024 * 1048576)) \
+VP_CPU_COUNT_OVERRIDE=8 VP_CPU_QUOTA_MILLI_OVERRIDE=2500 VP_CPUSET_COUNT_OVERRIDE=2 VP_SKIP_SERVICE=1 \
+sh "$ROOT/vp.sh" repair >/dev/null
+grep -q '^VP_CPU_EFFECTIVE_COUNT=2$' "$TMP/dns-etc/core.env"
+printf '3\n' > "$TMP/dns-lib/oom-kill.count"
+oom_output="$(VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log" \
+  VP_LIB_DIR="$TMP/dns-usr" VP_CORE_BIN="$TMP/dns-usr/bin/mihomo" \
+  VP_OOM_CURRENT_OVERRIDE=5 VP_CPU_COUNT_OVERRIDE=4 VP_CPU_QUOTA_MILLI_OVERRIDE=2000 \
+  VP_CPUSET_COUNT_OVERRIDE=2 sh "$ROOT/vp.sh" status)"
+printf '%s\n' "$oom_output" | grep -q '宿主可见 / 实际可用：4 / 2 核'
+printf '%s\n' "$oom_output" | grep -q 'OOM Kill：新增 2 次（累计 5）'
+VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log" \
+VP_LIB_DIR="$TMP/dns-usr" VP_CORE_BIN="$TMP/dns-usr/bin/mihomo" \
 VP_CORE_BACKUP_BIN="$TMP/dns-usr/bin/mihomo.previous" VP_SKIP_SERVICE=1 \
 sh "$ROOT/vp.sh" reality-add numbered-node 25433 www.amd.com >/dev/null
 VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log" \

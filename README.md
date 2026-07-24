@@ -1,5 +1,7 @@
 # VPS-Node
 
+> `0.2.0-dev.12` 内存自适应进一步加入 cgroup CPU quota 与 cpuset：`GOMAXPROCS` 不再只看宿主可见核心数。首页会区分 OOM 历史累计和自上次确认后的新增次数。
+
 > `0.2.0-dev.11` 新增 `vp network-optimize --dry-run`、`vp network-optimize 节点名 4` 和 `vp network-rollback`。候选参数只有在同节点、同并发复测不回退时才会保存；吞吐或首包表现不达标会立即恢复原值。
 
 > `0.2.0-dev.10` 新增 `vp test-node 节点名 4` 单节点并发测速、`vp test-all 4` 全部节点对比和 `vp network` 当前网络状态。测速会报告并发成功率、连接/首包时间和聚合吞吐，但不会根据一次结果擅自切换线路。
@@ -88,6 +90,7 @@ DNS 选择会在核心安装或优化时重新检测：优先验证 `1.1.1.1`、
 - Cloudflare Tunnel 公网 hostname、边缘连接和 Tunnel 进程自动恢复
 - OpenRC 服务安装、启用、崩溃自动拉起和完整卸载
 - 64–2048 MiB 模拟 cgroup 内存档位
+- cgroup CPU quota、cpuset 与宿主可见核心数的联合限制
 - 凭据轮换宽限期、旧凭据移除和重启持久化
 - 备份 SHA-256、恢复验证和恢复失败回滚
 - 管理脚本精确提交下载、SHA-256、更新失败保留和版本回滚
@@ -95,6 +98,8 @@ DNS 选择会在核心安装或优化时重新检测：优先验证 `1.1.1.1`、
 Reality 从 VPS 内部使用公网 IP 测试时，如果宿主网络不支持 NAT hairpin，程序会明确提示需要外部网络复核，不会误判为协议故障。
 
 项目仍处于开发阶段，建议先在自己的测试 VPS 上验证域名、Tunnel ingress 和防火墙策略。
+
+新旧项目的逐项能力取舍见 [docs/FEATURE_GAP.md](docs/FEATURE_GAP.md)。
 
 只有设置 `VP_LOCAL_SOURCE=1` 时安装器才会读取当前目录的 `vp.sh`；普通远程一键安装始终从 GitHub 精确提交下载，避免误用当前目录中的旧文件。
 
