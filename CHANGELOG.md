@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.0-dev.74
+
+- Core and Tunnel installation now arm dedicated `EXIT`, `HUP`, `INT` and `TERM` recovery immediately after binary promotion.
+- An interrupted command restores the prior active/rollback binaries plus core runtime environment or Tunnel token/runner and aborts any active state transaction.
+- Final state-transaction commit failure is now handled as an installation failure instead of being ignored.
+- Interruption-injection tests prove binaries, rollback points, state, token and transaction directories are restored byte-for-byte with no prior-backup snapshot residue.
+
 ## 0.2.0-dev.73
 
 - Mihomo and cloudflared installation now snapshot any pre-existing rollback binary before promoting the active version to the new rollback point.

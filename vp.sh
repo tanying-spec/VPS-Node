@@ -2,7 +2,7 @@
 
 set -u
 
-VP_VERSION="0.2.0-dev.73"
+VP_VERSION="0.2.0-dev.74"
 VP_CONFIG_DIR="${VP_CONFIG_DIR:-/etc/vps-node}"
 VP_DATA_DIR="${VP_DATA_DIR:-/var/lib/vps-node}"
 VP_LOG_DIR="${VP_LOG_DIR:-/var/log/vps-node}"
@@ -1232,38 +1232,56 @@ tunnel_install() {
     rm -f "$token_backup" "$runner_backup"
     return 1
   }
-  token_candidate="$(mktemp "$VP_SECRETS_DIR/.cloudflared-token.XXXXXX")" || {
+  tunnel_install_cleanup_active=1
+  token_candidate=""
+  cleanup_interrupted_tunnel_install() {
+    [ "${tunnel_install_cleanup_active:-0}" = 1 ] || return 0
+    [ -z "${token_candidate:-}" ] || rm -f "$token_candidate"
     rollback_tunnel_install "$tunnel_had_binary" "$tunnel_had_token" "$token_backup" "$tunnel_was_running" "$tunnel_had_runner" "$runner_backup"
     abort_state_transaction
     rm -f "$token_backup" "$runner_backup"
+    tunnel_install_cleanup_active=0
+  }
+  trap cleanup_interrupted_tunnel_install EXIT
+  trap 'cleanup_interrupted_tunnel_install; exit 130' HUP INT TERM
+  if [ "${VP_ALLOW_TEST_HOOKS:-0}" = 1 ] && [ "${VP_TEST_TUNNEL_INSTALL_INTERRUPT_AFTER_BINARY:-0}" = 1 ]; then
+    return 143
+  fi
+  token_candidate="$(mktemp "$VP_SECRETS_DIR/.cloudflared-token.XXXXXX")" || {
+    cleanup_interrupted_tunnel_install
+    trap - EXIT HUP INT TERM
     return 1
   }
   printf '%s\n' "$token" > "$token_candidate" || {
-    rm -f "$token_candidate"
-    rollback_tunnel_install "$tunnel_had_binary" "$tunnel_had_token" "$token_backup" "$tunnel_was_running" "$tunnel_had_runner" "$runner_backup"
-    abort_state_transaction
-    rm -f "$token_backup" "$runner_backup"
+    cleanup_interrupted_tunnel_install
+    trap - EXIT HUP INT TERM
     return 1
   }
   chmod 600 "$token_candidate"
   mv "$token_candidate" "$VP_TUNNEL_TOKEN_FILE"
+  token_candidate=""
   if ! install_tunnel_service || ! tunnel_service_restart; then
-    rollback_tunnel_install "$tunnel_had_binary" "$tunnel_had_token" "$token_backup" "$tunnel_was_running" "$tunnel_had_runner" "$runner_backup"
-    abort_state_transaction
-    rm -f "$token_backup" "$runner_backup"
+    cleanup_interrupted_tunnel_install
+    trap - EXIT HUP INT TERM
     error "Tunnel 更新启动失败，已恢复旧二进制、Token、指标端口和服务状态。"
     return 1
   fi
   if ! activate_state_candidate; then
-    rollback_tunnel_install "$tunnel_had_binary" "$tunnel_had_token" "$token_backup" "$tunnel_was_running" "$tunnel_had_runner" "$runner_backup"
-    abort_state_transaction
-    rm -f "$token_backup" "$runner_backup"
+    cleanup_interrupted_tunnel_install
+    trap - EXIT HUP INT TERM
     error "无法保存 Tunnel 指标端口，已恢复安装前状态。"
     return 1
   fi
-  commit_state_transaction
+  if ! commit_state_transaction; then
+    cleanup_interrupted_tunnel_install
+    trap - EXIT HUP INT TERM
+    error "Tunnel 状态提交失败，已恢复安装前状态。"
+    return 1
+  fi
+  tunnel_install_cleanup_active=0
   commit_tunnel_install_backup_point
   rm -f "$token_backup" "$runner_backup"
+  trap - EXIT HUP INT TERM
   ok "Cloudflare Tunnel 已安装。"
 }
 
@@ -1560,8 +1578,22 @@ core_install() {
   core_env_backup="$(mktemp /tmp/vp-core-env.XXXXXX)" || return 1
   [ "$core_had_env" = "0" ] || cp -p "$VP_CORE_ENV" "$core_env_backup" || { rm -f "$core_env_backup"; return 1; }
   install_core_binary || { rm -f "$core_env_backup"; return 1; }
-  write_core_runtime_env || { rollback_core_install "$core_had_binary"; restore_core_env_backup "$core_had_env" "$core_env_backup"; rm -f "$core_env_backup"; return 1; }
-  begin_state_transaction core-install || { rollback_core_install "$core_had_binary"; restore_core_env_backup "$core_had_env" "$core_env_backup"; rm -f "$core_env_backup"; return 1; }
+  core_install_cleanup_active=1
+  cleanup_interrupted_core_install() {
+    [ "${core_install_cleanup_active:-0}" = 1 ] || return 0
+    abort_state_transaction
+    rollback_core_install "$core_had_binary"
+    restore_core_env_backup "$core_had_env" "$core_env_backup"
+    rm -f "$core_env_backup"
+    core_install_cleanup_active=0
+  }
+  trap cleanup_interrupted_core_install EXIT
+  trap 'cleanup_interrupted_core_install; exit 130' HUP INT TERM
+  if [ "${VP_ALLOW_TEST_HOOKS:-0}" = 1 ] && [ "${VP_TEST_CORE_INSTALL_INTERRUPT_AFTER_BINARY:-0}" = 1 ]; then
+    return 143
+  fi
+  write_core_runtime_env || { cleanup_interrupted_core_install; trap - EXIT HUP INT TERM; return 1; }
+  begin_state_transaction core-install || { cleanup_interrupted_core_install; trap - EXIT HUP INT TERM; return 1; }
   candidate_root="$VP_TX_ACTIVE/candidate"
   sed '/^ACTIVE_CORE=/d;/^VP_MIXED_PORT=/d;/^VP_CONTROLLER_PORT=/d' "$candidate_root/state.env" > "$candidate_root/state.env.tmp"
   printf 'ACTIVE_CORE=mihomo\n' >> "$candidate_root/state.env.tmp"
@@ -1570,27 +1602,31 @@ core_install() {
   mv "$candidate_root/state.env.tmp" "$candidate_root/state.env"
   render_mihomo_config "$candidate_root/nodes.db" "$candidate_root/generated/mihomo.yaml" "$candidate_root/credential-rotations.db"
   if ! validate_state_candidate || ! "$VP_CORE_BIN" -t -d "$VP_CONFIG_DIR" -f "$candidate_root/generated/mihomo.yaml" >/dev/null 2>&1; then
-    abort_state_transaction
-    rollback_core_install "$core_had_binary"
-    restore_core_env_backup "$core_had_env" "$core_env_backup"
-    rm -f "$core_env_backup"
+    cleanup_interrupted_core_install
+    trap - EXIT HUP INT TERM
     error "Mihomo 候选配置验证失败。"
     return 1
   fi
-  activate_state_candidate || { abort_state_transaction; rollback_core_install "$core_had_binary"; restore_core_env_backup "$core_had_env" "$core_env_backup"; rm -f "$core_env_backup"; return 1; }
-  install_core_service || { abort_state_transaction; rollback_core_install "$core_had_binary"; restore_core_env_backup "$core_had_env" "$core_env_backup"; rm -f "$core_env_backup"; return 1; }
+  activate_state_candidate || { cleanup_interrupted_core_install; trap - EXIT HUP INT TERM; return 1; }
+  install_core_service || { cleanup_interrupted_core_install; trap - EXIT HUP INT TERM; return 1; }
   if ! core_service_restart; then
-    abort_state_transaction
-    rollback_core_install "$core_had_binary"
-    restore_core_env_backup "$core_had_env" "$core_env_backup"
-    rm -f "$core_env_backup"
+    cleanup_interrupted_core_install
+    trap - EXIT HUP INT TERM
     core_service_restart >/dev/null 2>&1 || true
     error "内核服务启动失败，已恢复旧状态。"
     return 1
   fi
-  commit_state_transaction
+  if ! commit_state_transaction; then
+    cleanup_interrupted_core_install
+    trap - EXIT HUP INT TERM
+    core_service_restart >/dev/null 2>&1 || true
+    error "内核状态提交失败，已恢复安装前状态。"
+    return 1
+  fi
+  core_install_cleanup_active=0
   commit_core_install_backup_point
   rm -f "$core_env_backup"
+  trap - EXIT HUP INT TERM
   ok "Mihomo 内核已安装。"
 }
 

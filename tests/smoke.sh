@@ -228,6 +228,20 @@ core_prior_rollback_hash="$(sha256sum "$TMP/dns-usr/bin/mihomo.previous" | awk '
 if VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log" \
   VP_LIB_DIR="$TMP/dns-usr" VP_CORE_BIN="$TMP/dns-usr/bin/mihomo" \
   VP_CORE_BACKUP_BIN="$TMP/dns-usr/bin/mihomo.previous" VP_CORE_SOURCE_BIN="$fake_core" \
+  VP_ALLOW_TEST_HOOKS=1 VP_TEST_CORE_INSTALL_INTERRUPT_AFTER_BINARY=1 VP_SKIP_SERVICE=1 \
+  sh "$ROOT/vp.sh" core-install >/dev/null 2>&1; then
+  printf 'interrupted core install unexpectedly succeeded\n' >&2
+  exit 1
+fi
+[ "$(sha256sum "$TMP/dns-etc/core.env" | awk '{print $1}')" = "$core_env_hash_before" ]
+[ "$(sha256sum "$TMP/dns-etc/state.env" | awk '{print $1}')" = "$core_state_hash_before" ]
+[ "$(sha256sum "$TMP/dns-usr/bin/mihomo" | awk '{print $1}')" = "$core_binary_hash_before" ]
+[ "$(sha256sum "$TMP/dns-usr/bin/mihomo.previous" | awk '{print $1}')" = "$core_prior_rollback_hash" ]
+[ ! -e "$TMP/dns-etc/transactions/active" ]
+! find /tmp -maxdepth 1 -type f -name 'vp-core-prior-backup.*' | grep -q .
+if VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log" \
+  VP_LIB_DIR="$TMP/dns-usr" VP_CORE_BIN="$TMP/dns-usr/bin/mihomo" \
+  VP_CORE_BACKUP_BIN="$TMP/dns-usr/bin/mihomo.previous" VP_CORE_SOURCE_BIN="$fake_core" \
   VP_MEMORY_LIMIT_BYTES_OVERRIDE=$((768 * 1048576)) VP_ALLOW_TEST_HOOKS=1 VP_TEST_CORE_RESTART_FAIL=1 \
   sh "$ROOT/vp.sh" core-install >/dev/null 2>&1; then
   printf 'core install unexpectedly succeeded despite forced restart failure\n' >&2
@@ -697,6 +711,20 @@ printf 'old.transaction.token\n' > "$tunnel_tx/etc/secrets/cloudflared.token"
 printf 'new.transaction.token\n' > "$tunnel_tx/new.token"
 old_tunnel_hash="$(sha256sum "$tunnel_tx/usr/bin/cloudflared" | awk '{print $1}')"
 prior_tunnel_rollback_hash="$(sha256sum "$tunnel_tx/usr/bin/cloudflared.previous" | awk '{print $1}')"
+if VP_CONFIG_DIR="$tunnel_tx/etc" VP_DATA_DIR="$tunnel_tx/lib" VP_LOG_DIR="$tunnel_tx/log" \
+  VP_LIB_DIR="$tunnel_tx/usr" VP_TUNNEL_BIN="$tunnel_tx/usr/bin/cloudflared" \
+  VP_TUNNEL_BACKUP_BIN="$tunnel_tx/usr/bin/cloudflared.previous" \
+  VP_TUNNEL_SOURCE_BIN="$tunnel_tx/new-cloudflared" VP_SKIP_SERVICE=1 VP_ALLOW_TEST_HOOKS=1 \
+  VP_TEST_TUNNEL_INSTALL_INTERRUPT_AFTER_BINARY=1 sh "$ROOT/vp.sh" tunnel-install "$tunnel_tx/new.token" >/dev/null 2>&1; then
+  printf 'interrupted tunnel install unexpectedly succeeded\n' >&2
+  exit 1
+fi
+[ "$(sha256sum "$tunnel_tx/usr/bin/cloudflared" | awk '{print $1}')" = "$old_tunnel_hash" ]
+[ "$(sha256sum "$tunnel_tx/usr/bin/cloudflared.previous" | awk '{print $1}')" = "$prior_tunnel_rollback_hash" ]
+[ "$(cat "$tunnel_tx/etc/secrets/cloudflared.token")" = 'old.transaction.token' ]
+! grep -q '^VP_TUNNEL_METRICS_PORT=' "$tunnel_tx/etc/state.env"
+[ ! -e "$tunnel_tx/etc/transactions/active" ]
+! find /tmp -maxdepth 1 -type f -name 'vp-tunnel-prior-backup.*' | grep -q .
 tunnel_install_race="$TMP/tunnel-install-race"
 mkdir -p "$tunnel_install_race/usr/bin" "$tunnel_install_race/etc/secrets"
 cp "$tunnel_tx/usr/bin/cloudflared" "$tunnel_install_race/usr/bin/cloudflared"
