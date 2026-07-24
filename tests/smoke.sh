@@ -394,6 +394,7 @@ set -e
 [ "$(sha256sum "$tunnel_tx/usr/bin/cloudflared" | awk '{print $1}')" = "$old_tunnel_hash" ]
 [ "$(cat "$tunnel_tx/etc/secrets/cloudflared.token")" = 'old.transaction.token' ]
 [ "$(stat -c '%a' "$tunnel_tx/etc/secrets/cloudflared.token")" = 600 ]
+! grep -q '^VP_TUNNEL_METRICS_PORT=' "$tunnel_tx/etc/state.env"
 fresh_tunnel="$TMP/tunnel-fresh-failure"
 mkdir -p "$fresh_tunnel"
 set +e
@@ -406,6 +407,24 @@ set -e
 [ "$fresh_tunnel_code" -ne 0 ]
 [ ! -e "$fresh_tunnel/usr/bin/cloudflared" ]
 [ ! -e "$fresh_tunnel/etc/secrets/cloudflared.token" ]
+! grep -q '^VP_TUNNEL_METRICS_PORT=' "$fresh_tunnel/etc/state.env"
+
+metrics_tunnel="$TMP/tunnel-metrics-conflict"
+mkdir -p "$metrics_tunnel/bin"
+cat > "$metrics_tunnel/bin/ss" <<'METRICS_SS'
+#!/bin/sh
+printf 'tcp LISTEN 0 128 127.0.0.1:22041 0.0.0.0:*\n'
+METRICS_SS
+chmod 755 "$metrics_tunnel/bin/ss"
+PATH="$metrics_tunnel/bin:$PATH" VP_CONFIG_DIR="$metrics_tunnel/etc" VP_DATA_DIR="$metrics_tunnel/lib" \
+VP_LOG_DIR="$metrics_tunnel/log" VP_LIB_DIR="$metrics_tunnel/usr" \
+VP_TUNNEL_SOURCE_BIN="$tunnel_tx/new-cloudflared" VP_SKIP_SERVICE=1 \
+sh "$ROOT/vp.sh" tunnel-install "$tunnel_tx/new.token" >/dev/null
+selected_metrics_port="$(awk -F= '$1=="VP_TUNNEL_METRICS_PORT"{print $2;exit}' "$metrics_tunnel/etc/state.env")"
+[ -n "$selected_metrics_port" ]
+[ "$selected_metrics_port" != 22041 ]
+[ "$selected_metrics_port" != 17890 ]
+[ "$selected_metrics_port" != 19090 ]
 
 printf 'BACKUP_TEST_MARKER=original\n' >> "$TMP/dns-etc/state.env"
 portable_backup="$TMP/portable-backup.tar.gz"

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.0-dev.26
+
+- Cloudflare Tunnel metrics port now detects conflicts, automatically avoids Mihomo internal ports and persists the selected value for health/status and future updates.
+- Tunnel installation includes the metrics-port state and runner in its atomic rollback boundary alongside binary, token and prior service state.
+- Tests cover conflict-driven selection, successful persistence and both update/fresh-install failure paths leaving no new metrics-port state.
+
 ## 0.2.0-dev.25
 
 - Mihomo mixed-proxy and controller ports now detect conflicts at core installation, automatically select free internal ports and persist them in authoritative state for later repair/update runs.

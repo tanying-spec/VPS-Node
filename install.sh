@@ -114,7 +114,7 @@ system_preflight() {
     if port_in_use_install "$reserved_port"; then
       case "$reserved_port" in
         17890|19090) preflight_warn "Mihomo 默认内部端口 $reserved_port 已占用；安装核心时会自动选择并保存空闲端口。" ;;
-        *) preflight_warn "Cloudflare Tunnel 指标端口 $reserved_port 已占用，安装 Tunnel 前需要另行指定。" ;;
+        *) preflight_warn "Cloudflare Tunnel 指标端口 $reserved_port 已占用；安装 Tunnel 时会自动选择并保存空闲端口。" ;;
       esac
     else
       probe_status=$?

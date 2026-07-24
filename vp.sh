@@ -2,7 +2,7 @@
 
 set -u
 
-VP_VERSION="0.2.0-dev.25"
+VP_VERSION="0.2.0-dev.26"
 VP_CONFIG_DIR="${VP_CONFIG_DIR:-/etc/vps-node}"
 VP_DATA_DIR="${VP_DATA_DIR:-/var/lib/vps-node}"
 VP_LOG_DIR="${VP_LOG_DIR:-/var/log/vps-node}"
@@ -35,7 +35,9 @@ VP_TUNNEL_BACKUP_BIN="${VP_TUNNEL_BACKUP_BIN:-$VP_LIB_DIR/bin/cloudflared.previo
 VP_TUNNEL_SERVICE="${VP_TUNNEL_SERVICE:-vps-node-tunnel}"
 VP_TUNNEL_TOKEN_FILE="$VP_SECRETS_DIR/cloudflared.token"
 VP_TUNNEL_RUNNER="$VP_LIB_DIR/bin/cloudflared-run"
-VP_TUNNEL_METRICS_PORT="${VP_TUNNEL_METRICS_PORT:-22041}"
+VP_TUNNEL_METRICS_PORT_OVERRIDE="${VP_TUNNEL_METRICS_PORT:-}"
+VP_TUNNEL_METRICS_PORT_SAVED="$(awk -F= '$1=="VP_TUNNEL_METRICS_PORT"{print $2;exit}' "$VP_STATE_FILE" 2>/dev/null || true)"
+VP_TUNNEL_METRICS_PORT="${VP_TUNNEL_METRICS_PORT_OVERRIDE:-${VP_TUNNEL_METRICS_PORT_SAVED:-22041}}"
 VP_CLOUDFLARED_API="${VP_CLOUDFLARED_API:-https://api.github.com/repos/cloudflare/cloudflared/releases/latest}"
 VP_BACKUP_DIR="$VP_DATA_DIR/backups"
 VP_UNINSTALL_BACKUP_DIR="${VP_UNINSTALL_BACKUP_DIR:-/root}"
@@ -884,11 +886,41 @@ tunnel_service_restart() {
   return 1
 }
 
+tunnel_metrics_port_owned() {
+  [ -r "$VP_TUNNEL_RUNNER" ] || return 1
+  case "$(service_state "$VP_TUNNEL_SERVICE")" in active|started) ;; *) return 1 ;; esac
+  grep -Fq -- "--metrics \"127.0.0.1:$VP_TUNNEL_METRICS_PORT\"" "$VP_TUNNEL_RUNNER"
+}
+
+prepare_tunnel_metrics_port() {
+  case "$VP_TUNNEL_METRICS_PORT" in ''|*[!0-9]*) error "Tunnel 指标端口无效：$VP_TUNNEL_METRICS_PORT。"; return 1 ;; esac
+  [ "$VP_TUNNEL_METRICS_PORT" -ge 1024 ] && [ "$VP_TUNNEL_METRICS_PORT" -le 65535 ] || {
+    error "Tunnel 指标端口必须为 1024-65535。"; return 1;
+  }
+  if [ "$VP_TUNNEL_METRICS_PORT" = "$VP_MIXED_PORT" ] || [ "$VP_TUNNEL_METRICS_PORT" = "$VP_CONTROLLER_PORT" ] ||
+     { port_in_use "$VP_TUNNEL_METRICS_PORT" && ! tunnel_metrics_port_owned; }; then
+    [ -z "$VP_TUNNEL_METRICS_PORT_OVERRIDE" ] || { error "指定的 Tunnel 指标端口 $VP_TUNNEL_METRICS_PORT 不可用。"; return 1; }
+    old_metrics_port="$VP_TUNNEL_METRICS_PORT"
+    attempts=0
+    while [ "$attempts" -lt 20 ]; do
+      VP_TUNNEL_METRICS_PORT="$(choose_port)" || return 1
+      [ "$VP_TUNNEL_METRICS_PORT" != "$VP_MIXED_PORT" ] && [ "$VP_TUNNEL_METRICS_PORT" != "$VP_CONTROLLER_PORT" ] && break
+      attempts=$((attempts + 1))
+    done
+    [ "$VP_TUNNEL_METRICS_PORT" != "$VP_MIXED_PORT" ] && [ "$VP_TUNNEL_METRICS_PORT" != "$VP_CONTROLLER_PORT" ] || {
+      error "无法为 Tunnel 指标服务找到空闲端口。"; return 1;
+    }
+    warn "Tunnel 指标端口 $old_metrics_port 已占用，自动改用 $VP_TUNNEL_METRICS_PORT。"
+  fi
+}
+
 rollback_tunnel_install() {
   had_binary="$1"
   had_token="$2"
   token_backup="$3"
   was_running="$4"
+  had_runner="${5:-0}"
+  runner_backup="${6:-}"
   if [ "$had_binary" = "1" ] && [ -x "$VP_TUNNEL_BACKUP_BIN" ]; then
     cp "$VP_TUNNEL_BACKUP_BIN" "$VP_TUNNEL_BIN" && chmod 755 "$VP_TUNNEL_BIN"
   elif [ "$had_binary" = "0" ]; then
@@ -899,7 +931,27 @@ rollback_tunnel_install() {
   elif [ "$had_token" = "0" ]; then
     rm -f "$VP_TUNNEL_TOKEN_FILE"
   fi
+  if [ "$had_runner" = "1" ] && [ -r "$runner_backup" ]; then
+    cp -p "$runner_backup" "$VP_TUNNEL_RUNNER"
+    chmod 700 "$VP_TUNNEL_RUNNER"
+  elif [ "$had_runner" = "0" ]; then
+    rm -f "$VP_TUNNEL_RUNNER"
+  fi
   if [ "${VP_SKIP_SERVICE:-0}" != "1" ]; then
+    if [ "$had_runner" = "0" ]; then
+      case "$(service_manager)" in
+        systemd)
+          systemctl disable --now "$VP_TUNNEL_SERVICE" >/dev/null 2>&1 || true
+          rm -f "/etc/systemd/system/${VP_TUNNEL_SERVICE}.service"
+          systemctl daemon-reload >/dev/null 2>&1 || true
+          ;;
+        openrc)
+          rc-service "$VP_TUNNEL_SERVICE" stop >/dev/null 2>&1 || true
+          rc-update del "$VP_TUNNEL_SERVICE" default >/dev/null 2>&1 || true
+          rm -f "/etc/init.d/$VP_TUNNEL_SERVICE"
+          ;;
+      esac
+    fi
     if [ "$was_running" = "1" ]; then
       service_action restart "$VP_TUNNEL_SERVICE" >/dev/null 2>&1 || true
     else
@@ -926,38 +978,67 @@ tunnel_install() {
   fi
   [ -n "${token:-}" ] || { error "Token 不能为空。"; return 1; }
   case "$token" in *[!A-Za-z0-9._-]*) error "Token 格式无效。"; return 1 ;; esac
+  prepare_tunnel_metrics_port || return 1
   tunnel_had_binary=0
   tunnel_had_token=0
+  tunnel_had_runner=0
   tunnel_was_running=0
   [ -x "$VP_TUNNEL_BIN" ] && tunnel_had_binary=1
   [ -s "$VP_TUNNEL_TOKEN_FILE" ] && tunnel_had_token=1
+  [ -f "$VP_TUNNEL_RUNNER" ] && tunnel_had_runner=1
   case "$(service_state "$VP_TUNNEL_SERVICE")" in active|started) tunnel_was_running=1 ;; esac
   token_backup="$(mktemp /tmp/vp-tunnel-token.XXXXXX)" || return 1
+  runner_backup="$(mktemp /tmp/vp-tunnel-runner.XXXXXX)" || { rm -f "$token_backup"; return 1; }
   if [ "$tunnel_had_token" = "1" ]; then
-    cp "$VP_TUNNEL_TOKEN_FILE" "$token_backup" || { rm -f "$token_backup"; return 1; }
+    cp "$VP_TUNNEL_TOKEN_FILE" "$token_backup" || { rm -f "$token_backup" "$runner_backup"; return 1; }
     chmod 600 "$token_backup"
   fi
-  install_tunnel_binary || { rm -f "$token_backup"; return 1; }
+  if [ "$tunnel_had_runner" = "1" ]; then
+    cp -p "$VP_TUNNEL_RUNNER" "$runner_backup" || { rm -f "$token_backup" "$runner_backup"; return 1; }
+  fi
+  begin_state_transaction tunnel-install || { rm -f "$token_backup" "$runner_backup"; return 1; }
+  candidate_root="$VP_TX_ACTIVE/candidate"
+  sed '/^VP_TUNNEL_METRICS_PORT=/d' "$candidate_root/state.env" > "$candidate_root/state.env.tmp"
+  printf 'VP_TUNNEL_METRICS_PORT=%s\n' "$VP_TUNNEL_METRICS_PORT" >> "$candidate_root/state.env.tmp"
+  mv "$candidate_root/state.env.tmp" "$candidate_root/state.env"
+  validate_state_candidate || { abort_state_transaction; rm -f "$token_backup" "$runner_backup"; return 1; }
+  install_tunnel_binary || {
+    rollback_tunnel_install "$tunnel_had_binary" "$tunnel_had_token" "$token_backup" "$tunnel_was_running" "$tunnel_had_runner" "$runner_backup"
+    abort_state_transaction
+    rm -f "$token_backup" "$runner_backup"
+    return 1
+  }
   token_candidate="$(mktemp "$VP_SECRETS_DIR/.cloudflared-token.XXXXXX")" || {
-    rollback_tunnel_install "$tunnel_had_binary" "$tunnel_had_token" "$token_backup" "$tunnel_was_running"
-    rm -f "$token_backup"
+    rollback_tunnel_install "$tunnel_had_binary" "$tunnel_had_token" "$token_backup" "$tunnel_was_running" "$tunnel_had_runner" "$runner_backup"
+    abort_state_transaction
+    rm -f "$token_backup" "$runner_backup"
     return 1
   }
   printf '%s\n' "$token" > "$token_candidate" || {
     rm -f "$token_candidate"
-    rollback_tunnel_install "$tunnel_had_binary" "$tunnel_had_token" "$token_backup" "$tunnel_was_running"
-    rm -f "$token_backup"
+    rollback_tunnel_install "$tunnel_had_binary" "$tunnel_had_token" "$token_backup" "$tunnel_was_running" "$tunnel_had_runner" "$runner_backup"
+    abort_state_transaction
+    rm -f "$token_backup" "$runner_backup"
     return 1
   }
   chmod 600 "$token_candidate"
   mv "$token_candidate" "$VP_TUNNEL_TOKEN_FILE"
   if ! install_tunnel_service || ! tunnel_service_restart; then
-    rollback_tunnel_install "$tunnel_had_binary" "$tunnel_had_token" "$token_backup" "$tunnel_was_running"
-    rm -f "$token_backup"
-    error "Tunnel 更新启动失败，已恢复旧二进制、Token 和服务状态。"
+    rollback_tunnel_install "$tunnel_had_binary" "$tunnel_had_token" "$token_backup" "$tunnel_was_running" "$tunnel_had_runner" "$runner_backup"
+    abort_state_transaction
+    rm -f "$token_backup" "$runner_backup"
+    error "Tunnel 更新启动失败，已恢复旧二进制、Token、指标端口和服务状态。"
     return 1
   fi
-  rm -f "$token_backup"
+  if ! activate_state_candidate; then
+    rollback_tunnel_install "$tunnel_had_binary" "$tunnel_had_token" "$token_backup" "$tunnel_was_running" "$tunnel_had_runner" "$runner_backup"
+    abort_state_transaction
+    rm -f "$token_backup" "$runner_backup"
+    error "无法保存 Tunnel 指标端口，已恢复安装前状态。"
+    return 1
+  fi
+  commit_state_transaction
+  rm -f "$token_backup" "$runner_backup"
   ok "Cloudflare Tunnel 已安装。"
 }
 
@@ -2274,7 +2355,7 @@ maintenance_mode() {
   fi
 
   temp_removed=0
-  for temp_path in /tmp/vp-node-test.* /tmp/vp-benchmark.* /tmp/vp-network-verify.* /tmp/vp-subscription.* /tmp/vp-backup.* /tmp/vp-restore.* /tmp/vp-repair-config.* /tmp/vp-repair-config-old.* /tmp/vp-expected-config.* /tmp/vp-core-env.* /tmp/vp-reality-key.*; do
+  for temp_path in /tmp/vp-node-test.* /tmp/vp-benchmark.* /tmp/vp-network-verify.* /tmp/vp-subscription.* /tmp/vp-backup.* /tmp/vp-restore.* /tmp/vp-repair-config.* /tmp/vp-repair-config-old.* /tmp/vp-expected-config.* /tmp/vp-core-env.* /tmp/vp-tunnel-token.* /tmp/vp-tunnel-runner.* /tmp/vp-reality-key.*; do
     [ -e "$temp_path" ] || continue
     if find "$temp_path" -maxdepth 0 -mmin +60 >/dev/null 2>&1 && [ -n "$(find "$temp_path" -maxdepth 0 -mmin +60 -print 2>/dev/null)" ]; then
       rm -rf "$temp_path"
@@ -2664,6 +2745,7 @@ show_status() {
   show_dashboard_summary
   printf '代理核心：%s\n' "$(service_state "$VP_CORE_SERVICE")"
   printf 'Cloudflare Tunnel：%s\n' "$(service_state "$VP_TUNNEL_SERVICE")"
+  printf 'Tunnel 本地指标端口：%s\n' "$VP_TUNNEL_METRICS_PORT"
   printf '节点数量：%s\n' "$(node_count)"
   printf '进行中凭据轮换：%s\n' "$(rotation_count active)"
   printf '已到期凭据轮换：%s\n' "$(rotation_count expired)"
