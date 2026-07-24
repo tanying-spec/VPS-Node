@@ -2,7 +2,7 @@
 
 set -u
 
-VP_VERSION="0.2.0-dev.69"
+VP_VERSION="0.2.0-dev.70"
 VP_CONFIG_DIR="${VP_CONFIG_DIR:-/etc/vps-node}"
 VP_DATA_DIR="${VP_DATA_DIR:-/var/lib/vps-node}"
 VP_LOG_DIR="${VP_LOG_DIR:-/var/log/vps-node}"
@@ -1088,6 +1088,26 @@ rollback_tunnel_install() {
 
 tunnel_install() {
   need_root || return 1
+  tunnel_current_version="未安装"
+  if [ -x "$VP_TUNNEL_BIN" ]; then
+    detected_tunnel_version="$("$VP_TUNNEL_BIN" version 2>/dev/null | head -n 1 || true)"
+    [ -n "$detected_tunnel_version" ] && tunnel_current_version="$detected_tunnel_version"
+  fi
+  [ -n "${VP_TUNNEL_SOURCE_BIN:-}" ] && tunnel_source_summary="指定本地文件" || tunnel_source_summary="Cloudflare 官方 GitHub Release"
+  printf 'Cloudflare Tunnel 安装预览：\n'
+  printf '  当前版本：%s\n' "$tunnel_current_version"
+  printf '  安装来源：%s（下载后校验 SHA-256 和可执行性）\n' "$tunnel_source_summary"
+  printf '  影响范围：更新二进制、Token、指标端口并重启 Tunnel 服务\n'
+  if [ -n "${VP_TUNNEL_INSTALL_CONFIRM:-}" ]; then
+    tunnel_install_confirm="$VP_TUNNEL_INSTALL_CONFIRM"
+  else
+    printf '输入 INSTALL 确认安装或更新 Cloudflare Tunnel：'
+    read -r tunnel_install_confirm || true
+  fi
+  if [ "$tunnel_install_confirm" != INSTALL ]; then
+    warn "已取消 Tunnel 安装，未下载文件或修改项目状态。"
+    return 2
+  fi
   command -v curl >/dev/null 2>&1 || install_packages ca-certificates curl || return 1
   init_layout >/dev/null || return 1
   token_source="${1:-}"
@@ -1359,6 +1379,26 @@ tunnel_binary_rollback() {
 
 core_install() {
   need_root || return 1
+  core_current_version="未安装"
+  if [ -x "$VP_CORE_BIN" ]; then
+    detected_core_version="$("$VP_CORE_BIN" -v 2>/dev/null | head -n 1 || true)"
+    [ -n "$detected_core_version" ] && core_current_version="$detected_core_version"
+  fi
+  [ -n "${VP_CORE_SOURCE_BIN:-}" ] && core_source_summary="指定本地文件" || core_source_summary="MetaCubeX 官方 GitHub Release"
+  printf 'Mihomo 内核安装预览：\n'
+  printf '  当前版本：%s\n' "$core_current_version"
+  printf '  安装来源：%s（下载后校验 SHA-256、可执行性和配置）\n' "$core_source_summary"
+  printf '  影响范围：更新二进制和运行参数，并重启 Mihomo 服务\n'
+  if [ -n "${VP_CORE_INSTALL_CONFIRM:-}" ]; then
+    core_install_confirm="$VP_CORE_INSTALL_CONFIRM"
+  else
+    printf '输入 INSTALL 确认安装或更新 Mihomo 内核：'
+    read -r core_install_confirm || true
+  fi
+  if [ "$core_install_confirm" != INSTALL ]; then
+    warn "已取消 Mihomo 内核安装，未下载文件或修改项目状态。"
+    return 2
+  fi
   ensure_runtime_dependencies || return 1
   init_layout >/dev/null || return 1
   prepare_core_internal_ports || return 1

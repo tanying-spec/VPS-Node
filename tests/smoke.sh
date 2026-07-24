@@ -6,6 +6,22 @@ ROOT="$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)"
 TMP="$(mktemp -d /tmp/vps-node-test.XXXXXX)"
 trap 'rm -rf "$TMP"' EXIT HUP INT TERM
 CURRENT_VERSION="$(sh "$ROOT/vp.sh" version)"
+export VP_CORE_INSTALL_CONFIRM=INSTALL
+export VP_TUNNEL_INSTALL_CONFIRM=INSTALL
+
+cancel_install_root="$TMP/cancel-install"
+cancelled_core_install="$(VP_CONFIG_DIR="$cancel_install_root/etc" VP_DATA_DIR="$cancel_install_root/lib" \
+  VP_LOG_DIR="$cancel_install_root/log" VP_LIB_DIR="$cancel_install_root/usr" \
+  VP_CORE_BIN="$cancel_install_root/usr/bin/mihomo" VP_CORE_INSTALL_CONFIRM=CANCEL \
+  sh "$ROOT/vp.sh" core-install 2>&1 || true)"
+printf '%s\n' "$cancelled_core_install" | grep -q '已取消 Mihomo 内核安装'
+[ ! -e "$cancel_install_root" ]
+cancelled_tunnel_install="$(VP_CONFIG_DIR="$cancel_install_root/etc" VP_DATA_DIR="$cancel_install_root/lib" \
+  VP_LOG_DIR="$cancel_install_root/log" VP_LIB_DIR="$cancel_install_root/usr" \
+  VP_TUNNEL_BIN="$cancel_install_root/usr/bin/cloudflared" VP_TUNNEL_INSTALL_CONFIRM=CANCEL \
+  sh "$ROOT/vp.sh" tunnel-install 2>&1 || true)"
+printf '%s\n' "$cancelled_tunnel_install" | grep -q '已取消 Tunnel 安装'
+[ ! -e "$cancel_install_root" ]
 
 digest64="$(printf '%064d' 1)"
 compact_release="$TMP/release-compact.json"

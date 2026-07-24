@@ -84,6 +84,7 @@ for quota_milli in $quota_cases; do
     VP_LIB_DIR="$case_dir/usr-lib" VP_CORE_BIN="$case_dir/usr-lib/bin/mihomo" \
     VP_CORE_BACKUP_BIN="$case_dir/usr-lib/bin/mihomo.previous" VP_CORE_SOURCE_BIN="$MIHOMO_BIN" \
     VP_MEMORY_LIMIT_BYTES_OVERRIDE=$((1024 * 1048576)) VP_SKIP_SERVICE=1 \
+    VP_CORE_INSTALL_CONFIRM=INSTALL \
     sh "$ROOT/vp.sh" core-install >/dev/null
 
   detected_quota="$(awk -F= '$1=="VP_CPU_QUOTA_MILLI"{print $2}' "$case_dir/etc/core.env")"

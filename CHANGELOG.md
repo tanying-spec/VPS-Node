@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.0-dev.70
+
+- `vp core-install` and `vp tunnel-install` now preview the installed version, trusted source, verification boundary and affected service before requiring the exact `INSTALL` confirmation.
+- Command-level confirmation protects both direct CLI and numbered-menu use instead of relying on callers to provide a separate warning.
+- Cancellation occurs before dependency installation, layout initialization, downloads, token input or project-state writes.
+- Portable and authorized-host test harnesses explicitly opt into installation; regression tests prove cancellation creates no project paths.
+
 ## 0.2.0-dev.69
 
 - `vp rollback` now displays the current version, verified rollback target and integrity result, then requires the exact `ROLLBACK` confirmation.
