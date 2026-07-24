@@ -76,6 +76,11 @@ if [ -n "${VP_TEST_MIHOMO_BIN:-}" ]; then
   VP_CONFIG_DIR="$TMP/core-etc" VP_DATA_DIR="$TMP/core-lib" VP_LOG_DIR="$TMP/core-log" \
   VP_LIB_DIR="$TMP/core-usr-lib" VP_CORE_BIN="$TMP/core-usr-lib/bin/mihomo" \
   sh "$ROOT/vp.sh" link test-argo | grep -q '^vless://'
+  VP_CONFIG_DIR="$TMP/core-etc" VP_DATA_DIR="$TMP/core-lib" VP_LOG_DIR="$TMP/core-log" \
+  VP_LIB_DIR="$TMP/core-usr-lib" VP_CORE_BIN="$TMP/core-usr-lib/bin/mihomo" \
+  VP_CORE_BACKUP_BIN="$TMP/core-usr-lib/bin/mihomo.previous" VP_SKIP_SERVICE=1 VP_DELETE_CONFIRM=DELETE \
+  sh "$ROOT/vp.sh" delete test-argo >/dev/null
+  ! grep -q '^argo|test-argo|' "$TMP/core-etc/nodes.db"
 
   if [ -n "${VP_TEST_CLOUDFLARED_BIN:-}" ]; then
     printf 'test.token_value-123\n' > "$TMP/tunnel.token"

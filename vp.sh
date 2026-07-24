@@ -48,6 +48,29 @@ need_root() {
   [ "$(id -u)" = "0" ] || { error "该操作需要 root 权限。"; return 1; }
 }
 
+install_packages() {
+  if command -v apk >/dev/null 2>&1; then
+    apk add --no-cache "$@" >/dev/null
+  elif command -v apt-get >/dev/null 2>&1; then
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update >/dev/null
+    apt-get install -y "$@" >/dev/null
+  else
+    error "未找到 apk 或 apt-get，无法自动安装依赖。"
+    return 1
+  fi
+}
+
+ensure_runtime_dependencies() {
+  missing=""
+  for command_name in curl gzip openssl tar; do
+    command -v "$command_name" >/dev/null 2>&1 || missing="$missing $command_name"
+  done
+  [ -z "$missing" ] && return 0
+  info "正在安装运行依赖。"
+  install_packages ca-certificates curl gzip openssl tar
+}
+
 init_layout() {
   need_root || return 1
   umask 077
@@ -566,6 +589,7 @@ tunnel_service_restart() {
 
 tunnel_install() {
   need_root || return 1
+  command -v curl >/dev/null 2>&1 || install_packages ca-certificates curl || return 1
   init_layout >/dev/null || return 1
   token_source="${1:-}"
   if [ -n "$token_source" ] && [ -r "$token_source" ]; then
@@ -732,6 +756,7 @@ tunnel_binary_rollback() {
 
 core_install() {
   need_root || return 1
+  ensure_runtime_dependencies || return 1
   init_layout >/dev/null || return 1
   core_had_binary=0
   [ -x "$VP_CORE_BIN" ] && core_had_binary=1
@@ -850,6 +875,37 @@ public_ip() {
 show_nodes() {
   [ -s "$VP_NODES_DB" ] || { warn "当前没有节点。"; return 0; }
   awk -F'|' '{printf "%d. %s  协议=%s  端口=%s\n", NR,$2,$1,$3}' "$VP_NODES_DB"
+}
+
+delete_node() {
+  need_root || return 1
+  target="${1:-}"
+  [ -n "$target" ] || { error "请指定节点名称。"; return 1; }
+  record="$(awk -F'|' -v n="$target" '$2==n{print;exit}' "$VP_NODES_DB" 2>/dev/null)"
+  [ -n "$record" ] || { error "未找到节点。"; return 1; }
+  if [ "${VP_DELETE_CONFIRM:-}" != "DELETE" ]; then
+    printf '删除节点 %s？请输入 DELETE：' "$target"
+    read -r answer || true
+    [ "$answer" = "DELETE" ] || { warn "已取消。"; return 0; }
+  fi
+  begin_state_transaction node-delete || return 1
+  candidate_root="$VP_TX_ACTIVE/candidate"
+  awk -F'|' -v n="$target" '$2!=n' "$candidate_root/nodes.db" > "$candidate_root/nodes.db.tmp"
+  mv "$candidate_root/nodes.db.tmp" "$candidate_root/nodes.db"
+  awk -F'|' -v n="$target" '$1!=n' "$candidate_root/credential-rotations.db" > "$candidate_root/credential-rotations.db.tmp"
+  mv "$candidate_root/credential-rotations.db.tmp" "$candidate_root/credential-rotations.db"
+  render_mihomo_config "$candidate_root/nodes.db" "$candidate_root/generated/mihomo.yaml" "$candidate_root/credential-rotations.db"
+  if ! validate_state_candidate || ! "$VP_CORE_BIN" -t -d "$VP_CONFIG_DIR" -f "$candidate_root/generated/mihomo.yaml" >/dev/null 2>&1; then
+    abort_state_transaction; error "删除后的候选配置验证失败。"; return 1
+  fi
+  activate_state_candidate || { abort_state_transaction; return 1; }
+  if ! core_service_restart; then
+    abort_state_transaction; core_service_restart >/dev/null 2>&1 || true
+    error "删除节点后服务启动失败，已恢复原配置。"
+    return 1
+  fi
+  commit_state_transaction
+  ok "节点 $target 已删除。"
 }
 
 rotate_credential() {
@@ -1118,6 +1174,13 @@ restore_backup() {
   need_root || return 1
   archive="${1:-}"
   [ -r "$archive" ] || { error "备份文件不存在。"; return 1; }
+  if [ -r "$archive.sha256" ]; then
+    expected_archive_hash="$(awk 'NR==1{print tolower($1)}' "$archive.sha256" 2>/dev/null)"
+    actual_archive_hash="$(sha256_file "$archive" 2>/dev/null | tr 'A-F' 'a-f')"
+    [ -n "$expected_archive_hash" ] && [ "$expected_archive_hash" = "$actual_archive_hash" ] || { error "备份 SHA-256 校验失败。"; return 1; }
+  else
+    warn "备份旁路 SHA-256 文件不存在，将继续进行内容和配置验证。"
+  fi
   backup_archive_safe "$archive" || { error "备份包含不安全路径。"; return 1; }
   package="$(mktemp -d /tmp/vp-restore.XXXXXX)" || return 1
   cleanup_restore() { rm -rf "$package"; }
@@ -1665,7 +1728,7 @@ interactive_node_action() {
   printf '请输入节点名称：'
   read -r target || true
   [ -n "$target" ] || return 0
-  printf '1. 显示链接\n2. 端到端测试\n3. 轮换凭据\n4. 完成凭据切换\n0. 返回\n请选择：'
+  printf '1. 显示链接\n2. 端到端测试\n3. 轮换凭据\n4. 完成凭据切换\n5. 删除节点\n0. 返回\n请选择：'
   read -r action || true
   case "$action" in
     1) show_node_link "$target" ;;
@@ -1676,6 +1739,7 @@ interactive_node_action() {
       rotate_credential "$target" "${hours:-24}"
       ;;
     4) finalize_rotation "$target" ;;
+    5) VP_DELETE_CONFIRM=DELETE delete_node "$target" ;;
     0) return 0 ;;
     *) warn "无效选择。" ;;
   esac
@@ -1758,6 +1822,7 @@ case "${1:-}" in
   tunnel-install|install-tunnel) shift; tunnel_install "$@" ;;
   argo-add|add-argo) shift; argo_add "$@" ;;
   nodes|list) show_nodes ;;
+  delete|remove) shift; delete_node "$@" ;;
   link) shift; show_node_link "$@" ;;
   test-node|test) shift; test_node_end_to_end "$@" ;;
   rotate|rotate-credential) shift; rotate_credential "$@" ;;
@@ -1778,7 +1843,7 @@ case "${1:-}" in
   uninstall) uninstall_project ;;
   debug-tx) shift; debug_transaction "$@" ;;
   help|-h|--help)
-    printf '用法：vp [status|doctor|health|repair|maintain|update|rollback|init|core-install|reality-add|tunnel-install|argo-add|nodes|link|test-node|rotate|rotations|rotate-finalize|backup|restore|uninstall|version]\n'
+    printf '用法：vp [status|doctor|health|repair|maintain|update|rollback|init|core-install|reality-add|tunnel-install|argo-add|nodes|delete|link|test-node|rotate|rotations|rotate-finalize|backup|restore|uninstall|version]\n'
     ;;
   '') menu ;;
   *) error "未知命令：$1"; exit 2 ;;
