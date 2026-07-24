@@ -349,6 +349,40 @@ VP_TEST_SERVER=127.0.0.1 VP_SKIP_SERVICE=1 \
 sh "$ROOT/vp.sh" network-optimize --dry-run >/dev/null
 grep -q '^CC=cubic$' "$sysctl_state"
 [ ! -e "$network_config" ]
+for network_fail_phase in after-snapshot before-config-commit; do
+  if VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log" \
+    VP_LIB_DIR="$TMP/dns-usr" VP_CORE_BIN="$TMP/dns-usr/bin/mihomo" \
+    VP_CORE_BACKUP_BIN="$TMP/dns-usr/bin/mihomo.previous" VP_CURL_BIN="$adaptive_curl" \
+    VP_SYSCTL_BIN="$fake_sysctl" VP_FAKE_SYSCTL_STATE="$sysctl_state" \
+    VP_SYSCTL_CONFIG="$network_config" VP_NETWORK_SNAPSHOT="$network_snapshot" \
+    VP_NETWORK_CONFIRM=APPLY VP_TEST_SERVER=127.0.0.1 VP_SKIP_SERVICE=1 \
+    VP_ALLOW_TEST_HOOKS=1 VP_TEST_NETWORK_PERSIST_FAIL_PHASE="$network_fail_phase" \
+    sh "$ROOT/vp.sh" network-optimize renamed-node 2 >/dev/null 2>&1; then
+    printf 'network persistence fault unexpectedly succeeded: %s\n' "$network_fail_phase" >&2
+    exit 1
+  fi
+  grep -q '^CC=cubic$' "$sysctl_state"
+  grep -q '^QDISC=pfifo_fast$' "$sysctl_state"
+  [ ! -e "$network_config" ]
+  [ ! -e "$network_snapshot" ]
+  ! find "$TMP" -maxdepth 1 -name '.vps-node-network-*' -print | grep -q .
+done
+printf 'BROKEN=1\n' > "$network_snapshot"
+if VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log" \
+  VP_LIB_DIR="$TMP/dns-usr" VP_CORE_BIN="$TMP/dns-usr/bin/mihomo" \
+  VP_CORE_BACKUP_BIN="$TMP/dns-usr/bin/mihomo.previous" VP_CURL_BIN="$adaptive_curl" \
+  VP_SYSCTL_BIN="$fake_sysctl" VP_FAKE_SYSCTL_STATE="$sysctl_state" \
+  VP_SYSCTL_CONFIG="$network_config" VP_NETWORK_SNAPSHOT="$network_snapshot" \
+  VP_NETWORK_CONFIRM=APPLY VP_TEST_SERVER=127.0.0.1 VP_SKIP_SERVICE=1 \
+  sh "$ROOT/vp.sh" network-optimize renamed-node 2 >/dev/null 2>&1; then
+  printf 'invalid existing network snapshot unexpectedly overwritten\n' >&2
+  exit 1
+fi
+grep -q '^BROKEN=1$' "$network_snapshot"
+grep -q '^CC=cubic$' "$sysctl_state"
+grep -q '^QDISC=pfifo_fast$' "$sysctl_state"
+[ ! -e "$network_config" ]
+rm -f "$network_snapshot"
 network_output="$(VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log" \
   VP_LIB_DIR="$TMP/dns-usr" VP_CORE_BIN="$TMP/dns-usr/bin/mihomo" \
   VP_CORE_BACKUP_BIN="$TMP/dns-usr/bin/mihomo.previous" VP_CURL_BIN="$adaptive_curl" \

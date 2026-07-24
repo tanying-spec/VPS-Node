@@ -2,7 +2,7 @@
 
 set -u
 
-VP_VERSION="0.2.0-dev.46"
+VP_VERSION="0.2.0-dev.47"
 VP_CONFIG_DIR="${VP_CONFIG_DIR:-/etc/vps-node}"
 VP_DATA_DIR="${VP_DATA_DIR:-/var/lib/vps-node}"
 VP_LOG_DIR="${VP_LOG_DIR:-/var/log/vps-node}"
@@ -2119,6 +2119,30 @@ network_optimize_verified() {
     error "复测未通过性能门槛，已自动恢复原网络参数。"
     return 1
   fi
+  if [ -e "$VP_NETWORK_SNAPSHOT" ]; then
+    if [ ! -f "$VP_NETWORK_SNAPSHOT" ] || [ ! -r "$VP_NETWORK_SNAPSHOT" ]; then
+      network_restore_values "$current_cc" "$current_qdisc" >/dev/null 2>&1 || true
+      rm -rf "$benchmark_dir"
+      error "现有网络回滚点不是可读普通文件，已恢复原参数并拒绝覆盖。"
+      return 1
+    fi
+    saved_before_cc="$(awk -F= '$1=="BEFORE_CC"{print $2;exit}' "$VP_NETWORK_SNAPSHOT")"
+    saved_before_qdisc="$(awk -F= '$1=="BEFORE_QDISC"{print $2;exit}' "$VP_NETWORK_SNAPSHOT")"
+    case "$saved_before_cc$saved_before_qdisc" in
+      ''|*[!A-Za-z0-9_-]*)
+        network_restore_values "$current_cc" "$current_qdisc" >/dev/null 2>&1 || true
+        rm -rf "$benchmark_dir"
+        error "现有网络回滚点格式无效，已恢复原参数并拒绝覆盖。"
+        return 1
+        ;;
+    esac
+  fi
+  if [ -e "$VP_SYSCTL_CONFIG" ] && [ ! -f "$VP_SYSCTL_CONFIG" ]; then
+    network_restore_values "$current_cc" "$current_qdisc" >/dev/null 2>&1 || true
+    rm -rf "$benchmark_dir"
+    error "现有网络配置不是普通文件，已恢复原参数并拒绝覆盖。"
+    return 1
+  fi
   if ! mkdir -p "$(dirname "$VP_SYSCTL_CONFIG")" "$(dirname "$VP_NETWORK_SNAPSHOT")"; then
     network_restore_values "$current_cc" "$current_qdisc" >/dev/null 2>&1 || true
     rm -rf "$benchmark_dir"
@@ -2126,31 +2150,76 @@ network_optimize_verified() {
     return 1
   fi
   snapshot_created=0
-  if [ ! -r "$VP_NETWORK_SNAPSHOT" ]; then
+  snapshot_stage=""
+  config_stage=""
+  cleanup_network_stages() {
+    [ -z "$snapshot_stage" ] || rm -f "$snapshot_stage"
+    [ -z "$config_stage" ] || rm -f "$config_stage"
+  }
+  if [ ! -e "$VP_NETWORK_SNAPSHOT" ]; then
+    snapshot_stage="$(mktemp "$(dirname "$VP_NETWORK_SNAPSHOT")/.vps-node-network-snapshot.XXXXXX")" || {
+      network_restore_values "$current_cc" "$current_qdisc" >/dev/null 2>&1 || true
+      rm -rf "$benchmark_dir"
+      error "无法暂存网络回滚点，已恢复原参数。"
+      return 1
+    }
     if ! {
       printf 'BEFORE_CC=%s\n' "$current_cc"
       printf 'BEFORE_QDISC=%s\n' "$current_qdisc"
-    } > "$VP_NETWORK_SNAPSHOT"; then
+    } > "$snapshot_stage" || ! chmod 600 "$snapshot_stage" || ! mv "$snapshot_stage" "$VP_NETWORK_SNAPSHOT"; then
       network_restore_values "$current_cc" "$current_qdisc" >/dev/null 2>&1 || true
-      rm -rf "$benchmark_dir" "$VP_NETWORK_SNAPSHOT"
+      cleanup_network_stages
+      rm -rf "$benchmark_dir"
       error "无法保存网络回滚点，已恢复原参数。"
       return 1
     fi
-    chmod 600 "$VP_NETWORK_SNAPSHOT"
+    snapshot_stage=""
     snapshot_created=1
   fi
+  if [ "${VP_ALLOW_TEST_HOOKS:-0}" = 1 ] && [ "${VP_TEST_NETWORK_PERSIST_FAIL_PHASE:-}" = after-snapshot ]; then
+    network_restore_values "$current_cc" "$current_qdisc" >/dev/null 2>&1 || true
+    [ "$snapshot_created" -eq 1 ] && rm -f "$VP_NETWORK_SNAPSHOT"
+    cleanup_network_stages
+    rm -rf "$benchmark_dir"
+    error "测试注入：网络回滚点提交后中断，已恢复原参数。"
+    return 1
+  fi
+  config_stage="$(mktemp "$(dirname "$VP_SYSCTL_CONFIG")/.vps-node-network-config.XXXXXX")" || {
+    network_restore_values "$current_cc" "$current_qdisc" >/dev/null 2>&1 || true
+    [ "$snapshot_created" -eq 1 ] && rm -f "$VP_NETWORK_SNAPSHOT"
+    rm -rf "$benchmark_dir"
+    error "无法暂存网络配置，已恢复原参数。"
+    return 1
+  }
   if ! {
     printf '# Managed by VPS-Node after verified before/after benchmark\n'
     printf 'net.ipv4.tcp_congestion_control=%s\n' "$candidate_cc"
     printf 'net.core.default_qdisc=%s\n' "$candidate_qdisc"
-  } > "$VP_SYSCTL_CONFIG"; then
+  } > "$config_stage" || ! chmod 600 "$config_stage"; then
     network_restore_values "$current_cc" "$current_qdisc" >/dev/null 2>&1 || true
-    rm -rf "$benchmark_dir" "$VP_SYSCTL_CONFIG"
+    cleanup_network_stages
+    rm -rf "$benchmark_dir"
     [ "$snapshot_created" -eq 1 ] && rm -f "$VP_NETWORK_SNAPSHOT"
     error "无法保存网络参数，已恢复原参数。"
     return 1
   fi
-  chmod 600 "$VP_SYSCTL_CONFIG"
+  if [ "${VP_ALLOW_TEST_HOOKS:-0}" = 1 ] && [ "${VP_TEST_NETWORK_PERSIST_FAIL_PHASE:-}" = before-config-commit ]; then
+    network_restore_values "$current_cc" "$current_qdisc" >/dev/null 2>&1 || true
+    cleanup_network_stages
+    rm -rf "$benchmark_dir"
+    [ "$snapshot_created" -eq 1 ] && rm -f "$VP_NETWORK_SNAPSHOT"
+    error "测试注入：网络配置提交前中断，已恢复原参数。"
+    return 1
+  fi
+  if ! mv "$config_stage" "$VP_SYSCTL_CONFIG"; then
+    network_restore_values "$current_cc" "$current_qdisc" >/dev/null 2>&1 || true
+    cleanup_network_stages
+    rm -rf "$benchmark_dir"
+    [ "$snapshot_created" -eq 1 ] && rm -f "$VP_NETWORK_SNAPSHOT"
+    error "无法原子提交网络参数，已恢复原参数。"
+    return 1
+  fi
+  config_stage=""
   before_bps="$(awk -F'|' 'NR==1{print $5}' "$before_result")"
   after_bps="$(awk -F'|' 'NR==1{print $5}' "$after_result")"
   rm -rf "$benchmark_dir"

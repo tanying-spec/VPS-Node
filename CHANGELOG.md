@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.0-dev.47
+
+- Network optimization now stages rollback snapshots and persistent sysctl configuration in their target directories, applies mode checks and commits each file atomically.
+- Failure after a new snapshot commit or before configuration commit restores the original congestion control/qdisc, removes only the newly created snapshot and cleans all stage files.
+- Existing unreadable/malformed snapshots and non-regular configuration targets are preserved and rejected rather than silently overwritten.
+- Added fault-injection regression tests for both persistence phases alongside the existing performance-regression rollback test.
+
 ## 0.2.0-dev.46
 
 - Added real DNS adaptation acceptance with one scenario following the host's measured public-DNS result and one scenario forcing public failure through a reserved unreachable address.
