@@ -122,6 +122,23 @@ case "${1:-}" in
 esac
 FAKE_CORE
 chmod 755 "$fake_core"
+core_install_race="$TMP/core-install-race"
+mkdir -p "$core_install_race/usr/bin"
+cp "$fake_core" "$core_install_race/usr/bin/mihomo"
+printf 'prior-core-backup\n' > "$core_install_race/usr/bin/mihomo.previous"
+core_install_race_backup_hash="$(sha256sum "$core_install_race/usr/bin/mihomo.previous" | awk '{print $1}')"
+if VP_CONFIG_DIR="$core_install_race/etc" VP_DATA_DIR="$core_install_race/lib" \
+  VP_LOG_DIR="$core_install_race/log" VP_LIB_DIR="$core_install_race/usr" \
+  VP_CORE_BIN="$core_install_race/usr/bin/mihomo" \
+  VP_CORE_BACKUP_BIN="$core_install_race/usr/bin/mihomo.previous" VP_CORE_SOURCE_BIN="$fake_core" \
+  VP_SKIP_SERVICE=1 VP_ALLOW_TEST_HOOKS=1 VP_TEST_CORE_INSTALL_TARGET_RACE=1 \
+  sh "$ROOT/vp.sh" core-install >/dev/null 2>&1; then
+  printf 'core install overwrote a binary changed during candidate validation\n' >&2
+  exit 1
+fi
+grep -q '^changed-during-core-install$' "$core_install_race/usr/bin/mihomo"
+[ "$(sha256sum "$core_install_race/usr/bin/mihomo.previous" | awk '{print $1}')" = "$core_install_race_backup_hash" ]
+[ ! -e "$core_install_race/etc/core.env" ]
 binary_rollback_root="$TMP/binary-rollback"
 mkdir -p "$binary_rollback_root"
 cat > "$binary_rollback_root/core-current" <<'CORE_CURRENT'
@@ -671,6 +688,25 @@ chmod 755 "$tunnel_tx/usr/bin/cloudflared" "$tunnel_tx/new-cloudflared"
 printf 'old.transaction.token\n' > "$tunnel_tx/etc/secrets/cloudflared.token"
 printf 'new.transaction.token\n' > "$tunnel_tx/new.token"
 old_tunnel_hash="$(sha256sum "$tunnel_tx/usr/bin/cloudflared" | awk '{print $1}')"
+tunnel_install_race="$TMP/tunnel-install-race"
+mkdir -p "$tunnel_install_race/usr/bin" "$tunnel_install_race/etc/secrets"
+cp "$tunnel_tx/usr/bin/cloudflared" "$tunnel_install_race/usr/bin/cloudflared"
+printf 'prior-tunnel-backup\n' > "$tunnel_install_race/usr/bin/cloudflared.previous"
+printf 'preserved.race.token\n' > "$tunnel_install_race/etc/secrets/cloudflared.token"
+tunnel_install_race_backup_hash="$(sha256sum "$tunnel_install_race/usr/bin/cloudflared.previous" | awk '{print $1}')"
+if VP_CONFIG_DIR="$tunnel_install_race/etc" VP_DATA_DIR="$tunnel_install_race/lib" \
+  VP_LOG_DIR="$tunnel_install_race/log" VP_LIB_DIR="$tunnel_install_race/usr" \
+  VP_TUNNEL_BIN="$tunnel_install_race/usr/bin/cloudflared" \
+  VP_TUNNEL_BACKUP_BIN="$tunnel_install_race/usr/bin/cloudflared.previous" \
+  VP_TUNNEL_SOURCE_BIN="$tunnel_tx/new-cloudflared" VP_SKIP_SERVICE=1 VP_ALLOW_TEST_HOOKS=1 \
+  VP_TEST_TUNNEL_INSTALL_TARGET_RACE=1 sh "$ROOT/vp.sh" tunnel-install "$tunnel_tx/new.token" >/dev/null 2>&1; then
+  printf 'tunnel install overwrote a binary changed during candidate validation\n' >&2
+  exit 1
+fi
+grep -q '^changed-during-tunnel-install$' "$tunnel_install_race/usr/bin/cloudflared"
+[ "$(sha256sum "$tunnel_install_race/usr/bin/cloudflared.previous" | awk '{print $1}')" = "$tunnel_install_race_backup_hash" ]
+[ "$(cat "$tunnel_install_race/etc/secrets/cloudflared.token")" = 'preserved.race.token' ]
+! grep -q '^VP_TUNNEL_METRICS_PORT=' "$tunnel_install_race/etc/state.env"
 set +e
 VP_CONFIG_DIR="$tunnel_tx/etc" VP_DATA_DIR="$tunnel_tx/lib" VP_LOG_DIR="$tunnel_tx/log" \
 VP_LIB_DIR="$tunnel_tx/usr" VP_TUNNEL_BIN="$tunnel_tx/usr/bin/cloudflared" \

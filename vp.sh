@@ -2,7 +2,7 @@
 
 set -u
 
-VP_VERSION="0.2.0-dev.71"
+VP_VERSION="0.2.0-dev.72"
 VP_CONFIG_DIR="${VP_CONFIG_DIR:-/etc/vps-node}"
 VP_DATA_DIR="${VP_DATA_DIR:-/var/lib/vps-node}"
 VP_LOG_DIR="${VP_LOG_DIR:-/var/log/vps-node}"
@@ -793,6 +793,19 @@ install_core_binary() {
   rm -f "$archive_tmp"
   chmod 755 "$binary_tmp"
   "$binary_tmp" -v >/dev/null 2>&1 || { error "下载的内核无法运行。"; rm -f "$binary_tmp"; return 1; }
+  if [ "${VP_ALLOW_TEST_HOOKS:-0}" = 1 ] && [ "${VP_TEST_CORE_INSTALL_TARGET_RACE:-0}" = 1 ]; then
+    printf 'changed-during-core-install\n' > "$VP_CORE_BIN"
+  fi
+  [ "$(managed_file_state "$VP_CORE_BIN")" = "$approved_core_install_current_state" ] || {
+    rm -f "$binary_tmp"
+    error "当前 Mihomo 二进制在下载验证期间发生变化，已中止且未覆盖该文件。"
+    return 1
+  }
+  [ "$(managed_file_state "$VP_CORE_BACKUP_BIN")" = "$approved_core_install_backup_state" ] || {
+    rm -f "$binary_tmp"
+    error "Mihomo 回滚二进制在下载验证期间发生变化，已中止安装。"
+    return 1
+  }
   [ -x "$VP_CORE_BIN" ] && cp "$VP_CORE_BIN" "$VP_CORE_BACKUP_BIN"
   mv "$binary_tmp" "$VP_CORE_BIN"
   chmod 755 "$VP_CORE_BIN"
@@ -947,6 +960,19 @@ install_tunnel_binary() {
   fi
   chmod 755 "$tunnel_tmp"
   "$tunnel_tmp" version >/dev/null 2>&1 || { rm -f "$tunnel_tmp"; error "cloudflared 无法运行。"; return 1; }
+  if [ "${VP_ALLOW_TEST_HOOKS:-0}" = 1 ] && [ "${VP_TEST_TUNNEL_INSTALL_TARGET_RACE:-0}" = 1 ]; then
+    printf 'changed-during-tunnel-install\n' > "$VP_TUNNEL_BIN"
+  fi
+  [ "$(managed_file_state "$VP_TUNNEL_BIN")" = "$approved_tunnel_install_current_state" ] || {
+    rm -f "$tunnel_tmp"
+    error "当前 cloudflared 二进制在下载验证期间发生变化，已中止且未覆盖该文件。"
+    return 1
+  }
+  [ "$(managed_file_state "$VP_TUNNEL_BACKUP_BIN")" = "$approved_tunnel_install_backup_state" ] || {
+    rm -f "$tunnel_tmp"
+    error "cloudflared 回滚二进制在下载验证期间发生变化，已中止安装。"
+    return 1
+  }
   [ -x "$VP_TUNNEL_BIN" ] && cp "$VP_TUNNEL_BIN" "$VP_TUNNEL_BACKUP_BIN"
   mv "$tunnel_tmp" "$VP_TUNNEL_BIN"
 }
@@ -1108,6 +1134,8 @@ tunnel_install() {
     warn "已取消 Tunnel 安装，未下载文件或修改项目状态。"
     return 2
   fi
+  approved_tunnel_install_current_state="$(managed_file_state "$VP_TUNNEL_BIN")"
+  approved_tunnel_install_backup_state="$(managed_file_state "$VP_TUNNEL_BACKUP_BIN")"
   command -v curl >/dev/null 2>&1 || install_packages ca-certificates curl || return 1
   init_layout >/dev/null || return 1
   token_source="${1:-}"
@@ -1149,7 +1177,6 @@ tunnel_install() {
   mv "$candidate_root/state.env.tmp" "$candidate_root/state.env"
   validate_state_candidate || { abort_state_transaction; rm -f "$token_backup" "$runner_backup"; return 1; }
   install_tunnel_binary || {
-    rollback_tunnel_install "$tunnel_had_binary" "$tunnel_had_token" "$token_backup" "$tunnel_was_running" "$tunnel_had_runner" "$runner_backup"
     abort_state_transaction
     rm -f "$token_backup" "$runner_backup"
     return 1
@@ -1463,6 +1490,8 @@ core_install() {
     warn "已取消 Mihomo 内核安装，未下载文件或修改项目状态。"
     return 2
   fi
+  approved_core_install_current_state="$(managed_file_state "$VP_CORE_BIN")"
+  approved_core_install_backup_state="$(managed_file_state "$VP_CORE_BACKUP_BIN")"
   ensure_runtime_dependencies || return 1
   init_layout >/dev/null || return 1
   prepare_core_internal_ports || return 1

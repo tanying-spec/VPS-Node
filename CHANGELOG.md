@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.0-dev.72
+
+- Mihomo and cloudflared installation approval is now bound to SHA-256-backed states of both the active and rollback binaries captured before dependency work or downloads.
+- Candidate verification is followed by exact state rechecks; concurrent active or rollback-binary changes are preserved and rejected instead of overwritten.
+- A Tunnel candidate failure before binary commit no longer invokes rollback with an older backup, preventing stale recovery from overwriting concurrent binary or token changes.
+- Race-injection tests prove external binaries, prior rollback points and Tunnel tokens remain intact while no runtime state is committed.
+
 ## 0.2.0-dev.71
 
 - Mihomo and cloudflared binary rollback now validate the backup, preview current/target versions and service impact, then require the exact `ROLLBACK` confirmation.
