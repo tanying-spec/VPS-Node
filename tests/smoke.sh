@@ -1253,6 +1253,18 @@ printf '%s\n' "$ready_version_status" | grep -q "回滚版本：$CURRENT_VERSION
 rollback_cli_hash="$(sha256sum "$update_root/installed-vp" | awk '{print $1}')"
 rollback_backup_hash="$(sha256sum "$update_root/installed-vp.previous" | awk '{print $1}')"
 rollback_sidecar_hash="$(sha256sum "$update_root/installed-vp.previous.sha256" | awk '{print $1}')"
+cancelled_rollback_output="$(VP_CONFIG_DIR="$TMP/etc" VP_CLI_PATH="$update_root/installed-vp" \
+  VP_CLI_BACKUP_PATH="$update_root/installed-vp.previous" VP_ROLLBACK_CONFIRM=CANCEL \
+  sh "$ROOT/vp.sh" rollback 2>&1 || true)"
+printf '%s\n' "$cancelled_rollback_output" | grep -q '已取消回滚'
+[ "$(sha256sum "$update_root/installed-vp" | awk '{print $1}')" = "$rollback_cli_hash" ]
+[ "$(sha256sum "$update_root/installed-vp.previous" | awk '{print $1}')" = "$rollback_backup_hash" ]
+[ "$(sha256sum "$update_root/installed-vp.previous.sha256" | awk '{print $1}')" = "$rollback_sidecar_hash" ]
+if find "$update_root" -type f \( -name '.vp-rollback.*' -o -name '.vp-previous.*' -o -name '.vp-previous-sha.*' \) | grep -q .; then
+  printf 'cancelled CLI rollback left staging files\n' >&2
+  exit 1
+fi
+export VP_ROLLBACK_CONFIRM=ROLLBACK
 
 rollback_source_race_cli="$update_root/rollback-source-race/vp"
 mkdir -p "$(dirname "$rollback_source_race_cli")"
@@ -1316,6 +1328,7 @@ if VP_CONFIG_DIR="$TMP/etc" VP_CLI_PATH="$update_root/installed-vp" \
 fi
 [ "$(sh "$update_root/installed-vp" version)" = '0.2.0-dev.99' ]
 unset VP_UPDATE_CONFIRM
+unset VP_ROLLBACK_CONFIRM
 
 printf 'TEST_VALUE=before\n' >> "$TMP/etc/state.env"
 VP_CONFIG_DIR="$TMP/etc" VP_DATA_DIR="$TMP/lib" VP_LOG_DIR="$TMP/log" VP_LIB_DIR="$TMP/usr-lib" \

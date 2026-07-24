@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.0-dev.69
+
+- `vp rollback` now displays the current version, verified rollback target and integrity result, then requires the exact `ROLLBACK` confirmation.
+- The confirmation is owned by the command itself, so direct CLI and numbered-menu use share the same safety boundary.
+- Cancellation occurs before directory creation, staging or exchange and leaves the active CLI, rollback script and checksum sidecar byte-identical.
+- Regression tests prove cancellation leaves no CLI-exchange staging files before enabling confirmation for race and failure-injection cases.
+
 ## 0.2.0-dev.68
 
 - `vp update` now owns the `UPDATE` confirmation after displaying the verified candidate preview; direct CLI use can no longer bypass the second confirmation provided by the menu.

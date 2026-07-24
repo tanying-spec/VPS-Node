@@ -35,7 +35,7 @@ Windows 远程编排入口 `tests/run_authorized_host.ps1` 同样将主机和端
 
 ## 历史结果的处理
 
-早期开发阶段曾记录 Reality/VLESS-WS、Cloudflare Tunnel、4×10 MiB 压力和约 16 MiB/s Tunnel 吞吐结果。这些结果可以作为设计参考，但不是 `0.2.0-dev.68` 当前代码的验收证据，因此不用于宣称当前版本已通过。
+早期开发阶段曾记录 Reality/VLESS-WS、Cloudflare Tunnel、4×10 MiB 压力和约 16 MiB/s Tunnel 吞吐结果。这些结果可以作为设计参考，但不是 `0.2.0-dev.69` 当前代码的验收证据，因此不用于宣称当前版本已通过。
 
 旧的 `system_argo_test.sh` 和 `system_pressure_test.sh` 会正式安装管理脚本并停止已有服务，不符合“隔离且正式服务前后不变”的硬约束，已删除。后续实机证据只能由锁定主机的隔离验收入口产生。
 

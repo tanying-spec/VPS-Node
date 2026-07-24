@@ -2,7 +2,7 @@
 
 set -u
 
-VP_VERSION="0.2.0-dev.68"
+VP_VERSION="0.2.0-dev.69"
 VP_CONFIG_DIR="${VP_CONFIG_DIR:-/etc/vps-node}"
 VP_DATA_DIR="${VP_DATA_DIR:-/var/lib/vps-node}"
 VP_LOG_DIR="${VP_LOG_DIR:-/var/log/vps-node}"
@@ -3477,12 +3477,33 @@ rollback_cli() {
       error "备份管理脚本 SHA-256 校验失败，拒绝回滚。"
       return 1
     }
+    rollback_integrity="SHA-256/语法/版本已通过"
   else
     warn "旧版回滚文件没有 SHA-256；本次将执行语法与版本检查，成功交换后自动补齐校验。"
+    rollback_integrity="语法/版本已通过（旧版无 SHA-256）"
   fi
   sh -n "$VP_CLI_BACKUP_PATH" || { error "备份脚本语法检查失败。"; return 1; }
   rollback_version="$(VP_CONFIG_DIR="$VP_CONFIG_DIR" sh "$VP_CLI_BACKUP_PATH" version 2>/dev/null)"
   version_key "$rollback_version" >/dev/null 2>&1 || { error "回滚脚本版本号无效。"; return 1; }
+  current_version="未安装"
+  if [ -f "$VP_CLI_PATH" ]; then
+    detected_current_version="$(VP_CONFIG_DIR="$VP_CONFIG_DIR" sh "$VP_CLI_PATH" version 2>/dev/null || true)"
+    [ -n "$detected_current_version" ] && current_version="$detected_current_version"
+  fi
+  printf '回滚预览：\n'
+  printf '  当前版本：%s\n' "$current_version"
+  printf '  目标版本：%s\n' "$rollback_version"
+  printf '  完整性：%s\n' "$rollback_integrity"
+  if [ -n "${VP_ROLLBACK_CONFIRM:-}" ]; then
+    rollback_confirm="$VP_ROLLBACK_CONFIRM"
+  else
+    printf '输入 ROLLBACK 确认交换当前脚本与回滚版本：'
+    read -r rollback_confirm || true
+  fi
+  if [ "$rollback_confirm" != ROLLBACK ]; then
+    warn "已取消回滚，当前管理脚本和回滚文件未修改。"
+    return 2
+  fi
   cli_dir="$(dirname "$VP_CLI_PATH")"
   backup_dir="$(dirname "$VP_CLI_BACKUP_PATH")"
   sidecar_dir="$(dirname "$VP_CLI_BACKUP_SHA256")"
