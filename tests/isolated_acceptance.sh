@@ -222,6 +222,20 @@ vp_env "$CLI" report "$BASE/diagnostic.txt" >/dev/null
 ! grep -Eq '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' "$BASE/diagnostic.txt"
 vp_env "$CLI" network-optimize --dry-run >/dev/null
 
+mkdir -p "$BASE/maintenance-tmp"
+dd if=/dev/zero of="$BASE/log/maintenance-large.log" bs=1024 count=1100 >/dev/null 2>&1
+printf 'expired isolated maintenance data\n' > "$BASE/maintenance-tmp/vp-node-test.acceptance"
+touch -t 202001010000 "$BASE/maintenance-tmp/vp-node-test.acceptance"
+maintenance_log_hash="$(file_digest "$BASE/log/maintenance-large.log")"
+maintenance_nodes_hash="$(file_digest "$BASE/etc/nodes.db")"
+vp_env env VP_MAINTENANCE_TMP_ROOT="$BASE/maintenance-tmp" "$CLI" maintain --dry-run >/dev/null
+[ "$maintenance_log_hash" = "$(file_digest "$BASE/log/maintenance-large.log")" ]
+[ "$maintenance_nodes_hash" = "$(file_digest "$BASE/etc/nodes.db")" ]
+vp_env env VP_MAINTENANCE_TMP_ROOT="$BASE/maintenance-tmp" VP_MAINTENANCE_CONFIRM=MAINTAIN "$CLI" maintain >/dev/null
+[ "$(wc -c < "$BASE/log/maintenance-large.log")" -eq 1048576 ]
+[ ! -e "$BASE/maintenance-tmp/vp-node-test.acceptance" ]
+find "$BASE/lib/backups" -name 'vps-node-*.tar.gz' -type f | grep -q .
+
 VP_UNINSTALL_CONFIRM=DELETE vp_env "$CLI" uninstall >/dev/null
 [ ! -e "$BASE/etc" ]
 [ ! -e "$BASE/lib" ]
@@ -264,6 +278,7 @@ evidence_file="$EVIDENCE_DIR/vps-node-acceptance-$(date -u '+%Y%m%dT%H%M%SZ').tx
   printf 'backup_restore_roundtrip=passed\n'
   printf 'config_drift_self_heal=passed\n'
   printf 'diagnostic_redaction=passed\n'
+  printf 'safe_maintenance_preview_backup_and_cleanup=passed\n'
   printf 'recoverable_uninstall=passed\n'
   printf 'formal_mihomo_state=%s\n' "$formal_mihomo_after"
   printf 'formal_tunnel_state=%s\n' "$formal_tunnel_after"

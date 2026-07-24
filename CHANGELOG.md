@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.0-dev.91
+
+- `vp maintain --dry-run` now previews the recovery point, interrupted-transaction handling, safe repair scope, expired credential removal, oversized log trimming and fixed-prefix stale temporary cleanup without writes.
+- Applying maintenance requires explicit `MAINTAIN` confirmation before layout initialization or backup creation; cancellation is zero-write and the first committed action is a verified recovery point.
+- Maintenance temporary cleanup can be scoped with a validated absolute root and only touches VPS-Node fixed prefixes older than 60 minutes; logs are regular non-symlink files and retain at most 1 MiB.
+- Completion output reports safe repair, expired credential, log and temporary-item counts; if later repair fails, the pre-maintenance recovery point remains available.
+- Regression and isolated real-host acceptance cover preview/cancel zero writes, successful backup/cleanup, invalid database refusal with backup retention and unchanged formal services.
+
 ## 0.2.0-dev.90
 
 - Added `vp preflight`, a single read-only installation readiness page with a clear `can install` or `do not install yet` conclusion.

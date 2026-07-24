@@ -2147,4 +2147,70 @@ PATH="$service_owner_root/bin:$PATH" VP_CONFIG_DIR="$external_uninstall_root/etc
 [ "$(sha256sum "$service_owner_root/services/external-uninstall-core.service" | awk '{print $1}')" = "$external_uninstall_core_hash" ]
 [ "$(sha256sum "$service_owner_root/services/external-uninstall-tunnel.service" | awk '{print $1}')" = "$external_uninstall_tunnel_hash" ]
 
+maintenance_root="$TMP/maintenance-preview"
+maintenance_tmp_root="$TMP/maintenance-temp"
+VP_CONFIG_DIR="$maintenance_root/etc" VP_DATA_DIR="$maintenance_root/lib" \
+  VP_LOG_DIR="$maintenance_root/log" VP_LIB_DIR="$maintenance_root/usr" \
+  VP_SKIP_SERVICE=1 sh "$ROOT/vp.sh" init >/dev/null
+mkdir -p "$maintenance_tmp_root"
+dd if=/dev/zero of="$maintenance_root/log/large.log" bs=1024 count=1100 >/dev/null 2>&1
+dd if=/dev/zero of="$maintenance_root/external.log" bs=1024 count=1100 >/dev/null 2>&1
+ln -s "$maintenance_root/external.log" "$maintenance_root/log/external.err"
+maintenance_external_log_hash="$(sha256sum "$maintenance_root/external.log" | awk '{print $1}')"
+printf 'old temporary data\n' > "$maintenance_tmp_root/vp-node-test.old"
+touch -t 202001010000 "$maintenance_tmp_root/vp-node-test.old"
+find "$maintenance_root" "$maintenance_tmp_root" -type f -exec sha256sum {} \; | sort > "$TMP/maintenance-before.sha256"
+maintenance_preview_output="$(VP_CONFIG_DIR="$maintenance_root/etc" VP_DATA_DIR="$maintenance_root/lib" \
+  VP_LOG_DIR="$maintenance_root/log" VP_LIB_DIR="$maintenance_root/usr" \
+  VP_MAINTENANCE_TMP_ROOT="$maintenance_tmp_root" VP_SKIP_SERVICE=1 \
+  sh "$ROOT/vp.sh" maintain --dry-run)"
+printf '%s\n' "$maintenance_preview_output" | grep -q '一键安全维护预览'
+printf '%s\n' "$maintenance_preview_output" | grep -q '过大日志：1 个'
+printf '%s\n' "$maintenance_preview_output" | grep -q '过期临时项：1 个'
+find "$maintenance_root" "$maintenance_tmp_root" -type f -exec sha256sum {} \; | sort > "$TMP/maintenance-after-preview.sha256"
+cmp "$TMP/maintenance-before.sha256" "$TMP/maintenance-after-preview.sha256"
+[ ! -d "$maintenance_root/lib/backups" ]
+
+if maintenance_cancel_output="$(VP_CONFIG_DIR="$maintenance_root/etc" VP_DATA_DIR="$maintenance_root/lib" \
+  VP_LOG_DIR="$maintenance_root/log" VP_LIB_DIR="$maintenance_root/usr" \
+  VP_MAINTENANCE_TMP_ROOT="$maintenance_tmp_root" VP_MAINTENANCE_CONFIRM=CANCEL VP_SKIP_SERVICE=1 \
+  sh "$ROOT/vp.sh" maintain 2>&1)"; then
+  printf 'cancelled maintenance unexpectedly succeeded\n' >&2
+  exit 1
+fi
+printf '%s\n' "$maintenance_cancel_output" | grep -q '已取消一键维护'
+find "$maintenance_root" "$maintenance_tmp_root" -type f -exec sha256sum {} \; | sort > "$TMP/maintenance-after-cancel.sha256"
+cmp "$TMP/maintenance-before.sha256" "$TMP/maintenance-after-cancel.sha256"
+[ ! -d "$maintenance_root/lib/backups" ]
+
+maintenance_apply_output="$(VP_CONFIG_DIR="$maintenance_root/etc" VP_DATA_DIR="$maintenance_root/lib" \
+  VP_LOG_DIR="$maintenance_root/log" VP_LIB_DIR="$maintenance_root/usr" \
+  VP_MAINTENANCE_TMP_ROOT="$maintenance_tmp_root" VP_MAINTENANCE_CONFIRM=MAINTAIN VP_SKIP_SERVICE=1 \
+  sh "$ROOT/vp.sh" maintain)"
+printf '%s\n' "$maintenance_apply_output" | grep -q '维护完成：安全修复'
+[ "$(wc -c < "$maintenance_root/log/large.log")" -eq 1048576 ]
+[ -L "$maintenance_root/log/external.err" ]
+[ "$(sha256sum "$maintenance_root/external.log" | awk '{print $1}')" = "$maintenance_external_log_hash" ]
+[ ! -e "$maintenance_tmp_root/vp-node-test.old" ]
+maintenance_backup="$(find "$maintenance_root/lib/backups" -name 'vps-node-*.tar.gz' -type f | head -n 1)"
+[ -s "$maintenance_backup" ]
+[ -s "$maintenance_backup.sha256" ]
+(cd "$(dirname "$maintenance_backup")" && sha256sum -c "$(basename "$maintenance_backup").sha256" >/dev/null)
+
+maintenance_fail_root="$TMP/maintenance-failure"
+VP_CONFIG_DIR="$maintenance_fail_root/etc" VP_DATA_DIR="$maintenance_fail_root/lib" \
+  VP_LOG_DIR="$maintenance_fail_root/log" VP_LIB_DIR="$maintenance_fail_root/usr" \
+  VP_SKIP_SERVICE=1 sh "$ROOT/vp.sh" init >/dev/null
+printf 'invalid-node-record\n' > "$maintenance_fail_root/etc/nodes.db"
+maintenance_bad_hash="$(sha256sum "$maintenance_fail_root/etc/nodes.db" | awk '{print $1}')"
+if VP_CONFIG_DIR="$maintenance_fail_root/etc" VP_DATA_DIR="$maintenance_fail_root/lib" \
+  VP_LOG_DIR="$maintenance_fail_root/log" VP_LIB_DIR="$maintenance_fail_root/usr" \
+  VP_MAINTENANCE_TMP_ROOT="$maintenance_tmp_root" VP_MAINTENANCE_CONFIRM=MAINTAIN VP_SKIP_SERVICE=1 \
+  sh "$ROOT/vp.sh" maintain >/dev/null 2>&1; then
+  printf 'maintenance unexpectedly repaired an invalid node database\n' >&2
+  exit 1
+fi
+[ "$(sha256sum "$maintenance_fail_root/etc/nodes.db" | awk '{print $1}')" = "$maintenance_bad_hash" ]
+find "$maintenance_fail_root/lib/backups" -name 'vps-node-*.tar.gz' -type f | grep -q .
+
 printf 'smoke: ok\n'

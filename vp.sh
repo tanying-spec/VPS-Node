@@ -2,7 +2,7 @@
 
 set -u
 
-VP_VERSION="0.2.0-dev.90"
+VP_VERSION="0.2.0-dev.91"
 VP_CONFIG_DIR="${VP_CONFIG_DIR:-/etc/vps-node}"
 VP_DATA_DIR="${VP_DATA_DIR:-/var/lib/vps-node}"
 VP_LOG_DIR="${VP_LOG_DIR:-/var/log/vps-node}"
@@ -3494,7 +3494,7 @@ migrate_from_mihomo_lite() {
 trim_log_file() {
   log_file="$1"
   max_bytes="${2:-1048576}"
-  [ -f "$log_file" ] || return 0
+  [ -f "$log_file" ] && [ ! -L "$log_file" ] || return 0
   size="$(wc -c < "$log_file" 2>/dev/null || printf 0)"
   case "$size" in ''|*[!0-9]*) size=0 ;; esac
   if [ "$size" -gt "$max_bytes" ]; then
@@ -3505,17 +3505,72 @@ trim_log_file() {
 
 maintenance_mode() {
   need_root || return 1
-  init_layout >/dev/null || return 1
+  maintenance_mode_arg="${1:-}"
+  case "$maintenance_mode_arg" in ''|--dry-run) ;; *) error "用法：vp maintain [--dry-run]"; return 2 ;; esac
+  maintenance_tmp_root="${VP_MAINTENANCE_TMP_ROOT:-/tmp}"
+  case "$maintenance_tmp_root" in /) error "维护临时目录不能是根目录。"; return 1 ;; /*) ;; *) error "维护临时目录必须是绝对路径。"; return 1 ;; esac
+
+  maintenance_expired="$(rotation_count expired)"
+  maintenance_large_logs=0
+  maintenance_large_bytes=0
+  if [ -d "$VP_LOG_DIR" ]; then
+    for log_file in "$VP_LOG_DIR"/*.log "$VP_LOG_DIR"/*.err; do
+      [ -f "$log_file" ] && [ ! -L "$log_file" ] || continue
+      maintenance_log_size="$(wc -c < "$log_file" 2>/dev/null || printf 0)"
+      case "$maintenance_log_size" in ''|*[!0-9]*) maintenance_log_size=0 ;; esac
+      if [ "$maintenance_log_size" -gt 1048576 ]; then
+        maintenance_large_logs=$((maintenance_large_logs + 1))
+        maintenance_large_bytes=$((maintenance_large_bytes + maintenance_log_size - 1048576))
+      fi
+    done
+  fi
+  maintenance_temp_count=0
+  for temp_path in "$maintenance_tmp_root"/vp-node-test.* "$maintenance_tmp_root"/vp-benchmark.* "$maintenance_tmp_root"/vp-network-verify.* "$maintenance_tmp_root"/vp-subscription.* "$maintenance_tmp_root"/vp-backup.* "$maintenance_tmp_root"/vp-restore.* "$maintenance_tmp_root"/vp-repair-config.* "$maintenance_tmp_root"/vp-repair-config-old.* "$maintenance_tmp_root"/vp-expected-config.* "$maintenance_tmp_root"/vp-core-env.* "$maintenance_tmp_root"/vp-tunnel-token.* "$maintenance_tmp_root"/vp-tunnel-runner.* "$maintenance_tmp_root"/vp-reality-key.*; do
+    [ -e "$temp_path" ] || [ -L "$temp_path" ] || continue
+    if [ -n "$(find "$temp_path" -maxdepth 0 -mmin +60 -print 2>/dev/null)" ]; then
+      maintenance_temp_count=$((maintenance_temp_count + 1))
+    fi
+  done
+  maintenance_tx="无"
+  if [ -d "$VP_TX_ACTIVE" ]; then
+    maintenance_tx_pid="$(cat "$VP_TX_ACTIVE/pid" 2>/dev/null || true)"
+    if pid_is_alive "$maintenance_tx_pid"; then maintenance_tx="正在运行（维护将拒绝接管）"; else maintenance_tx="已中断（将先恢复稳定状态）"; fi
+  fi
+
+  printf '一键安全维护预览：\n'
+  printf '  恢复点：操作前创建到 %s\n' "$VP_BACKUP_DIR"
+  printf '  状态修复：恢复中断事务、修正敏感权限、重新适配资源、重建漂移配置并按需重启服务\n'
+  printf '  当前事务：%s\n' "$maintenance_tx"
+  printf '  到期旧凭据：%s 条（将永久移除）\n' "$maintenance_expired"
+  printf '  过大日志：%s 个（最多保留每个 1 MiB，预计释放约 %s KiB）\n' "$maintenance_large_logs" "$((maintenance_large_bytes / 1024))"
+  printf '  过期临时项：%s 个（仅清理 %s 下 VPS-Node 固定前缀且超过 60 分钟的项目）\n' "$maintenance_temp_count" "$maintenance_tmp_root"
+  printf '  不会修改：节点地址、当前 UUID、Reality 密钥、Tunnel Token 或未到期旧凭据\n'
+  if [ "$maintenance_mode_arg" = --dry-run ]; then
+    ok "维护预览完成，未创建恢复点或修改任何文件、服务和凭据。"
+    return 0
+  fi
+  if [ -n "${VP_MAINTENANCE_CONFIRM:-}" ]; then
+    maintenance_confirm="$VP_MAINTENANCE_CONFIRM"
+  else
+    printf '输入 MAINTAIN 确认创建恢复点并执行维护：'
+    read -r maintenance_confirm || true
+  fi
+  if [ "$maintenance_confirm" != MAINTAIN ]; then
+    warn "已取消一键维护，未创建恢复点或修改项目状态。"
+    return 2
+  fi
+
   info "安全维护开始：先创建恢复点。"
   create_backup "$VP_BACKUP_DIR" || { error "备份失败，维护已停止。"; return 1; }
   recover_state_transaction || return 1
   safe_repair || return 1
+  maintenance_repaired="$repaired"
   finalize_rotation --expired || return 1
 
   trimmed=0
   if [ -d "$VP_LOG_DIR" ]; then
     for log_file in "$VP_LOG_DIR"/*.log "$VP_LOG_DIR"/*.err; do
-      [ -f "$log_file" ] || continue
+      [ -f "$log_file" ] && [ ! -L "$log_file" ] || continue
       before="$(wc -c < "$log_file" 2>/dev/null || printf 0)"
       trim_log_file "$log_file" 1048576
       after="$(wc -c < "$log_file" 2>/dev/null || printf 0)"
@@ -3524,14 +3579,14 @@ maintenance_mode() {
   fi
 
   temp_removed=0
-  for temp_path in /tmp/vp-node-test.* /tmp/vp-benchmark.* /tmp/vp-network-verify.* /tmp/vp-subscription.* /tmp/vp-backup.* /tmp/vp-restore.* /tmp/vp-repair-config.* /tmp/vp-repair-config-old.* /tmp/vp-expected-config.* /tmp/vp-core-env.* /tmp/vp-tunnel-token.* /tmp/vp-tunnel-runner.* /tmp/vp-reality-key.*; do
-    [ -e "$temp_path" ] || continue
-    if find "$temp_path" -maxdepth 0 -mmin +60 >/dev/null 2>&1 && [ -n "$(find "$temp_path" -maxdepth 0 -mmin +60 -print 2>/dev/null)" ]; then
+  for temp_path in "$maintenance_tmp_root"/vp-node-test.* "$maintenance_tmp_root"/vp-benchmark.* "$maintenance_tmp_root"/vp-network-verify.* "$maintenance_tmp_root"/vp-subscription.* "$maintenance_tmp_root"/vp-backup.* "$maintenance_tmp_root"/vp-restore.* "$maintenance_tmp_root"/vp-repair-config.* "$maintenance_tmp_root"/vp-repair-config-old.* "$maintenance_tmp_root"/vp-expected-config.* "$maintenance_tmp_root"/vp-core-env.* "$maintenance_tmp_root"/vp-tunnel-token.* "$maintenance_tmp_root"/vp-tunnel-runner.* "$maintenance_tmp_root"/vp-reality-key.*; do
+    [ -e "$temp_path" ] || [ -L "$temp_path" ] || continue
+    if [ -n "$(find "$temp_path" -maxdepth 0 -mmin +60 -print 2>/dev/null)" ]; then
       rm -rf "$temp_path"
       temp_removed=$((temp_removed + 1))
     fi
   done
-  ok "维护清理完成：截断 $trimmed 个过大日志，删除 $temp_removed 个过期临时项。"
+  ok "维护完成：安全修复 $maintenance_repaired 项，完成到期凭据 $maintenance_expired 条，截断 $trimmed 个过大日志，删除 $temp_removed 个过期临时项。"
   layered_health_check
 }
 
@@ -5556,7 +5611,7 @@ case "${1:-}" in
   backup-prune) shift; backup_prune "$@" ;;
   restore) shift; restore_backup "$@" ;;
   migrate-mh|migrate-from-mh) shift; migrate_from_mihomo_lite "$@" ;;
-  maintain|maintenance) maintenance_mode ;;
+  maintain|maintenance) shift; maintenance_mode "$@" ;;
   report|diagnostic) shift; diagnostic_report "$@" ;;
   self-heal|selfheal) shift; self_heal_once "$@" ;;
   monitor-install|watchdog-install) install_stability_monitor ;;
