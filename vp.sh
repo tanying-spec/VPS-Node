@@ -2,7 +2,7 @@
 
 set -u
 
-VP_VERSION="0.2.0-dev.61"
+VP_VERSION="0.2.0-dev.62"
 VP_CONFIG_DIR="${VP_CONFIG_DIR:-/etc/vps-node}"
 VP_DATA_DIR="${VP_DATA_DIR:-/var/lib/vps-node}"
 VP_LOG_DIR="${VP_LOG_DIR:-/var/log/vps-node}"
@@ -2501,6 +2501,8 @@ restore_backup() {
   done
   [ -r "$archive" ] || { error "备份文件不存在。"; return 1; }
   [ -f "$archive" ] && [ ! -L "$archive" ] || { error "备份必须是普通文件，不能使用符号链接。"; return 1; }
+  approved_restore_archive_state="$(managed_file_state "$archive")"
+  approved_restore_sidecar_state="$(managed_file_state "$archive.sha256")"
   if [ -e "$archive.sha256" ]; then
     [ -f "$archive.sha256" ] && [ ! -L "$archive.sha256" ] && [ -r "$archive.sha256" ] || {
       error "备份 SHA-256 文件不是可读普通文件，拒绝恢复。"
@@ -2522,6 +2524,11 @@ restore_backup() {
   cleanup_restore() { rm -rf "$package"; }
   trap cleanup_restore EXIT HUP INT TERM
   tar -xzf "$archive" -C "$package" || { cleanup_restore; trap - EXIT HUP INT TERM; error "备份无法解压。"; return 1; }
+  if [ "${VP_ALLOW_TEST_HOOKS:-0}" = 1 ] && [ "${VP_TEST_RESTORE_SOURCE_RACE:-}" = after-extract ]; then
+    printf '\nchanged-after-extract\n' >> "$archive"
+  fi
+  [ "$(managed_file_state "$archive")" = "$approved_restore_archive_state" ] || { cleanup_restore; trap - EXIT HUP INT TERM; error "备份文件在校验或解压期间发生变化，已中止恢复。"; return 1; }
+  [ "$(managed_file_state "$archive.sha256")" = "$approved_restore_sidecar_state" ] || { cleanup_restore; trap - EXIT HUP INT TERM; error "备份 SHA-256 文件在校验后发生变化，已中止恢复。"; return 1; }
   [ -f "$package/manifest.env" ] && grep -q '^FORMAT_VERSION=1$' "$package/manifest.env" || { cleanup_restore; trap - EXIT HUP INT TERM; error "不支持该备份格式。"; return 1; }
   [ -f "$package/config/nodes.db" ] && [ -f "$package/config/state.env" ] || { cleanup_restore; trap - EXIT HUP INT TERM; error "备份缺少必要状态文件。"; return 1; }
   [ -f "$package/config/credential-rotations.db" ] || : > "$package/config/credential-rotations.db"
@@ -2566,6 +2573,12 @@ restore_backup() {
       return 2
     }
   fi
+
+  if [ "${VP_ALLOW_TEST_HOOKS:-0}" = 1 ] && [ "${VP_TEST_RESTORE_SOURCE_RACE:-}" = after-confirm ]; then
+    printf '\nchanged-after-confirm\n' >> "$archive"
+  fi
+  [ "$(managed_file_state "$archive")" = "$approved_restore_archive_state" ] || { cleanup_restore; trap - EXIT HUP INT TERM; error "已预览的备份文件在确认前后发生变化，当前状态未修改。"; return 1; }
+  [ "$(managed_file_state "$archive.sha256")" = "$approved_restore_sidecar_state" ] || { cleanup_restore; trap - EXIT HUP INT TERM; error "已验证的备份 SHA-256 文件在确认前后发生变化，当前状态未修改。"; return 1; }
 
   init_layout >/dev/null || { cleanup_restore; trap - EXIT HUP INT TERM; return 1; }
   begin_state_transaction backup-restore || { cleanup_restore; trap - EXIT HUP INT TERM; return 1; }

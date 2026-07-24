@@ -704,6 +704,23 @@ restore_preview="$(VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LO
 printf '%s\n' "$restore_preview" | grep -q '^恢复预览：'
 printf '%s\n' "$restore_preview" | grep -q '未修改任何文件或服务'
 grep -q '^BACKUP_TEST_MARKER=changed$' "$TMP/dns-etc/state.env"
+for restore_race_phase in after-extract after-confirm; do
+  restore_race_backup="$TMP/restore-race-$restore_race_phase.tar.gz"
+  cp "$portable_backup" "$restore_race_backup"
+  printf '%s  %s\n' "$(sha256sum "$restore_race_backup" | awk '{print $1}')" "$(basename "$restore_race_backup")" > "$restore_race_backup.sha256"
+  restore_race_state_hash="$(sha256sum "$TMP/dns-etc/state.env" | awk '{print $1}')"
+  restore_race_sidecar_hash="$(sha256sum "$restore_race_backup.sha256" | awk '{print $1}')"
+  if VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log" \
+    VP_LIB_DIR="$TMP/dns-usr" VP_CORE_BIN="$TMP/dns-usr/bin/mihomo" VP_SKIP_SERVICE=1 \
+    VP_RESTORE_CONFIRM=RESTORE VP_ALLOW_TEST_HOOKS=1 VP_TEST_RESTORE_SOURCE_RACE="$restore_race_phase" \
+    sh "$ROOT/vp.sh" restore "$restore_race_backup" --apply >/dev/null 2>&1; then
+    printf 'restore accepted source mutation: %s\n' "$restore_race_phase" >&2
+    exit 1
+  fi
+  [ "$(sha256sum "$TMP/dns-etc/state.env" | awk '{print $1}')" = "$restore_race_state_hash" ]
+  [ "$(sha256sum "$restore_race_backup.sha256" | awk '{print $1}')" = "$restore_race_sidecar_hash" ]
+  tail -c 64 "$restore_race_backup" | grep -q "changed-$restore_race_phase"
+done
 VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log" \
 VP_LIB_DIR="$TMP/dns-usr" VP_CORE_BIN="$TMP/dns-usr/bin/mihomo" VP_SKIP_SERVICE=1 \
 VP_RESTORE_CONFIRM=RESTORE sh "$ROOT/vp.sh" restore "$portable_backup" --apply >/dev/null

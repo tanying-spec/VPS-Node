@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.0-dev.62
+
+- Backup restore now binds the archive and SHA-256 sidecar file type, symlink identity and content hash to the validated preview.
+- Both files are rechecked after extraction and again after `RESTORE` confirmation, before layout initialization or state-transaction creation.
+- An archive changed while tar is reading it or while the user reviews the preview is rejected even if the extracted snapshot happens to parse successfully.
+- Race-injection tests prove after-extract and after-confirm mutations leave the current VPS-Node state byte-identical and do not alter the sidecar.
+
 ## 0.2.0-dev.61
 
 - CLI rollback now binds the validated active CLI, rollback script and checksum sidecar states to the subsequent three-file exchange.
