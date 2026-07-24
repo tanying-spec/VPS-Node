@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.0-dev.89
+
+- Mihomo and Cloudflare Tunnel installation now checks service-manager support plus runner/service ownership immediately after `INSTALL` confirmation and before dependencies, layout initialization, downloads or Token reads.
+- External same-name runner/service conflicts therefore fail with zero project writes and without replacing binaries, creating secrets or prompting for credentials.
+- Regression tests bind the external files by SHA-256 and verify that configuration, data, log, binary and secret paths remain absent after a rejected install.
+- Current real-host evidence now records the isolated Reality/OpenRC/lifecycle acceptance and real DNS public-to-system fallback results, while explicitly preserving the host cgroup and IPv6 limitations instead of treating them as passes.
+
 ## 0.2.0-dev.88
 
 - README now stays focused on the project, current capabilities, installation and usage; detailed release history remains in this changelog.

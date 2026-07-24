@@ -131,7 +131,7 @@ VP_LOG_DIR="$cancel_create_root/log" VP_LIB_DIR="$cancel_create_root/usr" \
 VP_SKIP_SERVICE=1 sh "$ROOT/vp.sh" init >/dev/null
 cancel_create_nodes_hash="$(sha256sum "$cancel_create_root/etc/nodes.db" | awk '{print $1}')"
 cancel_create_rotations_hash="$(sha256sum "$cancel_create_root/etc/credential-rotations.db" | awk '{print $1}')"
-cancel_create_config_hash="$(sha256sum "$cancel_create_root/etc/generated/mihomo.yaml" | awk '{print $1}')"
+[ ! -e "$cancel_create_root/etc/generated/mihomo.yaml" ]
 cancel_create_state_hash="$(sha256sum "$cancel_create_root/etc/state.env" | awk '{print $1}')"
 cancelled_reality_create="$(VP_CONFIG_DIR="$cancel_create_root/etc" VP_DATA_DIR="$cancel_create_root/lib" \
   VP_LOG_DIR="$cancel_create_root/log" VP_LIB_DIR="$cancel_create_root/usr" VP_CORE_BIN="$fake_core" \
@@ -145,7 +145,7 @@ cancelled_argo_create="$(VP_CONFIG_DIR="$cancel_create_root/etc" VP_DATA_DIR="$c
 printf '%s\n' "$cancelled_argo_create" | grep -q '已取消节点创建'
 [ "$(sha256sum "$cancel_create_root/etc/nodes.db" | awk '{print $1}')" = "$cancel_create_nodes_hash" ]
 [ "$(sha256sum "$cancel_create_root/etc/credential-rotations.db" | awk '{print $1}')" = "$cancel_create_rotations_hash" ]
-[ "$(sha256sum "$cancel_create_root/etc/generated/mihomo.yaml" | awk '{print $1}')" = "$cancel_create_config_hash" ]
+[ ! -e "$cancel_create_root/etc/generated/mihomo.yaml" ]
 [ "$(sha256sum "$cancel_create_root/etc/state.env" | awk '{print $1}')" = "$cancel_create_state_hash" ]
 [ ! -e "$cancel_create_root/etc/transactions/active" ]
 core_install_race="$TMP/core-install-race"
@@ -1497,7 +1497,7 @@ printf '%s\n' "delete-target|argo|77777777-7777-4777-8777-777777777777|88888888-
 delete_race_state_hash="$(sha256sum "$delete_race_root/etc/state.env" | awk '{print $1}')"
 delete_race_rotations_hash="$(sha256sum "$delete_race_root/etc/credential-rotations.db" | awk '{print $1}')"
 delete_race_nodes_hash="$(sha256sum "$delete_race_root/etc/nodes.db" | awk '{print $1}')"
-delete_race_config_hash="$(sha256sum "$delete_race_root/etc/generated/mihomo.yaml" | awk '{print $1}')"
+[ ! -e "$delete_race_root/etc/generated/mihomo.yaml" ]
 cancelled_delete="$(VP_CONFIG_DIR="$delete_race_root/etc" VP_DATA_DIR="$delete_race_root/lib" \
   VP_LOG_DIR="$delete_race_root/log" VP_LIB_DIR="$delete_race_root/usr" VP_SKIP_SERVICE=1 \
   VP_DELETE_CONFIRM=CANCEL sh "$ROOT/vp.sh" delete delete-target 2>&1 || true)"
@@ -1505,7 +1505,7 @@ printf '%s\n' "$cancelled_delete" | grep -q '关联轮换记录：1 条'
 printf '%s\n' "$cancelled_delete" | grep -q '已取消节点删除'
 [ "$(sha256sum "$delete_race_root/etc/nodes.db" | awk '{print $1}')" = "$delete_race_nodes_hash" ]
 [ "$(sha256sum "$delete_race_root/etc/credential-rotations.db" | awk '{print $1}')" = "$delete_race_rotations_hash" ]
-[ "$(sha256sum "$delete_race_root/etc/generated/mihomo.yaml" | awk '{print $1}')" = "$delete_race_config_hash" ]
+[ ! -e "$delete_race_root/etc/generated/mihomo.yaml" ]
 [ "$(sha256sum "$delete_race_root/etc/state.env" | awk '{print $1}')" = "$delete_race_state_hash" ]
 [ ! -e "$delete_race_root/etc/transactions/active" ]
 if VP_CONFIG_DIR="$delete_race_root/etc" VP_DATA_DIR="$delete_race_root/lib" \
@@ -1530,14 +1530,14 @@ printf '%s\n' "$edit_race_record" > "$edit_race_root/etc/nodes.db"
 edit_race_state_hash="$(sha256sum "$edit_race_root/etc/state.env" | awk '{print $1}')"
 edit_race_rotations_hash="$(sha256sum "$edit_race_root/etc/credential-rotations.db" | awk '{print $1}')"
 edit_race_nodes_hash="$(sha256sum "$edit_race_root/etc/nodes.db" | awk '{print $1}')"
-edit_race_config_hash="$(sha256sum "$edit_race_root/etc/generated/mihomo.yaml" | awk '{print $1}')"
+[ ! -e "$edit_race_root/etc/generated/mihomo.yaml" ]
 cancelled_edit="$(VP_CONFIG_DIR="$edit_race_root/etc" VP_DATA_DIR="$edit_race_root/lib" \
   VP_LOG_DIR="$edit_race_root/log" VP_LIB_DIR="$edit_race_root/usr" VP_SKIP_SERVICE=1 \
   VP_EDIT_CONFIRM=CANCEL sh "$ROOT/vp.sh" edit edit-target edited-target 29992 changed.example.com /changed 2>&1 || true)"
 printf '%s\n' "$cancelled_edit" | grep -q '已取消节点修改'
 [ "$(sha256sum "$edit_race_root/etc/nodes.db" | awk '{print $1}')" = "$edit_race_nodes_hash" ]
 [ "$(sha256sum "$edit_race_root/etc/credential-rotations.db" | awk '{print $1}')" = "$edit_race_rotations_hash" ]
-[ "$(sha256sum "$edit_race_root/etc/generated/mihomo.yaml" | awk '{print $1}')" = "$edit_race_config_hash" ]
+[ ! -e "$edit_race_root/etc/generated/mihomo.yaml" ]
 [ "$(sha256sum "$edit_race_root/etc/state.env" | awk '{print $1}')" = "$edit_race_state_hash" ]
 [ ! -e "$edit_race_root/etc/transactions/active" ]
 if VP_CONFIG_DIR="$edit_race_root/etc" VP_DATA_DIR="$edit_race_root/lib" \
@@ -1563,14 +1563,14 @@ printf '%s\n' "$rotate_race_record" > "$rotate_race_root/etc/nodes.db"
 rotate_race_state_hash="$(sha256sum "$rotate_race_root/etc/state.env" | awk '{print $1}')"
 rotate_cancel_nodes_hash="$(sha256sum "$rotate_race_root/etc/nodes.db" | awk '{print $1}')"
 rotate_cancel_rotations_hash="$(sha256sum "$rotate_race_root/etc/credential-rotations.db" | awk '{print $1}')"
-rotate_cancel_config_hash="$(sha256sum "$rotate_race_root/etc/generated/mihomo.yaml" | awk '{print $1}')"
+[ ! -e "$rotate_race_root/etc/generated/mihomo.yaml" ]
 cancelled_rotation="$(VP_CONFIG_DIR="$rotate_race_root/etc" VP_DATA_DIR="$rotate_race_root/lib" \
   VP_LOG_DIR="$rotate_race_root/log" VP_LIB_DIR="$rotate_race_root/usr" VP_SKIP_SERVICE=1 \
   VP_ROTATION_START_CONFIRM=CANCEL sh "$ROOT/vp.sh" rotate rotate-target 24 2>&1 || true)"
 printf '%s\n' "$cancelled_rotation" | grep -q '已取消凭据轮换'
 [ "$(sha256sum "$rotate_race_root/etc/nodes.db" | awk '{print $1}')" = "$rotate_cancel_nodes_hash" ]
 [ "$(sha256sum "$rotate_race_root/etc/credential-rotations.db" | awk '{print $1}')" = "$rotate_cancel_rotations_hash" ]
-[ "$(sha256sum "$rotate_race_root/etc/generated/mihomo.yaml" | awk '{print $1}')" = "$rotate_cancel_config_hash" ]
+[ ! -e "$rotate_race_root/etc/generated/mihomo.yaml" ]
 [ "$(sha256sum "$rotate_race_root/etc/state.env" | awk '{print $1}')" = "$rotate_race_state_hash" ]
 [ ! -e "$rotate_race_root/etc/transactions/active" ]
 if VP_CONFIG_DIR="$rotate_race_root/etc" VP_DATA_DIR="$rotate_race_root/lib" \
@@ -2037,32 +2037,42 @@ mkdir -p "$external_core_runner_root/usr/bin"
 printf '#!/bin/sh\necho external-core-runner\n' > "$external_core_runner_root/usr/bin/mihomo-run"
 chmod 700 "$external_core_runner_root/usr/bin/mihomo-run"
 external_core_runner_hash="$(sha256sum "$external_core_runner_root/usr/bin/mihomo-run" | awk '{print $1}')"
-if PATH="$service_owner_root/bin:$PATH" VP_CONFIG_DIR="$external_core_runner_root/etc" \
+if external_core_conflict_output="$(PATH="$service_owner_root/bin:$PATH" VP_CONFIG_DIR="$external_core_runner_root/etc" \
   VP_DATA_DIR="$external_core_runner_root/lib" VP_LOG_DIR="$external_core_runner_root/log" \
   VP_LIB_DIR="$external_core_runner_root/usr" VP_CORE_BIN="$external_core_runner_root/usr/bin/mihomo" \
   VP_CORE_BACKUP_BIN="$external_core_runner_root/usr/bin/mihomo.previous" VP_CORE_SOURCE_BIN="$fake_core" \
   VP_CORE_SYSTEMD_SERVICE="$service_owner_root/services/external-core-runner.service" \
-  VP_ALLOW_TEST_HOOKS=1 VP_SERVICE_MANAGER_OVERRIDE=systemd sh "$ROOT/vp.sh" core-install >/dev/null 2>&1; then
+  VP_ALLOW_TEST_HOOKS=1 VP_SERVICE_MANAGER_OVERRIDE=systemd sh "$ROOT/vp.sh" core-install 2>&1)"; then
   printf 'core install overwrote an external runner\n' >&2
   exit 1
 fi
+printf '%s\n' "$external_core_conflict_output" | grep -q '安装前预检已中止'
 [ "$(sha256sum "$external_core_runner_root/usr/bin/mihomo-run" | awk '{print $1}')" = "$external_core_runner_hash" ]
+[ ! -e "$external_core_runner_root/etc" ]
+[ ! -e "$external_core_runner_root/lib" ]
+[ ! -e "$external_core_runner_root/log" ]
+[ ! -e "$external_core_runner_root/usr/bin/mihomo" ]
 
 external_tunnel_service_root="$service_owner_root/external-tunnel-service"
 mkdir -p "$external_tunnel_service_root/usr/bin" "$external_tunnel_service_root/etc"
 printf '[Unit]\nDescription=external tunnel\n' > "$service_owner_root/services/external-tunnel.service"
 external_tunnel_service_hash="$(sha256sum "$service_owner_root/services/external-tunnel.service" | awk '{print $1}')"
 printf 'test.token_value-123\n' > "$external_tunnel_service_root/token"
-if PATH="$service_owner_root/bin:$PATH" VP_CONFIG_DIR="$external_tunnel_service_root/etc" \
+if external_tunnel_conflict_output="$(PATH="$service_owner_root/bin:$PATH" VP_CONFIG_DIR="$external_tunnel_service_root/etc" \
   VP_DATA_DIR="$external_tunnel_service_root/lib" VP_LOG_DIR="$external_tunnel_service_root/log" \
   VP_LIB_DIR="$external_tunnel_service_root/usr" VP_TUNNEL_BIN="$external_tunnel_service_root/usr/bin/cloudflared" \
   VP_TUNNEL_BACKUP_BIN="$external_tunnel_service_root/usr/bin/cloudflared.previous" \
   VP_TUNNEL_SOURCE_BIN="$service_owner_root/fake-cloudflared" VP_TUNNEL_SYSTEMD_SERVICE="$service_owner_root/services/external-tunnel.service" \
-  VP_ALLOW_TEST_HOOKS=1 VP_SERVICE_MANAGER_OVERRIDE=systemd sh "$ROOT/vp.sh" tunnel-install "$external_tunnel_service_root/token" >/dev/null 2>&1; then
+  VP_ALLOW_TEST_HOOKS=1 VP_SERVICE_MANAGER_OVERRIDE=systemd sh "$ROOT/vp.sh" tunnel-install "$external_tunnel_service_root/token" 2>&1)"; then
   printf 'tunnel install overwrote an external service definition\n' >&2
   exit 1
 fi
+printf '%s\n' "$external_tunnel_conflict_output" | grep -q '安装前预检已中止'
 [ "$(sha256sum "$service_owner_root/services/external-tunnel.service" | awk '{print $1}')" = "$external_tunnel_service_hash" ]
+[ ! -e "$external_tunnel_service_root/lib" ]
+[ ! -e "$external_tunnel_service_root/log" ]
+[ ! -e "$external_tunnel_service_root/usr/bin/cloudflared" ]
+[ ! -e "$external_tunnel_service_root/etc/secrets" ]
 
 external_uninstall_root="$service_owner_root/external-uninstall"
 mkdir -p "$external_uninstall_root"

@@ -2,7 +2,7 @@
 
 set -u
 
-VP_VERSION="0.2.0-dev.88"
+VP_VERSION="0.2.0-dev.89"
 VP_CONFIG_DIR="${VP_CONFIG_DIR:-/etc/vps-node}"
 VP_DATA_DIR="${VP_DATA_DIR:-/var/lib/vps-node}"
 VP_LOG_DIR="${VP_LOG_DIR:-/var/log/vps-node}"
@@ -634,6 +634,38 @@ tunnel_runner_owned() {
   grep -Fq "exec \"$VP_TUNNEL_BIN\" tunnel --no-autoupdate" "$VP_TUNNEL_RUNNER" 2>/dev/null
 }
 
+preflight_core_service_conflicts() {
+  [ "${VP_SKIP_SERVICE:-0}" = "1" ] && return 0
+  preflight_core_manager="$(service_manager)"
+  case "$preflight_core_manager" in
+    systemd) preflight_core_service_target="$VP_CORE_SYSTEMD_SERVICE" ;;
+    openrc) preflight_core_service_target="$VP_CORE_OPENRC_SERVICE" ;;
+    *) error "无法安装服务：系统不支持 systemd 或 OpenRC。"; return 1 ;;
+  esac
+  if [ -e "$VP_CORE_RUNNER" ] || [ -L "$VP_CORE_RUNNER" ]; then
+    core_runner_owned || { error "Mihomo 服务运行器已被其他任务占用，安装前预检已中止：$VP_CORE_RUNNER"; return 1; }
+  fi
+  if [ -e "$preflight_core_service_target" ] || [ -L "$preflight_core_service_target" ]; then
+    core_service_file_owned "$preflight_core_service_target" || { error "Mihomo 同名服务定义不属于 VPS-Node，安装前预检已中止：$preflight_core_service_target"; return 1; }
+  fi
+}
+
+preflight_tunnel_service_conflicts() {
+  [ "${VP_SKIP_SERVICE:-0}" = "1" ] && return 0
+  preflight_tunnel_manager="$(service_manager)"
+  case "$preflight_tunnel_manager" in
+    systemd) preflight_tunnel_service_target="$VP_TUNNEL_SYSTEMD_SERVICE" ;;
+    openrc) preflight_tunnel_service_target="$VP_TUNNEL_OPENRC_SERVICE" ;;
+    *) error "无法安装 Tunnel 服务：系统不支持 systemd 或 OpenRC。"; return 1 ;;
+  esac
+  if [ -e "$VP_TUNNEL_RUNNER" ] || [ -L "$VP_TUNNEL_RUNNER" ]; then
+    tunnel_runner_owned || { error "Tunnel 服务运行器已被其他任务占用，安装前预检已中止：$VP_TUNNEL_RUNNER"; return 1; }
+  fi
+  if [ -e "$preflight_tunnel_service_target" ] || [ -L "$preflight_tunnel_service_target" ]; then
+    tunnel_service_file_owned "$preflight_tunnel_service_target" || { error "Tunnel 同名服务定义不属于 VPS-Node，安装前预检已中止：$preflight_tunnel_service_target"; return 1; }
+  fi
+}
+
 core_process_running() {
   if command -v pgrep >/dev/null 2>&1; then
     pgrep -f "$VP_CORE_BIN.*$VP_CORE_CONFIG" >/dev/null 2>&1
@@ -1232,6 +1264,7 @@ tunnel_install() {
     warn "已取消 Tunnel 安装，未下载文件或修改项目状态。"
     return 2
   fi
+  preflight_tunnel_service_conflicts || return 1
   approved_tunnel_install_current_state="$(managed_file_state "$VP_TUNNEL_BIN")"
   approved_tunnel_install_backup_state="$(managed_file_state "$VP_TUNNEL_BACKUP_BIN")"
   command -v curl >/dev/null 2>&1 || install_packages ca-certificates curl || return 1
@@ -1643,6 +1676,7 @@ core_install() {
     warn "已取消 Mihomo 内核安装，未下载文件或修改项目状态。"
     return 2
   fi
+  preflight_core_service_conflicts || return 1
   approved_core_install_current_state="$(managed_file_state "$VP_CORE_BIN")"
   approved_core_install_backup_state="$(managed_file_state "$VP_CORE_BACKUP_BIN")"
   ensure_runtime_dependencies || return 1
