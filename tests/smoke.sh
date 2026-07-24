@@ -1110,6 +1110,40 @@ printf '%s\n' "$ready_version_status" | grep -q "回滚版本：$CURRENT_VERSION
 rollback_cli_hash="$(sha256sum "$update_root/installed-vp" | awk '{print $1}')"
 rollback_backup_hash="$(sha256sum "$update_root/installed-vp.previous" | awk '{print $1}')"
 rollback_sidecar_hash="$(sha256sum "$update_root/installed-vp.previous.sha256" | awk '{print $1}')"
+
+rollback_source_race_cli="$update_root/rollback-source-race/vp"
+mkdir -p "$(dirname "$rollback_source_race_cli")"
+cp "$update_root/installed-vp" "$rollback_source_race_cli"
+cp "$update_root/installed-vp.previous" "$rollback_source_race_cli.previous"
+printf '%s  vp.previous\n' "$(sha256sum "$rollback_source_race_cli.previous" | awk '{print $1}')" > "$rollback_source_race_cli.previous.sha256"
+rollback_source_current_hash="$(sha256sum "$rollback_source_race_cli" | awk '{print $1}')"
+rollback_source_sidecar_hash="$(sha256sum "$rollback_source_race_cli.previous.sha256" | awk '{print $1}')"
+if VP_CONFIG_DIR="$TMP/etc" VP_CLI_PATH="$rollback_source_race_cli" \
+  VP_CLI_BACKUP_PATH="$rollback_source_race_cli.previous" VP_ALLOW_TEST_HOOKS=1 \
+  VP_TEST_CLI_ROLLBACK_SOURCE_RACE=1 sh "$ROOT/vp.sh" rollback >/dev/null 2>&1; then
+  printf 'CLI rollback accepted a source changed after validation\n' >&2
+  exit 1
+fi
+[ "$(sha256sum "$rollback_source_race_cli" | awk '{print $1}')" = "$rollback_source_current_hash" ]
+grep -q '^changed-after-rollback-validation$' "$rollback_source_race_cli.previous"
+[ "$(sha256sum "$rollback_source_race_cli.previous.sha256" | awk '{print $1}')" = "$rollback_source_sidecar_hash" ]
+
+rollback_commit_race_cli="$update_root/rollback-commit-race/vp"
+mkdir -p "$(dirname "$rollback_commit_race_cli")"
+cp "$update_root/installed-vp.previous" "$rollback_commit_race_cli.previous"
+printf '%s  vp.previous\n' "$(sha256sum "$rollback_commit_race_cli.previous" | awk '{print $1}')" > "$rollback_commit_race_cli.previous.sha256"
+rollback_commit_backup_hash="$(sha256sum "$rollback_commit_race_cli.previous" | awk '{print $1}')"
+rollback_commit_sidecar_hash="$(sha256sum "$rollback_commit_race_cli.previous.sha256" | awk '{print $1}')"
+if VP_CONFIG_DIR="$TMP/etc" VP_CLI_PATH="$rollback_commit_race_cli" \
+  VP_CLI_BACKUP_PATH="$rollback_commit_race_cli.previous" VP_ALLOW_TEST_HOOKS=1 \
+  VP_TEST_CLI_ROLLBACK_COMMIT_RACE=1 sh "$ROOT/vp.sh" rollback >/dev/null 2>&1; then
+  printf 'CLI rollback overwrote a target created at commit time\n' >&2
+  exit 1
+fi
+grep -q '^created-at-rollback-commit$' "$rollback_commit_race_cli"
+[ "$(sha256sum "$rollback_commit_race_cli.previous" | awk '{print $1}')" = "$rollback_commit_backup_hash" ]
+[ "$(sha256sum "$rollback_commit_race_cli.previous.sha256" | awk '{print $1}')" = "$rollback_commit_sidecar_hash" ]
+
 for rollback_fail_phase in after-cli after-backup; do
   if VP_CONFIG_DIR="$TMP/etc" VP_CLI_PATH="$update_root/installed-vp" \
     VP_CLI_BACKUP_PATH="$update_root/installed-vp.previous" VP_ALLOW_TEST_HOOKS=1 \

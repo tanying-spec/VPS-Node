@@ -2,7 +2,7 @@
 
 set -u
 
-VP_VERSION="0.2.0-dev.60"
+VP_VERSION="0.2.0-dev.61"
 VP_CONFIG_DIR="${VP_CONFIG_DIR:-/etc/vps-node}"
 VP_DATA_DIR="${VP_DATA_DIR:-/var/lib/vps-node}"
 VP_LOG_DIR="${VP_LOG_DIR:-/var/log/vps-node}"
@@ -3382,6 +3382,9 @@ rollback_cli() {
     error "当前脚本、回滚脚本和校验文件路径必须彼此不同。"
     return 1
   fi
+  approved_rollback_cli_state="$(managed_file_state "$VP_CLI_PATH")"
+  approved_rollback_backup_state="$(managed_file_state "$VP_CLI_BACKUP_PATH")"
+  approved_rollback_sidecar_state="$(managed_file_state "$VP_CLI_BACKUP_SHA256")"
   [ -f "$VP_CLI_BACKUP_PATH" ] || { error "没有可回滚的管理脚本。"; return 1; }
   if [ -r "$VP_CLI_BACKUP_SHA256" ]; then
     verify_script_sidecar "$VP_CLI_BACKUP_PATH" "$VP_CLI_BACKUP_SHA256" || {
@@ -3426,6 +3429,12 @@ rollback_cli() {
   cp -p "$VP_CLI_BACKUP_PATH" "$backup_snapshot" || { cleanup_cli_exchange; trap - EXIT HUP INT TERM; return 1; }
   sidecar_present=0
   [ -f "$VP_CLI_BACKUP_SHA256" ] && { cp -p "$VP_CLI_BACKUP_SHA256" "$sidecar_snapshot" || { cleanup_cli_exchange; trap - EXIT HUP INT TERM; return 1; }; sidecar_present=1; }
+  if [ "${VP_ALLOW_TEST_HOOKS:-0}" = 1 ] && [ "${VP_TEST_CLI_ROLLBACK_SOURCE_RACE:-0}" = 1 ]; then
+    printf 'changed-after-rollback-validation\n' > "$VP_CLI_BACKUP_PATH"
+  fi
+  [ "$(managed_file_state "$VP_CLI_PATH")" = "$approved_rollback_cli_state" ] || { cleanup_cli_exchange; trap - EXIT HUP INT TERM; error "当前管理脚本在回滚准备期间发生变化，已中止回滚。"; return 1; }
+  [ "$(managed_file_state "$VP_CLI_BACKUP_PATH")" = "$approved_rollback_backup_state" ] || { cleanup_cli_exchange; trap - EXIT HUP INT TERM; error "已验证的回滚脚本发生变化，已中止且未覆盖该文件。"; return 1; }
+  [ "$(managed_file_state "$VP_CLI_BACKUP_SHA256")" = "$approved_rollback_sidecar_state" ] || { cleanup_cli_exchange; trap - EXIT HUP INT TERM; error "回滚校验文件发生变化，已中止回滚。"; return 1; }
   restore_cli_exchange() {
     if [ "$current_present" = 1 ]; then
       restore_stage="$(mktemp "$cli_dir/.vp-cli-restore.XXXXXX")" || return 1
@@ -3442,8 +3451,22 @@ rollback_cli() {
       rm -f "$VP_CLI_BACKUP_SHA256"
     fi
   }
-  mv "$rollback_stage" "$VP_CLI_PATH" || { cleanup_cli_exchange; trap - EXIT HUP INT TERM; return 1; }
-  rollback_stage=""
+  if [ "$approved_rollback_cli_state" = missing ]; then
+    if [ "${VP_ALLOW_TEST_HOOKS:-0}" = 1 ] && [ "${VP_TEST_CLI_ROLLBACK_COMMIT_RACE:-0}" = 1 ]; then
+      printf 'created-at-rollback-commit\n' > "$VP_CLI_PATH"
+    fi
+    if ! ln "$rollback_stage" "$VP_CLI_PATH" 2>/dev/null; then
+      cleanup_cli_exchange; trap - EXIT HUP INT TERM
+      error "回滚目标刚被其他任务创建，已中止且未覆盖该文件。"
+      return 1
+    fi
+    rm -f "$rollback_stage"
+    rollback_stage=""
+  else
+    [ "$(managed_file_state "$VP_CLI_PATH")" = "$approved_rollback_cli_state" ] || { cleanup_cli_exchange; trap - EXIT HUP INT TERM; error "当前管理脚本在回滚提交前发生变化，已中止回滚。"; return 1; }
+    mv "$rollback_stage" "$VP_CLI_PATH" || { cleanup_cli_exchange; trap - EXIT HUP INT TERM; return 1; }
+    rollback_stage=""
+  fi
   if [ "${VP_ALLOW_TEST_HOOKS:-0}" = 1 ] && [ "${VP_TEST_CLI_ROLLBACK_FAIL_PHASE:-}" = after-cli ]; then
     restore_cli_exchange || true
     cleanup_cli_exchange; trap - EXIT HUP INT TERM

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.0-dev.61
+
+- CLI rollback now binds the validated active CLI, rollback script and checksum sidecar states to the subsequent three-file exchange.
+- All three paths are rechecked after staging; a rollback source changed after SHA-256, syntax and version validation is preserved and rejected.
+- Restoring into a missing active-CLI path uses an atomic no-clobber commit, preserving a file created in the final rollback window.
+- Regression tests prove source-race and commit-race failures leave the unaffected active or rollback assets byte-identical.
+
 ## 0.2.0-dev.60
 
 - CLI update approval is now bound to SHA-256-backed states of the active CLI, rollback script and rollback sidecar captured before candidate download.
