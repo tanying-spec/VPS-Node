@@ -41,6 +41,54 @@ printf '%s\n' "$dry_output" | grep -q '明确不会执行'
 printf '%s\n' "$dry_output" | grep -q '不停止现有 Mihomo、Xray、sing-box 或 cloudflared'
 [ ! -e "$TMP/install/vp" ]
 
+target_race_root="$TMP/target-race"
+if (cd "$ROOT" && PATH="$TMP/bin:$PATH" VP_LOCAL_SOURCE=1 VP_ALLOW_TEST_HOOKS=1 \
+  VP_TEST_INSTALL_TARGET_RACE=1 VP_INSTALL_PATH="$target_race_root/vp" \
+  VP_CONFIG_DIR="$target_race_root/etc" VP_DATA_DIR="$target_race_root/lib" \
+  VP_LOG_DIR="$target_race_root/log" VP_LIB_DIR="$target_race_root/usr" \
+  sh ./install.sh >/dev/null 2>&1); then
+  printf 'installer accepted a target changed after preflight\n' >&2
+  exit 1
+fi
+grep -q '^created-during-install$' "$target_race_root/vp"
+[ ! -e "$target_race_root/vp.previous" ]
+[ ! -e "$target_race_root/vp.previous.sha256" ]
+[ ! -e "$target_race_root/etc" ]
+
+commit_race_root="$TMP/commit-race"
+if (cd "$ROOT" && PATH="$TMP/bin:$PATH" VP_LOCAL_SOURCE=1 VP_ALLOW_TEST_HOOKS=1 \
+  VP_TEST_INSTALL_COMMIT_RACE=1 VP_INSTALL_PATH="$commit_race_root/vp" \
+  VP_CONFIG_DIR="$commit_race_root/etc" VP_DATA_DIR="$commit_race_root/lib" \
+  VP_LOG_DIR="$commit_race_root/log" VP_LIB_DIR="$commit_race_root/usr" \
+  sh ./install.sh >/dev/null 2>&1); then
+  printf 'installer overwrote a target created at commit time\n' >&2
+  exit 1
+fi
+grep -q '^created-at-commit$' "$commit_race_root/vp"
+[ ! -e "$commit_race_root/vp.previous" ]
+[ ! -e "$commit_race_root/vp.previous.sha256" ]
+[ ! -e "$commit_race_root/etc" ]
+
+existing_race_root="$TMP/existing-race"
+mkdir -p "$existing_race_root"
+printf 'existing-before-install\n' > "$existing_race_root/vp"
+printf 'prior-rollback\n' > "$existing_race_root/vp.previous"
+printf '%s  vp.previous\n' "$(sha256sum "$existing_race_root/vp.previous" | awk '{print $1}')" > "$existing_race_root/vp.previous.sha256"
+existing_race_backup_hash="$(sha256sum "$existing_race_root/vp.previous" | awk '{print $1}')"
+existing_race_sidecar_hash="$(sha256sum "$existing_race_root/vp.previous.sha256" | awk '{print $1}')"
+if (cd "$ROOT" && PATH="$TMP/bin:$PATH" VP_LOCAL_SOURCE=1 VP_ALLOW_TEST_HOOKS=1 \
+  VP_TEST_INSTALL_EXISTING_RACE=1 VP_INSTALL_PATH="$existing_race_root/vp" \
+  VP_CONFIG_DIR="$existing_race_root/etc" VP_DATA_DIR="$existing_race_root/lib" \
+  VP_LOG_DIR="$existing_race_root/log" VP_LIB_DIR="$existing_race_root/usr" \
+  sh ./install.sh >/dev/null 2>&1); then
+  printf 'installer accepted an existing target changed while being backed up\n' >&2
+  exit 1
+fi
+grep -q '^changed-during-backup$' "$existing_race_root/vp"
+[ "$(sha256sum "$existing_race_root/vp.previous" | awk '{print $1}')" = "$existing_race_backup_hash" ]
+[ "$(sha256sum "$existing_race_root/vp.previous.sha256" | awk '{print $1}')" = "$existing_race_sidecar_hash" ]
+[ ! -e "$existing_race_root/etc" ]
+
 orphan_root="$TMP/orphan"
 mkdir -p "$orphan_root/install"
 cp "$ROOT/vp.sh" "$orphan_root/install/vp.previous"

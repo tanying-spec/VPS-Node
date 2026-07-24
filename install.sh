@@ -35,6 +35,31 @@ PREFLIGHT_WARNINGS=0
 preflight_error() { warn "阻止安装：$*"; PREFLIGHT_ERRORS=$((PREFLIGHT_ERRORS + 1)); }
 preflight_warn() { warn "$*"; PREFLIGHT_WARNINGS=$((PREFLIGHT_WARNINGS + 1)); }
 
+sha256_file() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{print $1}'
+  elif command -v openssl >/dev/null 2>&1; then
+    openssl dgst -sha256 "$1" | awk '{print $NF}'
+  else
+    return 1
+  fi
+}
+
+install_path_state() {
+  state_path="$1"
+  if [ -L "$state_path" ]; then
+    state_hash="$(sha256_file "$state_path" 2>/dev/null || printf unreadable)"
+    printf 'symlink:%s:%s' "$(readlink "$state_path" 2>/dev/null || printf unknown)" "$state_hash"
+  elif [ -f "$state_path" ]; then
+    state_hash="$(sha256_file "$state_path" 2>/dev/null || printf unreadable)"
+    printf 'file:%s' "$state_hash"
+  elif [ -e "$state_path" ]; then
+    printf 'other'
+  else
+    printf 'missing'
+  fi
+}
+
 validate_source_policy() {
   if [ "${VP_LOCAL_SOURCE:-0}" = 1 ]; then
     [ "${VP_ALLOW_TEST_HOOKS:-0}" = 1 ] || { preflight_error "本地安装源仅允许用于测试。"; return 1; }
@@ -205,6 +230,9 @@ fi
 [ "$(id -u)" = "0" ] || die "正式安装需要 root。请先输入 su -，再重新执行原安装命令；本脚本不要求系统必须安装 sudo。"
 [ "$PREFLIGHT_ERRORS" -eq 0 ] || die "安装前检查未通过，未修改系统。"
 show_install_plan
+install_path_state_before="$(install_path_state "$INSTALL_PATH")"
+backup_path_state_before="$(install_path_state "$INSTALL_BACKUP_PATH")"
+sidecar_path_state_before="$(install_path_state "$INSTALL_BACKUP_SHA256")"
 
 if ! command -v curl >/dev/null 2>&1; then
   if command -v apk >/dev/null 2>&1; then
@@ -221,16 +249,6 @@ fi
 tmp="$(mktemp /tmp/vp-install.XXXXXX)" || die "无法创建临时文件。"
 checksum_tmp="$(mktemp /tmp/vp-install-sha.XXXXXX)" || { rm -f "$tmp"; die "无法创建校验临时文件。"; }
 trap 'rm -f "$tmp" "$checksum_tmp"' EXIT HUP INT TERM
-
-sha256_file() {
-  if command -v sha256sum >/dev/null 2>&1; then
-    sha256sum "$1" | awk '{print $1}'
-  elif command -v openssl >/dev/null 2>&1; then
-    openssl dgst -sha256 "$1" | awk '{print $NF}'
-  else
-    return 1
-  fi
-}
 
 json_top_level_string() {
   printf '%s' "$1" | awk -v wanted="$2" '
@@ -297,6 +315,13 @@ case "$expected" in ''|*[!0-9a-f]*) die "SHA-256 文件格式无效。" ;; esac
 [ "${#expected}" -eq 64 ] && [ "$expected" = "$actual" ] || die "vp.sh SHA-256 校验失败。"
 sh -n "$tmp" || die "脚本语法检查失败。"
 chmod 755 "$tmp"
+if [ "${VP_ALLOW_TEST_HOOKS:-0}" = 1 ] && [ "${VP_TEST_INSTALL_TARGET_RACE:-0}" = 1 ]; then
+  mkdir -p "$(dirname "$INSTALL_PATH")"
+  printf 'created-during-install\n' > "$INSTALL_PATH"
+fi
+[ "$(install_path_state "$INSTALL_PATH")" = "$install_path_state_before" ] || die "安装目标在预检后发生变化，已中止且未覆盖现有文件。"
+[ "$(install_path_state "$INSTALL_BACKUP_PATH")" = "$backup_path_state_before" ] || die "回滚脚本在预检后发生变化，已中止安装。"
+[ "$(install_path_state "$INSTALL_BACKUP_SHA256")" = "$sidecar_path_state_before" ] || die "回滚校验在预检后发生变化，已中止安装。"
 mkdir -p "$(dirname "$INSTALL_PATH")"
 install_stage="$(mktemp "$(dirname "$INSTALL_PATH")/.vp-install.XXXXXX")" || die "无法在安装目录创建临时文件。"
 cp "$tmp" "$install_stage" || { rm -f "$install_stage"; die "无法暂存管理脚本。"; }
@@ -330,6 +355,10 @@ if [ -f "$INSTALL_PATH" ]; then
   mkdir -p "$(dirname "$INSTALL_BACKUP_PATH")" "$(dirname "$INSTALL_BACKUP_SHA256")" || die "无法创建回滚目录。"
   new_backup_stage="$(mktemp "$(dirname "$INSTALL_BACKUP_PATH")/.vp-install-previous.XXXXXX")" || die "无法暂存现有管理脚本。"
   cp -p "$INSTALL_PATH" "$new_backup_stage" || die "无法暂存现有管理脚本。"
+  if [ "${VP_ALLOW_TEST_HOOKS:-0}" = 1 ] && [ "${VP_TEST_INSTALL_EXISTING_RACE:-0}" = 1 ]; then
+    printf 'changed-during-backup\n' > "$INSTALL_PATH"
+  fi
+  [ "$(install_path_state "$INSTALL_PATH")" = "$install_path_state_before" ] || die "现有管理脚本在备份期间发生变化，已中止安装。"
   backup_hash="$(sha256_file "$new_backup_stage")" || die "无法校验现有管理脚本备份。"
   new_sidecar_stage="$(mktemp "$(dirname "$INSTALL_BACKUP_SHA256")/.vp-install-previous-sha.XXXXXX")" || die "无法暂存回滚校验。"
   printf '%s  %s\n' "$backup_hash" "$(basename "$INSTALL_BACKUP_PATH")" > "$new_sidecar_stage" || die "无法写入回滚校验暂存文件。"
@@ -347,7 +376,21 @@ if [ -f "$INSTALL_PATH" ]; then
     die "测试注入：回滚校验提交后中断。"
   fi
 fi
-mv "$install_stage" "$INSTALL_PATH" || { restore_prior_rollback_files; die "无法原子替换管理脚本。"; }
+if [ "$had_current" = 0 ]; then
+  if [ "${VP_ALLOW_TEST_HOOKS:-0}" = 1 ] && [ "${VP_TEST_INSTALL_COMMIT_RACE:-0}" = 1 ]; then
+    printf 'created-at-commit\n' > "$INSTALL_PATH"
+  fi
+  if ! ln "$install_stage" "$INSTALL_PATH" 2>/dev/null; then
+    restore_prior_rollback_files || true
+    die "安装目标刚被其他任务创建，已中止且未覆盖该文件。"
+  fi
+  rm -f "$install_stage"
+  install_stage=""
+else
+  [ "$(install_path_state "$INSTALL_PATH")" = "$install_path_state_before" ] || { restore_prior_rollback_files || true; die "现有管理脚本在提交前发生变化，已中止安装。"; }
+  mv "$install_stage" "$INSTALL_PATH" || { restore_prior_rollback_files; die "无法原子替换管理脚本。"; }
+  install_stage=""
+fi
 rm -f "$tmp"
 rm -f "$checksum_tmp"
 if ! "$INSTALL_PATH" init; then

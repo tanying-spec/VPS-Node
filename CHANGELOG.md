@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.0-dev.59
+
+- Installer approval is now bound to SHA-256-backed snapshots of the CLI, rollback script and rollback checksum paths taken before download or package installation.
+- A target or rollback asset created, replaced or modified after preflight aborts installation before VPS-Node state initialization.
+- Fresh installation commits with an atomic no-clobber hard link, closing the final check-to-replace window when another task creates the target at commit time.
+- Existing CLI content is rechecked after backup and immediately before replacement; race-injection tests prove external content and prior rollback assets are preserved.
+
 ## 0.2.0-dev.58
 
 - Uninstall now audits every managed project path and the selected systemd/OpenRC service definitions after deletion.
