@@ -89,6 +89,23 @@ grep -q '^reality|renamed-node|25433|[^|]*|www.microsoft.com|www.microsoft.com:4
 grep -q '^renamed-node|reality|' "$TMP/dns-etc/credential-rotations.db"
 VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log" \
 VP_LIB_DIR="$TMP/dns-usr" VP_CORE_BIN="$TMP/dns-usr/bin/mihomo" \
+VP_CORE_BACKUP_BIN="$TMP/dns-usr/bin/mihomo.previous" VP_PUBLIC_IPV6_OVERRIDE=2001:db8::10 VP_SKIP_SERVICE=1 \
+sh "$ROOT/vp.sh" edit renamed-node renamed-node 25433 www.microsoft.com ipv6 >/dev/null
+grep -q '^reality|renamed-node|25433|.*|ipv6$' "$TMP/dns-etc/nodes.db"
+grep -q "listen: '::'" "$TMP/dns-etc/generated/mihomo.yaml"
+ipv6_link="$(VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log" \
+  VP_LIB_DIR="$TMP/dns-usr" VP_PUBLIC_IPV6_OVERRIDE=2001:db8::10 sh "$ROOT/vp.sh" link renamed-node)"
+printf '%s\n' "$ipv6_link" | grep -q '@\[2001:db8::10\]:25433'
+if VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log" \
+  VP_LIB_DIR="$TMP/dns-usr" VP_CORE_BIN="$TMP/dns-usr/bin/mihomo" \
+  VP_CORE_BACKUP_BIN="$TMP/dns-usr/bin/mihomo.previous" VP_PUBLIC_IPV6_OVERRIDE=not-an-ip \
+  VP_SKIP_SERVICE=1 sh "$ROOT/vp.sh" reality-add bad-v6 25435 www.amd.com ipv6 >/dev/null 2>&1; then
+  printf 'invalid public IPv6 unexpectedly accepted\n' >&2
+  exit 1
+fi
+! grep -q '|bad-v6|' "$TMP/dns-etc/nodes.db"
+VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log" \
+VP_LIB_DIR="$TMP/dns-usr" VP_CORE_BIN="$TMP/dns-usr/bin/mihomo" \
 VP_CORE_BACKUP_BIN="$TMP/dns-usr/bin/mihomo.previous" VP_SKIP_SERVICE=1 \
 sh "$ROOT/vp.sh" argo-add argo-edit 25434 old.example.com /old-path >/dev/null
 VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log" \
@@ -96,6 +113,16 @@ VP_LIB_DIR="$TMP/dns-usr" VP_CORE_BIN="$TMP/dns-usr/bin/mihomo" \
 VP_CORE_BACKUP_BIN="$TMP/dns-usr/bin/mihomo.previous" VP_SKIP_SERVICE=1 \
 sh "$ROOT/vp.sh" edit argo-edit argo-renamed 25434 new.example.com /new-path >/dev/null
 grep -q '^argo|argo-renamed|25434|[^|]*|/new-path|new.example.com$' "$TMP/dns-etc/nodes.db"
+plain_subscription="$(VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log" \
+  VP_LIB_DIR="$TMP/dns-usr" VP_PUBLIC_IPV6_OVERRIDE=2001:db8::10 sh "$ROOT/vp.sh" subscription plain)"
+[ "$(printf '%s\n' "$plain_subscription" | grep -c '^vless://')" -eq 3 ]
+current_uuid="$(awk -F'|' '$2=="renamed-node"{print $4}' "$TMP/dns-etc/nodes.db")"
+old_uuid="$(awk -F'|' '$1=="renamed-node"{print $3}' "$TMP/dns-etc/credential-rotations.db")"
+printf '%s\n' "$plain_subscription" | grep -Fq "vless://$current_uuid@"
+printf '%s\n' "$plain_subscription" | grep -Fq "vless://$old_uuid@"
+base64_subscription="$(VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log" \
+  VP_LIB_DIR="$TMP/dns-usr" VP_PUBLIC_IPV6_OVERRIDE=2001:db8::10 sh "$ROOT/vp.sh" subscription base64)"
+[ "$(printf '%s' "$base64_subscription" | base64 -d | grep -c '^vless://')" -eq 3 ]
 fake_curl="$TMP/fake-curl"
 cat > "$fake_curl" <<'FAKE_CURL'
 #!/bin/sh

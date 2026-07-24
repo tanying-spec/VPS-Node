@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.0-dev.13
+
+- Added explicit IPv4/IPv6 Reality lifecycle with public-IPv6 preflight, family-aware listeners, bracketed IPv6 links, editing and health diagnostics.
+- Existing Reality records without a family field remain IPv4-compatible.
+- Added `vp subscription plain|base64` for all current nodes.
+- Active credential rotations now export both current and temporary old links so subscription updates do not prematurely break clients.
+- Added IPv4/IPv6 availability to network status and redacted diagnostics without exposing the actual addresses.
+
 ## 0.2.0-dev.12
 
 - Added cgroup v1/v2 CPU quota and cpuset-aware effective CPU detection.

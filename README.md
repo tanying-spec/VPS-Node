@@ -1,5 +1,7 @@
 # VPS-Node
 
+> `0.2.0-dev.13` Reality 节点可明确选择 `ipv4` 或 `ipv6`；IPv6 会先验证公网可用性，分享链接自动使用方括号。`vp subscription base64` 可导出全部节点，并在凭据轮换宽限期内同时包含新旧链接。
+
 > `0.2.0-dev.12` 内存自适应进一步加入 cgroup CPU quota 与 cpuset：`GOMAXPROCS` 不再只看宿主可见核心数。首页会区分 OOM 历史累计和自上次确认后的新增次数。
 
 > `0.2.0-dev.11` 新增 `vp network-optimize --dry-run`、`vp network-optimize 节点名 4` 和 `vp network-rollback`。候选参数只有在同节点、同并发复测不回退时才会保存；吞吐或首包表现不达标会立即恢复原值。
@@ -49,10 +51,13 @@ vp
 
 ```sh
 vp core-install
-vp reality-add home 443 www.amd.com
+vp reality-add home 443 www.amd.com ipv4
+vp reality-add home-v6 8443 www.amd.com ipv6
 vp argo-add backup 25443 tunnel.example.com /private-path
 vp nodes
 vp link home
+vp subscription plain
+vp subscription base64
 vp test-node home
 vp test-node home 4
 vp test-all 4

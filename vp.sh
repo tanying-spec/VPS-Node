@@ -2,7 +2,7 @@
 
 set -u
 
-VP_VERSION="0.2.0-dev.12"
+VP_VERSION="0.2.0-dev.13"
 VP_CONFIG_DIR="${VP_CONFIG_DIR:-/etc/vps-node}"
 VP_DATA_DIR="${VP_DATA_DIR:-/var/lib/vps-node}"
 VP_LOG_DIR="${VP_LOG_DIR:-/var/log/vps-node}"
@@ -674,14 +674,16 @@ render_mihomo_config() {
   mkdir -p "$(dirname "$output_file")"
   dns_mode="$(awk -F= '$1=="VP_DNS_MODE"{print $2;exit}' "$VP_CORE_ENV" 2>/dev/null || true)"
   dns_servers="$(awk -F= '$1=="VP_DNS_SERVERS"{print $2;exit}' "$VP_CORE_ENV" 2>/dev/null || true)"
+  config_ipv6=false
+  awk -F'|' '$1=="reality" && $10=="ipv6"{found=1}END{exit found?0:1}' "$nodes_file" 2>/dev/null && config_ipv6=true
   {
     printf 'mixed-port: %s\n' "$VP_MIXED_PORT"
     printf "external-controller: '127.0.0.1:%s'\n" "$VP_CONTROLLER_PORT"
-    printf 'allow-lan: false\nmode: rule\nlog-level: warning\nipv6: false\n'
+    printf 'allow-lan: false\nmode: rule\nlog-level: warning\nipv6: %s\n' "$config_ipv6"
     case "$dns_mode" in
       public|system)
         if [ -n "$dns_servers" ] && [ "$dns_servers" != system ]; then
-          printf 'dns:\n  enable: true\n  ipv6: false\n  nameserver:\n'
+          printf 'dns:\n  enable: true\n  ipv6: %s\n  nameserver:\n' "$config_ipv6"
           for dns_server in $(printf '%s' "$dns_servers" | tr ',' ' '); do
             printf '    - %s\n' "$dns_server"
           done
@@ -689,13 +691,14 @@ render_mihomo_config() {
         ;;
     esac
     printf 'listeners:\n'
-    while IFS='|' read -r proto name port uuid sni dest private_key public_key short_id; do
+    while IFS='|' read -r proto name port uuid sni dest private_key public_key short_id address_family; do
       [ -n "$proto" ] || continue
       old_uuid="$(awk -F'|' -v n="$name" -v now="$render_now" '$1==n && $5+0>now {print $3; exit}' "$rotations_file" 2>/dev/null)"
       case "$proto" in
         reality)
+          [ "$address_family" = ipv6 ] && listen_address='::' || listen_address='0.0.0.0'
           printf "  - name: '%s'\n" "$(yaml_quote "$name")"
-          printf '    type: vless\n    port: %s\n    listen: 0.0.0.0\n' "$port"
+          printf "    type: vless\n    port: %s\n    listen: '%s'\n" "$port" "$listen_address"
           printf "    users:\n      - username: '%s'\n        uuid: '%s'\n" "$(yaml_quote "$name")" "$(yaml_quote "$uuid")"
           [ -n "$old_uuid" ] && printf "      - username: '%s-old'\n        uuid: '%s'\n" "$(yaml_quote "$name")" "$(yaml_quote "$old_uuid")"
           printf '    tls: true\n    reality-config:\n'
@@ -1060,6 +1063,12 @@ reality_add() {
   name="${1:-reality-1}"
   requested_port="${2:-}"
   sni="${3:-www.amd.com}"
+  address_family="${4:-ipv4}"
+  case "$address_family" in ipv4|ipv6) ;; *) error "地址族只能是 ipv4 或 ipv6。"; return 1 ;; esac
+  if [ "$address_family" = ipv6 ] && ! public_ipv6 >/dev/null 2>&1; then
+    error "未检测到可用公网 IPv6，拒绝创建不可达的 IPv6 节点。"
+    return 1
+  fi
   case "$name$sni" in *'|'*|*' '*|*\"*|*\'*) error "名称或 SNI 包含非法字符。"; return 1 ;; esac
   port="$(choose_port "$requested_port")" || { error "端口不可用。"; return 1; }
   created_name="$name"
@@ -1074,7 +1083,7 @@ reality_add() {
   if awk -F'|' -v n="$name" '$2==n{found=1} END{exit found?0:1}' "$candidate_root/nodes.db"; then
     abort_state_transaction; error "节点名称已存在。"; return 1
   fi
-  printf 'reality|%s|%s|%s|%s|%s:443|%s|%s|%s\n' "$name" "$port" "$uuid" "$sni" "$sni" "$private" "$public" "$short_id" >> "$candidate_root/nodes.db"
+  printf 'reality|%s|%s|%s|%s|%s:443|%s|%s|%s|%s\n' "$name" "$port" "$uuid" "$sni" "$sni" "$private" "$public" "$short_id" "$address_family" >> "$candidate_root/nodes.db"
   render_mihomo_config "$candidate_root/nodes.db" "$candidate_root/generated/mihomo.yaml" "$candidate_root/credential-rotations.db"
   if ! validate_state_candidate || ! "$VP_CORE_BIN" -t -d "$VP_CONFIG_DIR" -f "$candidate_root/generated/mihomo.yaml" >/dev/null 2>&1; then
     abort_state_transaction; error "Reality 候选配置验证失败。"; return 1
@@ -1088,13 +1097,42 @@ reality_add() {
   ok "Reality 节点已创建：$created_name（端口 $created_port）。"
 }
 
+public_ipv4() {
+  if [ -n "${VP_PUBLIC_IPV4_OVERRIDE:-}" ]; then
+    case "$VP_PUBLIC_IPV4_OVERRIDE" in *.*) printf '%s' "$VP_PUBLIC_IPV4_OVERRIDE"; return 0 ;; *) return 1 ;; esac
+  fi
+  address="$(curl -4 -fsS --max-time 5 https://api.ipify.org 2>/dev/null || true)"
+  case "$address" in *.*) printf '%s' "$address" ;; *) return 1 ;; esac
+}
+
+public_ipv6() {
+  if [ -n "${VP_PUBLIC_IPV6_OVERRIDE:-}" ]; then
+    case "$VP_PUBLIC_IPV6_OVERRIDE" in *:*) printf '%s' "$VP_PUBLIC_IPV6_OVERRIDE"; return 0 ;; *) return 1 ;; esac
+  fi
+  address="$(curl -6 -fsS --max-time 6 https://api64.ipify.org 2>/dev/null || true)"
+  case "$address" in *:*) printf '%s' "$address" ;; *) return 1 ;; esac
+}
+
+public_address() {
+  case "${1:-ipv4}" in
+    ipv6) public_ipv6 || printf 'YOUR_SERVER_IPV6' ;;
+    *) public_ipv4 || printf 'YOUR_SERVER_IP' ;;
+  esac
+}
+
+link_address() {
+  link_family="${1:-ipv4}"
+  link_value="$(public_address "$link_family")"
+  [ "$link_family" = ipv6 ] && printf '[%s]' "$link_value" || printf '%s' "$link_value"
+}
+
 public_ip() {
-  curl -4 -fsS --max-time 5 https://api.ipify.org 2>/dev/null || printf 'YOUR_SERVER_IP'
+  public_address ipv4
 }
 
 show_nodes() {
   [ -s "$VP_NODES_DB" ] || { warn "当前没有节点。"; return 0; }
-  awk -F'|' '{printf "%d. %s  协议=%s  端口=%s\n", NR,$2,$1,$3}' "$VP_NODES_DB"
+  awk -F'|' '{family=$1=="reality"?($10?$10:"ipv4"):"tunnel";printf "%d. %s  协议=%s  端口=%s  地址=%s\n",NR,$2,$1,$3,family}' "$VP_NODES_DB"
 }
 
 resolve_node_selector() {
@@ -1118,7 +1156,7 @@ edit_node() {
   new_path="${5:-}"
   record="$(awk -F'|' -v n="$target" '$2==n{print;exit}' "$VP_NODES_DB" 2>/dev/null)"
   [ -n "$record" ] || { error "未找到节点：$target。"; return 1; }
-  IFS='|' read -r proto old_name old_port f4 f5 f6 f7 f8 f9 <<EOF
+  IFS='|' read -r proto old_name old_port f4 f5 f6 f7 f8 f9 f10 <<EOF
 $record
 EOF
   [ -n "$new_name" ] || new_name="$old_name"
@@ -1136,8 +1174,14 @@ EOF
   case "$proto" in
     reality)
       [ -n "$endpoint" ] || endpoint="$f5"
+      address_family="${new_path:-${f10:-ipv4}}"
+      case "$address_family" in ipv4|ipv6) ;; *) error "地址族只能是 ipv4 或 ipv6。"; return 1 ;; esac
+      if [ "$address_family" = ipv6 ] && [ "${f10:-ipv4}" != ipv6 ] && ! public_ipv6 >/dev/null 2>&1; then
+        error "未检测到可用公网 IPv6，未修改节点。"
+        return 1
+      fi
       case "$endpoint" in *.*) ;; *) error "Reality SNI 格式无效。"; return 1 ;; esac
-      updated_record="reality|$new_name|$new_port|$f4|$endpoint|$endpoint:443|$f7|$f8|$f9"
+      updated_record="reality|$new_name|$new_port|$f4|$endpoint|$endpoint:443|$f7|$f8|$f9|$address_family"
       ;;
     argo)
       [ -n "$endpoint" ] || endpoint="$f6"
@@ -1296,26 +1340,58 @@ finalize_rotation() {
   ok "已完成 $match_count 项凭据轮换，旧凭据不再有效。"
 }
 
-show_node_link() {
-  target="${1:-}"
-  [ -n "$target" ] || { error "请指定节点名称。"; return 1; }
-  record="$(awk -F'|' -v n="$target" '$2==n{print;exit}' "$VP_NODES_DB" 2>/dev/null)"
-  [ -n "$record" ] || { error "未找到节点。"; return 1; }
-  IFS='|' read -r proto name port uuid sni dest private public short_id <<EOF
+node_share_link() {
+  record="$1"
+  credential_override="${2:-}"
+  label_suffix="${3:-}"
+  IFS='|' read -r proto name port uuid sni dest private public short_id address_family <<EOF
 $record
 EOF
+  [ -n "$credential_override" ] && uuid="$credential_override"
+  label="$name$label_suffix"
   case "$proto" in
     reality)
-      printf 'vless://%s@%s:%s?encryption=none&security=reality&sni=%s&fp=chrome&pbk=%s&sid=%s&type=tcp#%s\n' "$uuid" "$(public_ip)" "$port" "$sni" "$public" "$short_id" "$name"
+      printf 'vless://%s@%s:%s?encryption=none&security=reality&sni=%s&fp=chrome&pbk=%s&sid=%s&type=tcp#%s\n' \
+        "$uuid" "$(link_address "${address_family:-ipv4}")" "$port" "$sni" "$public" "$short_id" "$label"
       ;;
     argo)
       path="$sni"
       host="$dest"
       encoded_path="$(printf '%s' "$path" | sed 's#/#%2F#g')"
-      printf 'vless://%s@%s:443?encryption=none&security=tls&sni=%s&fp=chrome&type=ws&host=%s&path=%s#%s\n' "$uuid" "$host" "$host" "$host" "$encoded_path" "$name"
+      printf 'vless://%s@%s:443?encryption=none&security=tls&sni=%s&fp=chrome&type=ws&host=%s&path=%s#%s\n' "$uuid" "$host" "$host" "$host" "$encoded_path" "$label"
       ;;
     *) error "暂不支持该协议的分享链接。"; return 1 ;;
   esac
+}
+
+show_node_link() {
+  target="${1:-}"
+  [ -n "$target" ] || { error "请指定节点名称。"; return 1; }
+  record="$(awk -F'|' -v n="$target" '$2==n{print;exit}' "$VP_NODES_DB" 2>/dev/null)"
+  [ -n "$record" ] || { error "未找到节点。"; return 1; }
+  node_share_link "$record"
+}
+
+export_subscription() {
+  mode="${1:-base64}"
+  case "$mode" in plain|base64) ;; *) error "订阅格式只能是 plain 或 base64。"; return 2 ;; esac
+  [ -s "$VP_NODES_DB" ] || { error "当前没有节点。"; return 1; }
+  subscription_tmp="$(mktemp /tmp/vp-subscription.XXXXXX)" || return 1
+  now="$(date +%s)"
+  while IFS= read -r subscription_record; do
+    [ -n "$subscription_record" ] || continue
+    subscription_name="$(printf '%s\n' "$subscription_record" | awk -F'|' '{print $2}')"
+    node_share_link "$subscription_record" >> "$subscription_tmp" || { rm -f "$subscription_tmp"; return 1; }
+    old_uuid="$(awk -F'|' -v n="$subscription_name" -v now="$now" '$1==n && $5+0>now{print $3;exit}' "$VP_ROTATIONS_DB" 2>/dev/null)"
+    [ -n "$old_uuid" ] && node_share_link "$subscription_record" "$old_uuid" '-old' >> "$subscription_tmp"
+  done < "$VP_NODES_DB"
+  if [ "$mode" = plain ]; then
+    cat "$subscription_tmp"
+  else
+    base64 < "$subscription_tmp" | tr -d '\n'
+    printf '\n'
+  fi
+  rm -f "$subscription_tmp"
 }
 
 test_node_end_to_end() {
@@ -1327,7 +1403,7 @@ test_node_end_to_end() {
   [ -n "$target" ] || { error "请指定节点名称。"; return 1; }
   record="$(awk -F'|' -v n="$target" '$2==n{print;exit}' "$VP_NODES_DB" 2>/dev/null)"
   [ -n "$record" ] || { error "未找到节点。"; return 1; }
-  IFS='|' read -r proto name port uuid value1 value2 private public short_id <<EOF
+  IFS='|' read -r proto name port uuid value1 value2 private public short_id address_family <<EOF
 $record
 EOF
   client_port="$(choose_port)" || { error "无法分配测试端口。"; return 1; }
@@ -1347,7 +1423,7 @@ EOF
     printf 'proxies:\n'
     case "$proto" in
       reality)
-        server="${VP_TEST_SERVER:-$(public_ip)}"
+        server="${VP_TEST_SERVER:-$(public_address "${address_family:-ipv4}")}"
         printf "  - name: 'target'\n    type: vless\n    server: '%s'\n    port: %s\n" "$(yaml_quote "$server")" "$port"
         printf "    uuid: '%s'\n    network: tcp\n    tls: true\n" "$(yaml_quote "$uuid")"
         printf "    servername: '%s'\n    client-fingerprint: chrome\n" "$(yaml_quote "$value1")"
@@ -1476,6 +1552,8 @@ show_network_status() {
     printf 'VPS-Node 已验证优化：未应用\n'
   fi
   printf '默认测试并发：%s 路\n' "${VP_TEST_CONCURRENCY:-4}"
+  public_ipv4 >/dev/null 2>&1 && printf '公网 IPv4：可用\n' || printf '公网 IPv4：未检测到\n'
+  public_ipv6 >/dev/null 2>&1 && printf '公网 IPv6：可用\n' || printf '公网 IPv6：未检测到\n'
   if command -v ss >/dev/null 2>&1; then
     established="$(ss -H -tn state established 2>/dev/null | awk 'END{print NR+0}')"
     listening="$(ss -H -ltn 2>/dev/null | awk 'END{print NR+0}')"
@@ -1808,7 +1886,7 @@ maintenance_mode() {
   fi
 
   temp_removed=0
-  for temp_path in /tmp/vp-node-test.* /tmp/vp-benchmark.* /tmp/vp-network-verify.* /tmp/vp-backup.* /tmp/vp-restore.* /tmp/vp-repair-config.* /tmp/vp-reality-key.*; do
+  for temp_path in /tmp/vp-node-test.* /tmp/vp-benchmark.* /tmp/vp-network-verify.* /tmp/vp-subscription.* /tmp/vp-backup.* /tmp/vp-restore.* /tmp/vp-repair-config.* /tmp/vp-reality-key.*; do
     [ -e "$temp_path" ] || continue
     if find "$temp_path" -maxdepth 0 -mmin +60 >/dev/null 2>&1 && [ -n "$(find "$temp_path" -maxdepth 0 -mmin +60 -print 2>/dev/null)" ]; then
       rm -rf "$temp_path"
@@ -1964,6 +2042,8 @@ diagnostic_report() {
   if [ -x "$VP_CORE_BIN" ] && [ -f "$VP_CORE_CONFIG" ]; then
     "$VP_CORE_BIN" -t -d "$VP_CONFIG_DIR" -f "$VP_CORE_CONFIG" >/dev/null 2>&1 && config_result=valid || config_result=invalid
   fi
+  ipv4_result=unavailable; public_ipv4 >/dev/null 2>&1 && ipv4_result=available
+  ipv6_result=unavailable; public_ipv6 >/dev/null 2>&1 && ipv6_result=available
   umask 077
   {
     printf 'VPS-Node redacted diagnostic report\n'
@@ -1975,6 +2055,8 @@ diagnostic_report() {
     printf 'tunnel_state=%s\n' "$(service_state "$VP_TUNNEL_SERVICE")"
     printf 'core_config=%s\n' "$config_result"
     printf 'dns_probe=%s\n' "$dns_result"
+    printf 'public_ipv4=%s\n' "$ipv4_result"
+    printf 'public_ipv6=%s\n' "$ipv6_result"
     printf 'transaction=%s\n' "$([ -d "$VP_TX_ACTIVE" ] && printf interrupted || printf clean)"
     printf 'memory_source=%s\n' "$MEM_SOURCE"
     printf 'memory_working_mib=%s\n' "$(bytes_to_mib "$MEM_WORKING_BYTES")"
@@ -2107,6 +2189,7 @@ show_dashboard_summary() {
   total_nodes="$(node_count)"
   reality_nodes="$(awk -F'|' '$1=="reality"{n++}END{print n+0}' "$VP_NODES_DB" 2>/dev/null)"
   argo_nodes="$(awk -F'|' '$1=="argo"{n++}END{print n+0}' "$VP_NODES_DB" 2>/dev/null)"
+  ipv6_nodes="$(awk -F'|' '$1=="reality" && $10=="ipv6"{n++}END{print n+0}' "$VP_NODES_DB" 2>/dev/null)"
   core_state="$(service_state "$VP_CORE_SERVICE")"
   tunnel_state="$(service_state "$VP_TUNNEL_SERVICE")"
   if [ -d "$VP_TX_ACTIVE" ]; then
@@ -2138,7 +2221,7 @@ show_dashboard_summary() {
     next_action="请选择 3 查看链接或执行真实节点测试。"
   fi
   printf '总体状态：%s\n' "$overall"
-  printf '节点组成：Reality %s 个 / Cloudflare 备用 %s 个\n' "$reality_nodes" "$argo_nodes"
+  printf '节点组成：Reality %s 个（IPv6 %s）/ Cloudflare 备用 %s 个\n' "$reality_nodes" "$ipv6_nodes" "$argo_nodes"
   printf '下一步：%s\n' "$next_action"
   printf '%s\n' '----------------------------------------'
 }
@@ -2352,6 +2435,14 @@ layered_health_check() {
   else
     health_error "监听层：$node_listening/$node_total 个节点端口正在监听。"
   fi
+  ipv6_node_total="$(awk -F'|' '$1=="reality" && $10=="ipv6"{n++}END{print n+0}' "$VP_NODES_DB" 2>/dev/null)"
+  if [ "$ipv6_node_total" -gt 0 ]; then
+    if public_ipv6 >/dev/null 2>&1; then
+      health_ok "IPv6 层：$ipv6_node_total 个 IPv6 Reality 节点具有公网 IPv6。"
+    else
+      health_error "IPv6 层：配置了 $ipv6_node_total 个 IPv6 Reality 节点，但当前无法取得公网 IPv6。"
+    fi
+  fi
 
   dns_mode="$(awk -F= '$1=="VP_DNS_MODE"{print $2;exit}' "$VP_CORE_ENV" 2>/dev/null || true)"
   dns_servers="$(awk -F= '$1=="VP_DNS_SERVERS"{print $2;exit}' "$VP_CORE_ENV" 2>/dev/null || true)"
@@ -2559,7 +2650,9 @@ interactive_reality_add() {
   printf 'Reality SNI（默认 www.amd.com）：'
   read -r sni || true
   [ -n "$sni" ] || sni=www.amd.com
-  reality_add "$name" "$port" "$sni"
+  printf '地址族（默认 ipv4，可选 ipv6）：'
+  read -r address_family || true
+  reality_add "$name" "$port" "$sni" "${address_family:-ipv4}"
   printf '是否显示新节点链接？[y/N]：'
   read -r answer || true
   case "$answer" in y|Y|yes|YES) show_node_link "$name" ;; esac
@@ -2586,9 +2679,16 @@ interactive_argo_setup() {
 interactive_node_action() {
   show_nodes
   [ -s "$VP_NODES_DB" ] || return 0
-  printf '请输入节点编号或名称：'
+  printf '请输入节点编号或名称；输入 A 导出全部节点订阅：'
   read -r selector || true
   [ -n "$selector" ] || return 0
+  case "$selector" in
+    a|A)
+      printf '订阅格式（默认 base64，可选 plain）：'; read -r format || true
+      export_subscription "${format:-base64}"
+      return
+      ;;
+  esac
   target="$(resolve_node_selector "$selector")"
   [ -n "$target" ] || { error "未找到节点：$selector。"; return 1; }
   printf '1. 显示链接\n2. 端到端测试\n3. 修改节点\n4. 轮换凭据\n5. 完成凭据切换\n6. 删除节点\n0. 返回\n请选择：'
@@ -2598,14 +2698,15 @@ interactive_node_action() {
     2) test_node_end_to_end "$target" ;;
     3)
       record="$(awk -F'|' -v n="$target" '$2==n{print;exit}' "$VP_NODES_DB")"
-      IFS='|' read -r proto old_name old_port f4 f5 f6 rest <<EOF
+      IFS='|' read -r proto old_name old_port f4 f5 f6 f7 f8 f9 f10 <<EOF
 $record
 EOF
       printf '新名称（默认 %s）：' "$old_name"; read -r new_name || true
       printf '新端口（默认 %s）：' "$old_port"; read -r new_port || true
       if [ "$proto" = reality ]; then
         printf '新 Reality SNI（默认 %s）：' "$f5"; read -r endpoint || true
-        edit_node "$target" "${new_name:-$old_name}" "${new_port:-$old_port}" "${endpoint:-$f5}"
+        printf '地址族（默认 %s，可选 ipv4/ipv6）：' "${f10:-ipv4}"; read -r address_family || true
+        edit_node "$target" "${new_name:-$old_name}" "${new_port:-$old_port}" "${endpoint:-$f5}" "${address_family:-${f10:-ipv4}}"
       else
         printf '新 Tunnel 公网域名（默认 %s）：' "$f6"; read -r endpoint || true
         printf '新 WebSocket 路径（默认 %s）：' "$f5"; read -r path || true
@@ -2740,6 +2841,7 @@ case "${1:-}" in
   tunnel-install|install-tunnel) shift; tunnel_install "$@" ;;
   argo-add|add-argo) shift; argo_add "$@" ;;
   nodes|list) show_nodes ;;
+  subscription|sub) shift; export_subscription "$@" ;;
   delete|remove) shift; delete_node "$@" ;;
   edit|edit-node) shift; edit_node "$@" ;;
   link) shift; show_node_link "$@" ;;
@@ -2771,7 +2873,7 @@ case "${1:-}" in
   uninstall) shift; uninstall_project "$@" ;;
   debug-tx) shift; debug_transaction "$@" ;;
   help|-h|--help)
-    printf '用法：vp [status|doctor|health|repair|report|self-heal|monitor-install|stability|network|network-optimize|network-rollback|test-all|optimize|maintain|update|rollback|init|core-install|reality-add|tunnel-install|argo-add|nodes|edit|delete|link|test-node|rotate|rotations|rotate-finalize|backup|restore|uninstall|version]\n'
+    printf '用法：vp [status|doctor|health|repair|report|self-heal|monitor-install|stability|network|network-optimize|network-rollback|test-all|optimize|maintain|update|rollback|init|core-install|reality-add|tunnel-install|argo-add|nodes|subscription|edit|delete|link|test-node|rotate|rotations|rotate-finalize|backup|restore|uninstall|version]\n'
     ;;
   '') menu ;;
   *) error "未知命令：$1"; exit 2 ;;
