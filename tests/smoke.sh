@@ -75,6 +75,55 @@ VP_LOG_DIR="$TMP/log" \
 VP_LIB_DIR="$TMP/usr-lib" \
 sh "$ROOT/vp.sh" version | grep -Eq '^0\.'
 
+preflight_root="$TMP/preflight-readonly"
+preflight_output="$(VP_CONFIG_DIR="$preflight_root/etc" VP_DATA_DIR="$preflight_root/lib" \
+  VP_LOG_DIR="$preflight_root/log" VP_LIB_DIR="$preflight_root/usr" \
+  VP_CORE_SYSTEMD_SERVICE="$TMP/preflight-core.service" \
+  VP_TUNNEL_SYSTEMD_SERVICE="$TMP/preflight-tunnel.service" \
+  VP_MEMORY_LIMIT_BYTES_OVERRIDE=$((128 * 1048576)) VP_ALLOW_TEST_HOOKS=1 \
+  VP_SERVICE_MANAGER_OVERRIDE=systemd VP_PREFLIGHT_GITHUB_RESULT=ok \
+  sh "$ROOT/vp.sh" preflight)"
+printf '%s\n' "$preflight_output" | grep -q '安装前一键预检'
+printf '%s\n' "$preflight_output" | grep -q '预检结论：可以安装'
+[ ! -e "$preflight_root" ]
+
+printf '[Unit]\nDescription=external core\n' > "$TMP/preflight-external-core.service"
+if preflight_conflict_output="$(VP_CONFIG_DIR="$preflight_root/etc" VP_DATA_DIR="$preflight_root/lib" \
+  VP_LOG_DIR="$preflight_root/log" VP_LIB_DIR="$preflight_root/usr" \
+  VP_CORE_SYSTEMD_SERVICE="$TMP/preflight-external-core.service" \
+  VP_TUNNEL_SYSTEMD_SERVICE="$TMP/preflight-tunnel.service" \
+  VP_MEMORY_LIMIT_BYTES_OVERRIDE=$((128 * 1048576)) VP_ALLOW_TEST_HOOKS=1 \
+  VP_SERVICE_MANAGER_OVERRIDE=systemd VP_PREFLIGHT_GITHUB_RESULT=ok \
+  sh "$ROOT/vp.sh" preflight 2>&1)"; then
+  printf 'preflight accepted an external same-name service\n' >&2
+  exit 1
+fi
+printf '%s\n' "$preflight_conflict_output" | grep -q 'Mihomo 服务：同名定义属于外部任务'
+printf '%s\n' "$preflight_conflict_output" | grep -q '预检结论：暂不建议安装'
+[ ! -e "$preflight_root" ]
+
+if VP_CONFIG_DIR="$preflight_root/etc" VP_DATA_DIR="$preflight_root/lib" \
+  VP_LOG_DIR="$preflight_root/log" VP_LIB_DIR="$preflight_root/usr" \
+  VP_CORE_SYSTEMD_SERVICE="$TMP/preflight-core.service" \
+  VP_TUNNEL_SYSTEMD_SERVICE="$TMP/preflight-tunnel.service" \
+  VP_MEMORY_LIMIT_BYTES_OVERRIDE=$((16 * 1048576)) VP_ALLOW_TEST_HOOKS=1 \
+  VP_SERVICE_MANAGER_OVERRIDE=systemd VP_PREFLIGHT_GITHUB_RESULT=ok \
+  sh "$ROOT/vp.sh" preflight >/dev/null 2>&1; then
+  printf 'preflight accepted memory below the minimum\n' >&2
+  exit 1
+fi
+[ ! -e "$preflight_root" ]
+
+if VP_CONFIG_DIR="$preflight_root/etc" VP_DATA_DIR="$preflight_root/lib" \
+  VP_LOG_DIR="$preflight_root/log" VP_LIB_DIR="$preflight_root/usr" \
+  VP_MEMORY_LIMIT_BYTES_OVERRIDE=$((128 * 1048576)) VP_ALLOW_TEST_HOOKS=1 \
+  VP_SERVICE_MANAGER_OVERRIDE=none VP_PREFLIGHT_GITHUB_RESULT=ok \
+  sh "$ROOT/vp.sh" preflight >/dev/null 2>&1; then
+  printf 'preflight accepted a host without a service manager\n' >&2
+  exit 1
+fi
+[ ! -e "$preflight_root" ]
+
 VP_CONFIG_DIR="$TMP/etc" \
 VP_DATA_DIR="$TMP/lib" \
 VP_LOG_DIR="$TMP/log" \

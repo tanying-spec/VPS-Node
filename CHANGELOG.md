@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.0-dev.90
+
+- Added `vp preflight`, a single read-only installation readiness page with a clear `can install` or `do not install yet` conclusion.
+- The check covers root access, OS/architecture, service manager, package manager, effective memory and CPU, disk space, system DNS, GitHub reachability, managed runner/service ownership, reserved ports and existing Xray/sing-box processes.
+- The advanced numbered menu now separates pre-install readiness from the post-install `doctor` check, and README usage starts with the new command.
+- Preflight never installs packages, initializes layout, downloads files, reads Tunnel credentials or changes services/network state; regression tests verify zero project writes for ready, conflict, low-memory and unsupported-service-manager cases.
+- The authorized Alpine host reported OpenRC, 122 MiB effective memory, 1 effective CPU, working DNS/GitHub, no VPS-Node service conflicts and an unblocked installation conclusion.
+
 ## 0.2.0-dev.89
 
 - Mihomo and Cloudflare Tunnel installation now checks service-manager support plus runner/service ownership immediately after `INSTALL` confirmation and before dependencies, layout initialization, downloads or Token reads.

@@ -2,7 +2,7 @@
 
 set -u
 
-VP_VERSION="0.2.0-dev.89"
+VP_VERSION="0.2.0-dev.90"
 VP_CONFIG_DIR="${VP_CONFIG_DIR:-/etc/vps-node}"
 VP_DATA_DIR="${VP_DATA_DIR:-/var/lib/vps-node}"
 VP_LOG_DIR="${VP_LOG_DIR:-/var/log/vps-node}"
@@ -4643,6 +4643,140 @@ dns_probe() {
   fi
 }
 
+preflight_github_probe() {
+  if [ "${VP_ALLOW_TEST_HOOKS:-0}" = 1 ]; then
+    case "${VP_PREFLIGHT_GITHUB_RESULT:-}" in
+      ok) return 0 ;;
+      fail) return 1 ;;
+      skip) return 2 ;;
+    esac
+  fi
+  command -v curl >/dev/null 2>&1 || return 2
+  curl -fsSL --max-time 8 -o /dev/null https://api.github.com/repos/tanying-spec/VPS-Node || return 1
+}
+
+installation_preflight() {
+  PREFLIGHT_BLOCKERS=0
+  PREFLIGHT_WARNINGS=0
+  preflight_block() { error "$*"; PREFLIGHT_BLOCKERS=$((PREFLIGHT_BLOCKERS + 1)); }
+  preflight_notice() { warn "$*"; PREFLIGHT_WARNINGS=$((PREFLIGHT_WARNINGS + 1)); }
+
+  printf '\nVPS-Node %s 安装前一键预检\n' "$VP_VERSION"
+  printf '%s\n' '----------------------------------------'
+  printf '说明：只读取当前环境，不安装软件、不创建目录、不修改服务或网络参数。\n\n'
+
+  if [ "$(id -u)" = 0 ]; then ok "权限：root，可执行完整安装。"; else preflight_block "权限：当前不是 root；请先输入 su -。"; fi
+  case "$(uname -m 2>/dev/null)" in
+    x86_64|amd64|aarch64|arm64) ok "CPU 架构：受支持（$(uname -m 2>/dev/null)）。" ;;
+    *) preflight_block "CPU 架构：当前架构尚未支持。" ;;
+  esac
+  if [ -r /etc/os-release ]; then
+    preflight_os="$(awk -F= '$1=="PRETTY_NAME"{sub(/^[^=]*=/,"");gsub(/^"|"$/,"");print;exit}' /etc/os-release 2>/dev/null)"
+    ok "系统：${preflight_os:-Linux}。"
+  else
+    preflight_notice "系统：无法读取版本信息，将按通用 Linux 处理。"
+  fi
+
+  preflight_manager="$(service_manager)"
+  case "$preflight_manager" in
+    systemd|openrc) ok "服务管理：$preflight_manager。" ;;
+    *) preflight_block "服务管理：未检测到可用的 systemd 或 OpenRC，节点无法自动守护。" ;;
+  esac
+  if command -v apk >/dev/null 2>&1 || command -v apt-get >/dev/null 2>&1; then
+    ok "依赖安装：可自动补齐缺少的软件包。"
+  else
+    preflight_block "依赖安装：未找到 apk 或 apt-get。"
+  fi
+
+  memory_snapshot
+  preflight_capacity_bytes="${VP_MEMORY_LIMIT_BYTES_OVERRIDE:-$MEM_LIMIT_BYTES}"
+  if [ "$preflight_capacity_bytes" -le 0 ] 2>/dev/null; then
+    preflight_total_kib="$(read_meminfo_value MemTotal)"
+    case "$preflight_total_kib" in ''|*[!0-9]*) preflight_total_kib=0 ;; esac
+    preflight_capacity_bytes=$((preflight_total_kib * 1024))
+  fi
+  preflight_capacity_mib=$((preflight_capacity_bytes / 1048576))
+  if [ "$preflight_capacity_mib" -lt 32 ]; then
+    preflight_block "内存：${preflight_capacity_mib} MiB，低于最低安全值 32 MiB。"
+  elif [ "$preflight_capacity_mib" -lt 64 ]; then
+    preflight_notice "内存：${preflight_capacity_mib} MiB，可安装但余量很小。"
+  else
+    ok "内存：可用上限约 ${preflight_capacity_mib} MiB，将自动选择资源档位。"
+  fi
+  cpu_snapshot
+  ok "CPU：实际可用约 $CPU_EFFECTIVE_COUNT 核，将自动设置 GOMAXPROCS。"
+
+  preflight_disk_kib="$(df -Pk / 2>/dev/null | awk 'NR==2{print $4;exit}')"
+  case "$preflight_disk_kib" in ''|*[!0-9]*) preflight_notice "磁盘：无法读取可用空间。" ;;
+    *) if [ "$preflight_disk_kib" -lt 16384 ]; then preflight_block "磁盘：可用空间不足 16 MiB。"; else ok "磁盘：根文件系统可用 $((preflight_disk_kib / 1024)) MiB。"; fi ;;
+  esac
+
+  dns_probe
+  case "$?" in
+    0) ok "系统 DNS：可以解析 GitHub。" ;;
+    2) preflight_notice "系统 DNS：缺少 getent/nslookup，安装核心时仍会执行专用 DNS 检测。" ;;
+    *) preflight_block "系统 DNS：当前无法解析 GitHub。" ;;
+  esac
+  preflight_github_probe
+  case "$?" in
+    0) ok "GitHub：项目仓库可以访问。" ;;
+    2) preflight_notice "GitHub：缺少 curl，正式安装时会先尝试补齐。" ;;
+    *) preflight_block "GitHub：当前无法访问项目仓库。" ;;
+  esac
+
+  if [ "$preflight_manager" = systemd ]; then
+    preflight_core_target="$VP_CORE_SYSTEMD_SERVICE"
+    preflight_tunnel_target="$VP_TUNNEL_SYSTEMD_SERVICE"
+  else
+    preflight_core_target="$VP_CORE_OPENRC_SERVICE"
+    preflight_tunnel_target="$VP_TUNNEL_OPENRC_SERVICE"
+  fi
+  if [ -e "$VP_CORE_RUNNER" ] || [ -L "$VP_CORE_RUNNER" ]; then
+    core_runner_owned && ok "Mihomo 运行器：现有文件属于 VPS-Node，可安全更新。" || preflight_block "Mihomo 运行器：路径被外部任务占用。"
+  else
+    ok "Mihomo 运行器：无冲突。"
+  fi
+  if [ -e "$preflight_core_target" ] || [ -L "$preflight_core_target" ]; then
+    core_service_file_owned "$preflight_core_target" && ok "Mihomo 服务：现有定义属于 VPS-Node，可安全更新。" || preflight_block "Mihomo 服务：同名定义属于外部任务。"
+  else
+    ok "Mihomo 服务：无同名定义冲突。"
+  fi
+  if [ -e "$VP_TUNNEL_RUNNER" ] || [ -L "$VP_TUNNEL_RUNNER" ]; then
+    tunnel_runner_owned && ok "Tunnel 运行器：现有文件属于 VPS-Node，可安全更新。" || preflight_block "Tunnel 运行器：路径被外部任务占用。"
+  else
+    ok "Tunnel 运行器：无冲突。"
+  fi
+  if [ -e "$preflight_tunnel_target" ] || [ -L "$preflight_tunnel_target" ]; then
+    tunnel_service_file_owned "$preflight_tunnel_target" && ok "Tunnel 服务：现有定义属于 VPS-Node，可安全更新。" || preflight_block "Tunnel 服务：同名定义属于外部任务。"
+  else
+    ok "Tunnel 服务：无同名定义冲突。"
+  fi
+
+  for preflight_port in 17890 19090 22041; do
+    if port_in_use "$preflight_port"; then
+      preflight_notice "默认端口 $preflight_port 已占用；安装时会自动选择并保存空闲端口。"
+    fi
+  done
+  for preflight_process in xray sing-box; do
+    if command -v pgrep >/dev/null 2>&1 && pgrep -x "$preflight_process" >/dev/null 2>&1; then
+      preflight_notice "检测到现有 $preflight_process 进程；VPS-Node 不会停止或修改它。"
+    fi
+  done
+
+  printf '\n预检结论：'
+  if [ "$PREFLIGHT_BLOCKERS" -gt 0 ]; then
+    printf '暂不建议安装（%s 个阻止项，%s 个提醒）。\n' "$PREFLIGHT_BLOCKERS" "$PREFLIGHT_WARNINGS"
+    printf '处理阻止项后重新运行：vp preflight\n'
+    return 1
+  fi
+  if [ "$PREFLIGHT_WARNINGS" -gt 0 ]; then
+    printf '可以安装（%s 个提醒，安装过程会继续验证）。\n' "$PREFLIGHT_WARNINGS"
+  else
+    printf '可以安装，未发现阻止项。\n'
+  fi
+  return 0
+}
+
 doctor() {
   errors=0
   warnings=0
@@ -5318,14 +5452,15 @@ interactive_update() {
 }
 
 advanced_menu() {
-  printf '1. 基础环境检查\n2. 初始化状态目录\n3. 安装/更新 Mihomo 内核\n4. 安装/更新 Cloudflare Tunnel\n5. 查看凭据轮换状态\n0. 返回\n请选择：'
+  printf '1. 安装前一键环境预检（只读）\n2. 已安装环境基础检查\n3. 初始化状态目录\n4. 安装/更新 Mihomo 内核\n5. 安装/更新 Cloudflare Tunnel\n6. 查看凭据轮换状态\n0. 返回\n请选择：'
   read -r action || true
   case "$action" in
-    1) doctor ;;
-    2) init_layout ;;
-    3) core_install ;;
-    4) tunnel_install ;;
-    5) show_rotations ;;
+    1) installation_preflight ;;
+    2) doctor ;;
+    3) init_layout ;;
+    4) core_install ;;
+    5) tunnel_install ;;
+    6) show_rotations ;;
     0) return 0 ;;
     *) warn "无效选择。" ;;
   esac
@@ -5396,6 +5531,7 @@ menu() {
 }
 
 case "${1:-}" in
+  preflight|install-check) installation_preflight ;;
   init) init_layout ;;
   core-install|install-core) core_install ;;
   reality-add|add-reality) shift; reality_add "$@" ;;
@@ -5443,7 +5579,7 @@ case "${1:-}" in
   _test-select-release-record) shift; test_select_release_asset_record "$@" ;;
   _test-json-top-level) shift; test_json_top_level_string "$@" ;;
   help|-h|--help)
-    printf '用法：vp [status|version-status|doctor|health|repair|report|self-heal|monitor-install|stability|network|network-optimize|network-repair|network-rollback|test-all|optimize|maintain|update|rollback|init|core-install|reality-add|tunnel-install|argo-add|nodes|subscription|edit|delete|link|test-node|rotate|rotations|rotate-finalize|backup|backups|backup-prune|restore|migrate-mh|uninstall|version]\n'
+    printf '用法：vp [preflight|status|version-status|doctor|health|repair|report|self-heal|monitor-install|stability|network|network-optimize|network-repair|network-rollback|test-all|optimize|maintain|update|rollback|init|core-install|reality-add|tunnel-install|argo-add|nodes|subscription|edit|delete|link|test-node|rotate|rotations|rotate-finalize|backup|backups|backup-prune|restore|migrate-mh|uninstall|version]\n'
     ;;
   '') menu ;;
   *) error "未知命令：$1"; exit 2 ;;

@@ -38,6 +38,7 @@ vp
 安装后常用命令：
 
 ```sh
+vp preflight
 vp core-install
 vp reality-add home 443 www.amd.com ipv4
 vp reality-add home-v6 8443 www.amd.com ipv6
@@ -81,6 +82,8 @@ vp update --allow-downgrade
 vp rollback
 vp uninstall
 ```
+
+`vp preflight` 是安装前的一键只读检查：集中显示 root 权限、系统与架构、服务管理方式、内存/CPU 自适应、磁盘、DNS、GitHub 连通性、默认端口和外部同名服务冲突，并给出“可以安装”或“暂不建议安装”的明确结论。它不会安装依赖、创建项目目录、读取 Tunnel Token 或修改服务和网络参数。
 
 普通用户可以直接运行 `vp`，首页菜单会引导创建主节点、备用节点、测试、修复、维护和迁移；命令参数适合高级用户和自动化。
 

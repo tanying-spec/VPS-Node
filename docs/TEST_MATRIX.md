@@ -1,6 +1,6 @@
 # 测试矩阵与证据等级
 
-所有需要真实 Mihomo、OpenRC、网络出口或资源压力的实机测试只能在 `134.209.180.134` 运行。`dev.89` 已完成隔离功能与真实 DNS 验收。原始脱敏证据摘要见 `REAL_HOST_EVIDENCE.md`。
+所有需要真实 Mihomo、OpenRC、网络出口或资源压力的实机测试只能在 `134.209.180.134` 运行。`dev.90` 已完成隔离功能验收与统一只读预检；`dev.89` 已完成真实 DNS 验收。原始脱敏证据摘要见 `REAL_HOST_EVIDENCE.md`。
 
 Windows 远程编排入口 `tests/run_authorized_host.ps1` 同样将主机和端口写死，禁用密码认证；上传前先执行只读能力预检，只上传验收白名单文件，并在下载后本地复核脱敏预检/验收证据 SHA-256 及语义；CI 对这些约束执行静态守卫。
 
@@ -9,6 +9,7 @@ Windows 远程编排入口 `tests/run_authorized_host.ps1` 同样将主机和端
 | 类别 | 当前证据 | 结论 |
 | --- | --- | --- |
 | Shell 语法、安装与初始化 | GitHub Actions：`tests/smoke.sh`、`tests/install_smoke.sh` | 已通过 |
+| 安装前统一只读预检 | `vp preflight` 正常、外部服务冲突、低内存、无服务管理器与零写入场景 | 自动测试与唯一 Alpine 主机真实预检通过 |
 | 配置事务、失败回滚、SIGKILL 恢复 | `tests/smoke.sh` 故障注入 | 已通过 |
 | 凭据最终切换 | 轮换开始/最终切换数据库状态绑定、未确认零写入、宽限期提前失效保护、并发节点与宽限记录保留、重启失败恢复双凭据、确认后旧凭据彻底移除 | 已通过 |
 | 脱敏诊断证据 | UUID/域名/Token/管理文件路径不泄露；网络六态分别生成 mode 600 报告并通过 SHA-256；异常状态不输出未经验证目标；已有报告与符号链接拒绝；报告提交后中断不会留下无 sidecar 文件 | 已通过 |
@@ -24,9 +25,9 @@ Windows 远程编排入口 `tests/run_authorized_host.ps1` 同样将主机和端
 | 恢复点长期保留 | 归档/sidecar 原子不覆盖与所有权清理、7→3 保留、异常/无关文件保护、符号链接目录拒绝、确认后同名有效备份替换拒绝 | 已通过 |
 | 安装、更新、回滚、来源与降级保护 | 零写入候选预览与取消、命令级 `UPDATE` 确认、本地候选源、顶层 SHA 样本、同版本异内容/隐式降级拒绝、显式降级、孤立恢复点保留、安装/更新/回滚状态绑定与原子不覆盖、两阶段故障恢复及 SHA-256 篡改注入 | 已通过 |
 | 可恢复卸载及文件残留 | 外部恢复包与 SHA-256、服务停止失败零删除/零网络回滚、Mihomo/cloudflared 进程级退出门槛、孤立 Tunnel 拒绝、OpenRC watchdog 暂存恢复、项目与服务定义最终残留审计、部分删除失败明确报错 | 已通过自动验证 |
-| Reality 真实认证与并发 | `tests/isolated_acceptance.sh` | `dev.89` IPv4 2/2 路通过 |
-| Alpine/OpenRC 服务生命周期 | `tests/isolated_acceptance.sh` | `dev.89` 创建、运行、卸载闭环通过 |
-| 正式 Mihomo/cloudflared 前后不变 | 状态及配置/init 哈希对比 | `dev.89` PID、镜像、命令行及全部受检摘要不变 |
+| Reality 真实认证与并发 | `tests/isolated_acceptance.sh` | `dev.90` IPv4 2/2 路通过 |
+| Alpine/OpenRC 服务生命周期 | `tests/isolated_acceptance.sh` | `dev.90` 创建、运行、卸载闭环通过 |
+| 正式 Mihomo/cloudflared 前后不变 | 状态及配置/init 哈希对比 | `dev.90` PID、镜像、命令行及全部受检摘要不变 |
 | 64–2048 MiB 真实 Mihomo 档位 | 十五个 cgroup v2 硬上限覆盖 96/160/320/640 MiB 边界前后、十五次真实内核启动、代理出口、每档 4×1 MiB 并发完整传输、`memory.peak`、零 `oom_kill`、结构化证据（不可绕过主机锁） | 测试机未委派 memory controller，明确失败且未降级模拟 |
 | 真实 CPU quota 档位 | cgroup v2 中生成配置并运行真实内核；0.5/0.999/1 核必测，按真实在线核数扩展至 1.001/1.5/2/2.001/4 核；饱和工作线程与四路传输并发，低于宿主容量时强制要求真实 `nr_throttled>0` | 测试机未委派 cpu controller，明确失败且未降级模拟 |
 | 真实 DNS 自适应 | 公共 DNS 实际查询+TCP 53 正常则保留；不可达公共地址触发系统 DNS 回退；两个模式分别由真实 Mihomo 域名代理验证且不记录解析器地址 | `dev.89` 两场景真实内核验证通过 |
