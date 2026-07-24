@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.0-dev.30
+
+- Isolated acceptance now proves formal Mihomo/cloudflared process IDs remain unchanged in addition to service states and config/init digests.
+- Added backup dry-run/apply round-trip, configuration-drift self-heal and conditional IPv6 Reality loopback to the authorized-host acceptance flow.
+- Successful acceptance writes a permission-restricted redacted evidence file plus SHA-256 outside the temporary test tree so results survive cleanup.
+
 ## 0.2.0-dev.29
 
 - Reclassified test evidence so historical host results are not presented as proof for the current version; added a requirement-by-requirement completion audit and explicit remaining release gates.

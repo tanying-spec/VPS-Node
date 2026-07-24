@@ -27,3 +27,5 @@ VP_TEST_MIHOMO_BIN=/正式内核路径 sh tests/isolated_acceptance.sh
 - Reality 回环认证与两路并发结果；
 - 卸载后隔离文件和服务清理结果；
 - 外部恢复包 SHA-256。
+
+成功后会在 `${VP_ACCEPTANCE_EVIDENCE_DIR:-/root}` 创建脱敏验收证据及 `.sha256`。证据包含当前版本、测试时间、主机、Reality/轮换/恢复/自愈/卸载结论，以及正式服务状态、PID 和配置摘要是否保持不变；不包含节点链接、UUID、域名、Token 或密钥。
