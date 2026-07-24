@@ -37,6 +37,12 @@ powershell -ExecutionPolicy Bypass -File .\tests\run_authorized_host.ps1 `
 
 四项必须同时提供。`TunnelTokenFile` 是测试机上的绝对文件路径，不是 Token 内容，并且不能使用正式 `/etc/cloudflared/token`。Public Hostname 必须预先指向该固定源站端口。可先追加 `-ValidateOnly` 离线检查参数；该模式不会连接测试机、不会读取 Token 文件。
 
+验收入口会拒绝非空的本地证据目录，避免不同批次混在一起。远端执行前必须通过当前 `vp.sh.sha256`；下载后不仅复核每个 sidecar，还会确认唯一验收记录绑定当前版本、当前脚本 SHA-256、固定主机、要求的 Tunnel 模式及全部正式服务不变结论。可运行以下命令离线自测证据验证器（不会联网）：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\tests\run_authorized_host.ps1 -SelfTestEvidence
+```
+
 脚本中的目标 IP 为常量，不能通过环境变量改成其他主机。旧的非隔离系统测试已经删除。
 
 验收脚本使用：

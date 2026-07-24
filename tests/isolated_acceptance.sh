@@ -20,6 +20,12 @@ TEST_ARGO_ORIGIN_PORT="${VP_TEST_ARGO_ORIGIN_PORT:-}"
 
 [ "$(id -u)" = 0 ] || { printf 'acceptance requires root\n' >&2; exit 1; }
 [ -x "$MIHOMO_BIN" ] || { printf 'mihomo binary is not executable\n' >&2; exit 1; }
+[ -f "$ROOT/vp.sh.sha256" ] || { printf 'vp.sh checksum file is missing\n' >&2; exit 1; }
+expected_script_sha256="$(awk 'NR == 1 { print tolower($1) }' "$ROOT/vp.sh.sha256")"
+case "$expected_script_sha256" in ''|*[!0-9a-f]*) printf 'vp.sh checksum is invalid\n' >&2; exit 1 ;; esac
+[ "${#expected_script_sha256}" -eq 64 ] || { printf 'vp.sh checksum is incomplete\n' >&2; exit 1; }
+tested_script_sha256="$(sha256sum "$ROOT/vp.sh" | awk '{print tolower($1)}')"
+[ "$tested_script_sha256" = "$expected_script_sha256" ] || { printf 'vp.sh checksum mismatch\n' >&2; exit 1; }
 case "$EVIDENCE_DIR" in /*) ;; *) printf 'evidence directory must be absolute\n' >&2; exit 1 ;; esac
 observed_host="$(curl -4 -fsS --max-time 8 https://api.ipify.org 2>/dev/null || true)"
 [ "$observed_host" = "$ACCEPT_HOST" ] || { printf 'refusing acceptance on an unauthorized host\n' >&2; exit 1; }
@@ -65,6 +71,25 @@ process_ids() {
   printf '%s' "${ids:-none}"
 }
 
+process_image_digests() {
+  process_name="$1"
+  command -v pidof >/dev/null 2>&1 || { printf unavailable; return; }
+  for process_pid in $(pidof "$process_name" 2>/dev/null || true); do
+    process_image="$(readlink -f "/proc/$process_pid/exe" 2>/dev/null || true)"
+    if [ -n "$process_image" ] && [ -f "$process_image" ]; then
+      sha256sum "$process_image" | awk '{print $1}'
+    fi
+  done | sort -u | tr '\n' ',' | sed 's/,$//'
+}
+
+process_cmdline_digests() {
+  process_name="$1"
+  command -v pidof >/dev/null 2>&1 || { printf unavailable; return; }
+  for process_pid in $(pidof "$process_name" 2>/dev/null || true); do
+    [ -r "/proc/$process_pid/cmdline" ] && sha256sum "/proc/$process_pid/cmdline" | awk '{print $1}'
+  done | sort -u | tr '\n' ',' | sed 's/,$//'
+}
+
 test_tunnel_pid() {
   command -v pidof >/dev/null 2>&1 || return 1
   for candidate_pid in $(pidof cloudflared 2>/dev/null); do
@@ -83,8 +108,16 @@ service_active cloudflared-tunnel && formal_tunnel_before=active
 formal_mihomo_config_before="$(file_digest /etc/mihomo/config.yaml)"
 formal_mihomo_init_before="$(file_digest /etc/init.d/mihomo)"
 formal_tunnel_init_before="$(file_digest /etc/init.d/cloudflared-tunnel)"
+formal_mihomo_nodes_before="$(file_digest /etc/mihomo/nodes.db)"
+formal_mihomo_state_before="$(file_digest /etc/mihomo/state.env)"
+formal_tunnel_token_before="$(file_digest /etc/cloudflared/token)"
+formal_mihomo_binary_before="$(file_digest "$MIHOMO_BIN")"
 formal_mihomo_pids_before="$(process_ids mihomo)"
 formal_tunnel_pids_before="$(process_ids cloudflared)"
+formal_mihomo_images_before="$(process_image_digests mihomo)"
+formal_tunnel_images_before="$(process_image_digests cloudflared)"
+formal_mihomo_cmdlines_before="$(process_cmdline_digests mihomo)"
+formal_tunnel_cmdlines_before="$(process_cmdline_digests cloudflared)"
 
 vp_env() {
   VP_CONFIG_DIR="$BASE/etc" VP_DATA_DIR="$BASE/lib" VP_LOG_DIR="$BASE/log" \
@@ -205,11 +238,21 @@ formal_tunnel_pids_after="$(process_ids cloudflared)"
 [ "$formal_mihomo_config_before" = "$(file_digest /etc/mihomo/config.yaml)" ]
 [ "$formal_mihomo_init_before" = "$(file_digest /etc/init.d/mihomo)" ]
 [ "$formal_tunnel_init_before" = "$(file_digest /etc/init.d/cloudflared-tunnel)" ]
+[ "$formal_mihomo_nodes_before" = "$(file_digest /etc/mihomo/nodes.db)" ]
+[ "$formal_mihomo_state_before" = "$(file_digest /etc/mihomo/state.env)" ]
+[ "$formal_tunnel_token_before" = "$(file_digest /etc/cloudflared/token)" ]
+[ "$formal_mihomo_binary_before" = "$(file_digest "$MIHOMO_BIN")" ]
+[ "$formal_mihomo_images_before" = "$(process_image_digests mihomo)" ]
+[ "$formal_tunnel_images_before" = "$(process_image_digests cloudflared)" ]
+[ "$formal_mihomo_cmdlines_before" = "$(process_cmdline_digests mihomo)" ]
+[ "$formal_tunnel_cmdlines_before" = "$(process_cmdline_digests cloudflared)" ]
 
 mkdir -p "$EVIDENCE_DIR"
 evidence_file="$EVIDENCE_DIR/vps-node-acceptance-$(date -u '+%Y%m%dT%H%M%SZ').txt"
 {
   printf 'vps_node_version=%s\n' "$tested_version"
+  printf 'tested_script_sha256=%s\n' "$tested_script_sha256"
+  printf 'source_checksum_verified=yes\n'
   printf 'authorized_host=%s\n' "$ACCEPT_HOST"
   printf 'tested_at=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
   printf 'reality_ipv4_loopback_concurrency=2/2\n'
@@ -225,6 +268,8 @@ evidence_file="$EVIDENCE_DIR/vps-node-acceptance-$(date -u '+%Y%m%dT%H%M%SZ').tx
   printf 'formal_mihomo_pids_unchanged=yes\n'
   printf 'formal_tunnel_pids_unchanged=yes\n'
   printf 'formal_config_and_init_digests_unchanged=yes\n'
+  printf 'formal_sensitive_state_digests_unchanged=yes\n'
+  printf 'formal_process_images_and_cmdlines_unchanged=yes\n'
 } > "$evidence_file"
 chmod 600 "$evidence_file"
 sha256sum "$evidence_file" > "$evidence_file.sha256"

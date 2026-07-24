@@ -6,6 +6,7 @@ param(
     [string]$TunnelHost = "",
     [string]$TunnelPath = "",
     [int]$TunnelOriginPort = 0,
+    [switch]$SelfTestEvidence,
     [switch]$ValidateOnly,
     [switch]$SkipMemoryProfiles
 )
@@ -95,6 +96,46 @@ function Assert-EvidenceChecksums([string]$Directory) {
     }
 }
 
+function Assert-AcceptanceEvidence([string]$Directory, [bool]$TunnelRequested) {
+    $acceptanceFiles = @(Get-ChildItem -LiteralPath $Directory -Filter 'vps-node-acceptance-*.txt' -File)
+    if ($acceptanceFiles.Count -ne 1) {
+        throw "Expected exactly one acceptance evidence file; found $($acceptanceFiles.Count)."
+    }
+    $values = @{}
+    foreach ($line in Get-Content -LiteralPath $acceptanceFiles[0].FullName) {
+        if ($line -notmatch '^([a-z0-9_]+)=(.*)$') { throw 'Acceptance evidence contains a malformed line.' }
+        if ($values.ContainsKey($Matches[1])) { throw "Acceptance evidence contains a duplicate key: $($Matches[1])" }
+        $values[$Matches[1]] = $Matches[2]
+    }
+    $versionMatch = Select-String -LiteralPath (Join-Path $RepoRoot 'vp.sh') -Pattern '^VP_VERSION="([^"]+)"$' | Select-Object -First 1
+    if (-not $versionMatch) { throw 'Unable to determine the local VPS-Node version.' }
+    $expectedVersion = $versionMatch.Matches[0].Groups[1].Value
+    $expectedScriptHash = (Get-FileHash -LiteralPath (Join-Path $RepoRoot 'vp.sh') -Algorithm SHA256).Hash.ToLowerInvariant()
+    $required = @{
+        vps_node_version = $expectedVersion
+        tested_script_sha256 = $expectedScriptHash
+        source_checksum_verified = 'yes'
+        authorized_host = $AuthorizedHost
+        reality_ipv4_loopback_concurrency = '2/2'
+        credential_rotation = 'passed'
+        backup_restore_roundtrip = 'passed'
+        config_drift_self_heal = 'passed'
+        diagnostic_redaction = 'passed'
+        recoverable_uninstall = 'passed'
+        formal_mihomo_pids_unchanged = 'yes'
+        formal_tunnel_pids_unchanged = 'yes'
+        formal_config_and_init_digests_unchanged = 'yes'
+        formal_sensitive_state_digests_unchanged = 'yes'
+        formal_process_images_and_cmdlines_unchanged = 'yes'
+        independent_cloudflare_tunnel = $(if ($TunnelRequested) { 'public-concurrency-and-respawn-passed' } else { 'not-requested' })
+    }
+    foreach ($key in $required.Keys) {
+        if (-not $values.ContainsKey($key) -or $values[$key] -ne $required[$key]) {
+            throw "Acceptance evidence did not prove required result: $key"
+        }
+    }
+}
+
 $TunnelInputCount = 0
 foreach ($tunnelInputPresent in @(
     -not [string]::IsNullOrWhiteSpace($TunnelTokenFile),
@@ -116,6 +157,61 @@ if ($TunnelInputCount -eq 4) {
     if (-not $TunnelPath.StartsWith('/') -or $TunnelPath -match "[\r\n]") { throw 'TunnelPath must begin with / and contain no newline.' }
     if ($TunnelOriginPort -lt 1024 -or $TunnelOriginPort -gt 65535) { throw 'TunnelOriginPort must be between 1024 and 65535.' }
 }
+if ($SelfTestEvidence) {
+    $selfTestDirectory = Join-Path ([IO.Path]::GetTempPath()) "vps-node-evidence-self-test-$RunId"
+    try {
+        New-Item -ItemType Directory -Path $selfTestDirectory | Out-Null
+        $versionMatch = Select-String -LiteralPath (Join-Path $RepoRoot 'vp.sh') -Pattern '^VP_VERSION="([^"]+)"$' | Select-Object -First 1
+        if (-not $versionMatch) { throw 'Unable to determine the local VPS-Node version for evidence self-test.' }
+        $expectedVersion = $versionMatch.Matches[0].Groups[1].Value
+        $expectedScriptHash = (Get-FileHash -LiteralPath (Join-Path $RepoRoot 'vp.sh') -Algorithm SHA256).Hash.ToLowerInvariant()
+        $evidencePath = Join-Path $selfTestDirectory 'vps-node-acceptance-selftest.txt'
+        $validLines = @(
+            "vps_node_version=$expectedVersion",
+            "tested_script_sha256=$expectedScriptHash",
+            'source_checksum_verified=yes',
+            "authorized_host=$AuthorizedHost",
+            'reality_ipv4_loopback_concurrency=2/2',
+            'independent_cloudflare_tunnel=not-requested',
+            'credential_rotation=passed',
+            'backup_restore_roundtrip=passed',
+            'config_drift_self_heal=passed',
+            'diagnostic_redaction=passed',
+            'recoverable_uninstall=passed',
+            'formal_mihomo_pids_unchanged=yes',
+            'formal_tunnel_pids_unchanged=yes',
+            'formal_config_and_init_digests_unchanged=yes',
+            'formal_sensitive_state_digests_unchanged=yes',
+            'formal_process_images_and_cmdlines_unchanged=yes'
+        )
+        $validLines | Set-Content -LiteralPath $evidencePath -Encoding ascii
+        $evidenceName = [IO.Path]::GetFileName($evidencePath)
+        $sidecarPath = "$evidencePath.sha256"
+        $hash = (Get-FileHash -LiteralPath $evidencePath -Algorithm SHA256).Hash.ToLowerInvariant()
+        "$hash  $evidenceName" | Set-Content -LiteralPath $sidecarPath -Encoding ascii
+        Assert-EvidenceChecksums $selfTestDirectory
+        Assert-AcceptanceEvidence $selfTestDirectory $false
+
+        Add-Content -LiteralPath $evidencePath -Value 'tampered=yes' -Encoding ascii
+        $checksumRejected = $false
+        try { Assert-EvidenceChecksums $selfTestDirectory } catch { $checksumRejected = $true }
+        if (-not $checksumRejected) { throw 'Evidence self-test failed to reject modified content.' }
+
+        $invalidLines = $validLines | ForEach-Object { if ($_ -like 'tested_script_sha256=*') { 'tested_script_sha256=' + ('0' * 64) } else { $_ } }
+        $invalidLines | Set-Content -LiteralPath $evidencePath -Encoding ascii
+        $hash = (Get-FileHash -LiteralPath $evidencePath -Algorithm SHA256).Hash.ToLowerInvariant()
+        "$hash  $evidenceName" | Set-Content -LiteralPath $sidecarPath -Encoding ascii
+        Assert-EvidenceChecksums $selfTestDirectory
+        $metadataRejected = $false
+        try { Assert-AcceptanceEvidence $selfTestDirectory $false } catch { $metadataRejected = $true }
+        if (-not $metadataRejected) { throw 'Evidence self-test failed to reject mismatched source metadata.' }
+        Write-Host 'Acceptance evidence verification self-test passed; no network connection was attempted.'
+        return
+    }
+    finally {
+        Remove-Item -LiteralPath $selfTestDirectory -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
 if ($ValidateOnly) {
     Write-Host 'Authorized-host runner parameters are valid; no network connection was attempted.'
     return
@@ -132,6 +228,9 @@ foreach ($required in @('vp.sh', 'vp.sh.sha256', 'tests\isolated_acceptance.sh',
     if (-not (Test-Path -LiteralPath (Join-Path $RepoRoot $required) -PathType Leaf)) {
         throw "Required local acceptance file is missing: $required"
     }
+}
+if ((Test-Path -LiteralPath $EvidenceDirectory) -and @(Get-ChildItem -LiteralPath $EvidenceDirectory -Force).Count -ne 0) {
+    throw "Evidence directory must be absent or empty to prevent mixing runs: $EvidenceDirectory"
 }
 
 Write-Host "Connecting read-only to the only authorized host $AuthorizedHost`:$AuthorizedPort (public key only)..."
@@ -211,6 +310,7 @@ exit 1
     & scp @ScpOptions "$AuthorizedUser@$AuthorizedHost`:$RemoteRoot/evidence/*" "$EvidenceDirectory\"
     if ($LASTEXITCODE -ne 0) { throw 'Failed to download redacted acceptance evidence.' }
     Assert-EvidenceChecksums $EvidenceDirectory
+    Assert-AcceptanceEvidence $EvidenceDirectory ($TunnelInputCount -eq 4)
     Write-Host "Acceptance complete; downloaded evidence passed SHA-256 verification: $EvidenceDirectory"
 }
 finally {

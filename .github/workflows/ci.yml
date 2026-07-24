@@ -42,7 +42,11 @@ jobs:
           grep -Fq '[string]$TunnelHost' tests/run_authorized_host.ps1
           grep -Fq '[string]$TunnelPath' tests/run_authorized_host.ps1
           grep -Fq '[int]$TunnelOriginPort' tests/run_authorized_host.ps1
+          grep -Fq '[switch]$SelfTestEvidence' tests/run_authorized_host.ps1
           grep -Fq '[switch]$ValidateOnly' tests/run_authorized_host.ps1
+          grep -Fq 'tested_script_sha256=' tests/isolated_acceptance.sh
+          grep -Fq 'formal_sensitive_state_digests_unchanged=yes' tests/isolated_acceptance.sh
+          grep -Fq 'formal_process_images_and_cmdlines_unchanged=yes' tests/isolated_acceptance.sh
           ! grep -Eqi 'sshpass|plink|PreferredAuthentications=password|PasswordAuthentication=yes' tests/run_authorized_host.ps1
           ! grep -Eq '(^|[^A-Za-z])TunnelToken[[:space:]]*=' tests/run_authorized_host.ps1
           ! grep -Eq '^[[:space:]]*\[(string|int)\]\$Authorized(Host|Port)' tests/run_authorized_host.ps1
@@ -84,6 +88,7 @@ jobs:
               exit 1
             }
           }
+          & $runner -SelfTestEvidence
       - name: Run portable smoke test
         shell: bash
         run: |

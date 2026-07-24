@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.0-dev.39
+
+- Isolated acceptance now verifies the uploaded `vp.sh` against its 64-character SHA-256 before execution and binds both exact version and script digest into evidence.
+- Formal-service invariants now cover sensitive state files, Tunnel token, the formal Mihomo binary, running executable images and hashed command lines in addition to service state, PIDs, config and init scripts.
+- The Windows runner refuses non-empty evidence destinations and requires exactly one acceptance record proving the current source hash, fixed host and every mandatory result, including the requested Tunnel mode.
+- Added an offline evidence verifier self-test that accepts a valid fixture, rejects content tampering and rejects forged source metadata even after its checksum sidecar is recomputed.
+
 ## 0.2.0-dev.38
 
 - Extended the fixed authorized-host runner with optional independent Cloudflare Tunnel public-edge acceptance using only a remote token file path, host, path and fixed origin port supplied together.
