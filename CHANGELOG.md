@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.0-dev.34
+
+- CLI rollback validates and stages the target version before replacing the active script, then exchanges active CLI, previous CLI and checksum through same-directory atomic moves.
+- A failed exchange after either the active-CLI or previous-CLI step restores all three original files; fault-injection tests prove their hashes remain unchanged.
+- The home dashboard and update menu now show the installed CLI version plus rollback availability, target version and checksum/syntax/version validity.
+- Added `vp version-status` for a concise non-interactive current/rollback version summary; corrupted rollback artifacts are visibly marked and remain blocked.
+
 ## 0.2.0-dev.33
 
 - Installer and self-update reject local test sources unless test hooks are explicitly enabled; non-official repository/ref sources now require a visible `VP_ALLOW_CUSTOM_SOURCE=1` opt-in.

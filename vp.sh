@@ -2,7 +2,7 @@
 
 set -u
 
-VP_VERSION="0.2.0-dev.33"
+VP_VERSION="0.2.0-dev.34"
 VP_CONFIG_DIR="${VP_CONFIG_DIR:-/etc/vps-node}"
 VP_DATA_DIR="${VP_DATA_DIR:-/var/lib/vps-node}"
 VP_LOG_DIR="${VP_LOG_DIR:-/var/log/vps-node}"
@@ -2893,6 +2893,11 @@ update_cli() {
 
 rollback_cli() {
   need_root || return 1
+  if [ "$VP_CLI_PATH" = "$VP_CLI_BACKUP_PATH" ] || [ "$VP_CLI_PATH" = "$VP_CLI_BACKUP_SHA256" ] || \
+     [ "$VP_CLI_BACKUP_PATH" = "$VP_CLI_BACKUP_SHA256" ]; then
+    error "当前脚本、回滚脚本和校验文件路径必须彼此不同。"
+    return 1
+  fi
   [ -f "$VP_CLI_BACKUP_PATH" ] || { error "没有可回滚的管理脚本。"; return 1; }
   if [ -r "$VP_CLI_BACKUP_SHA256" ]; then
     verify_script_sidecar "$VP_CLI_BACKUP_PATH" "$VP_CLI_BACKUP_SHA256" || {
@@ -2903,31 +2908,128 @@ rollback_cli() {
     warn "旧版回滚文件没有 SHA-256；本次将执行语法与版本检查，成功交换后自动补齐校验。"
   fi
   sh -n "$VP_CLI_BACKUP_PATH" || { error "备份脚本语法检查失败。"; return 1; }
-  current_tmp="$(mktemp /tmp/vp-current.XXXXXX)" || return 1
-  [ -f "$VP_CLI_PATH" ] && cp -p "$VP_CLI_PATH" "$current_tmp" || : > "$current_tmp"
-  cp -p "$VP_CLI_BACKUP_PATH" "$VP_CLI_PATH" || { rm -f "$current_tmp"; return 1; }
-  chmod 755 "$VP_CLI_PATH"
-  if ! VP_CONFIG_DIR="$VP_CONFIG_DIR" sh "$VP_CLI_PATH" version >/dev/null 2>&1; then
-    [ -s "$current_tmp" ] && cp -p "$current_tmp" "$VP_CLI_PATH"
-    rm -f "$current_tmp"
-    error "回滚版本无法运行，已恢复当前版本。"
+  rollback_version="$(VP_CONFIG_DIR="$VP_CONFIG_DIR" sh "$VP_CLI_BACKUP_PATH" version 2>/dev/null)"
+  version_key "$rollback_version" >/dev/null 2>&1 || { error "回滚脚本版本号无效。"; return 1; }
+  cli_dir="$(dirname "$VP_CLI_PATH")"
+  backup_dir="$(dirname "$VP_CLI_BACKUP_PATH")"
+  sidecar_dir="$(dirname "$VP_CLI_BACKUP_SHA256")"
+  mkdir -p "$cli_dir" "$backup_dir" "$sidecar_dir" || return 1
+  rollback_stage="$(mktemp "$cli_dir/.vp-rollback.XXXXXX")" || return 1
+  current_snapshot="$(mktemp /tmp/vp-current-snapshot.XXXXXX)" || { rm -f "$rollback_stage"; return 1; }
+  backup_snapshot="$(mktemp /tmp/vp-backup-snapshot.XXXXXX)" || { rm -f "$rollback_stage" "$current_snapshot"; return 1; }
+  sidecar_snapshot="$(mktemp /tmp/vp-sidecar-snapshot.XXXXXX)" || { rm -f "$rollback_stage" "$current_snapshot" "$backup_snapshot"; return 1; }
+  cleanup_cli_exchange() {
+    for exchange_file in "$rollback_stage" "$current_snapshot" "$backup_snapshot" "$sidecar_snapshot" "${new_backup_stage:-}" "${new_sidecar_stage:-}"; do
+      [ -n "$exchange_file" ] && rm -f "$exchange_file"
+    done
+  }
+  trap cleanup_cli_exchange EXIT HUP INT TERM
+  cp -p "$VP_CLI_BACKUP_PATH" "$rollback_stage" || { cleanup_cli_exchange; trap - EXIT HUP INT TERM; return 1; }
+  chmod 755 "$rollback_stage" || { cleanup_cli_exchange; trap - EXIT HUP INT TERM; return 1; }
+  [ "$(VP_CONFIG_DIR="$VP_CONFIG_DIR" sh "$rollback_stage" version 2>/dev/null)" = "$rollback_version" ] || { cleanup_cli_exchange; trap - EXIT HUP INT TERM; error "暂存的回滚脚本验证失败。"; return 1; }
+  current_present=0
+  if [ -f "$VP_CLI_PATH" ]; then
+    current_present=1
+    cp -p "$VP_CLI_PATH" "$current_snapshot" || { cleanup_cli_exchange; trap - EXIT HUP INT TERM; return 1; }
+    replacement_hash="$(sha256_file "$current_snapshot" 2>/dev/null)"
+    [ -n "$replacement_hash" ] || { cleanup_cli_exchange; trap - EXIT HUP INT TERM; return 1; }
+    new_backup_stage="$(mktemp "$backup_dir/.vp-previous.XXXXXX")" || { cleanup_cli_exchange; trap - EXIT HUP INT TERM; return 1; }
+    cp -p "$current_snapshot" "$new_backup_stage" || { cleanup_cli_exchange; trap - EXIT HUP INT TERM; return 1; }
+    new_sidecar_stage="$(mktemp "$sidecar_dir/.vp-previous-sha.XXXXXX")" || { cleanup_cli_exchange; trap - EXIT HUP INT TERM; return 1; }
+    printf '%s  %s\n' "$replacement_hash" "$(basename "$VP_CLI_BACKUP_PATH")" > "$new_sidecar_stage" || { cleanup_cli_exchange; trap - EXIT HUP INT TERM; return 1; }
+    chmod 600 "$new_sidecar_stage" || { cleanup_cli_exchange; trap - EXIT HUP INT TERM; return 1; }
+  fi
+  cp -p "$VP_CLI_BACKUP_PATH" "$backup_snapshot" || { cleanup_cli_exchange; trap - EXIT HUP INT TERM; return 1; }
+  sidecar_present=0
+  [ -f "$VP_CLI_BACKUP_SHA256" ] && { cp -p "$VP_CLI_BACKUP_SHA256" "$sidecar_snapshot" || { cleanup_cli_exchange; trap - EXIT HUP INT TERM; return 1; }; sidecar_present=1; }
+  restore_cli_exchange() {
+    if [ "$current_present" = 1 ]; then
+      restore_stage="$(mktemp "$cli_dir/.vp-cli-restore.XXXXXX")" || return 1
+      cp -p "$current_snapshot" "$restore_stage" && mv "$restore_stage" "$VP_CLI_PATH" || return 1
+    else
+      rm -f "$VP_CLI_PATH"
+    fi
+    backup_restore_stage="$(mktemp "$backup_dir/.vp-backup-restore.XXXXXX")" || return 1
+    cp -p "$backup_snapshot" "$backup_restore_stage" && mv "$backup_restore_stage" "$VP_CLI_BACKUP_PATH" || return 1
+    if [ "$sidecar_present" = 1 ]; then
+      sidecar_restore_stage="$(mktemp "$sidecar_dir/.vp-sidecar-restore.XXXXXX")" || return 1
+      cp -p "$sidecar_snapshot" "$sidecar_restore_stage" && mv "$sidecar_restore_stage" "$VP_CLI_BACKUP_SHA256" || return 1
+    else
+      rm -f "$VP_CLI_BACKUP_SHA256"
+    fi
+  }
+  mv "$rollback_stage" "$VP_CLI_PATH" || { cleanup_cli_exchange; trap - EXIT HUP INT TERM; return 1; }
+  rollback_stage=""
+  if [ "${VP_ALLOW_TEST_HOOKS:-0}" = 1 ] && [ "${VP_TEST_CLI_ROLLBACK_FAIL_PHASE:-}" = after-cli ]; then
+    restore_cli_exchange || true
+    cleanup_cli_exchange; trap - EXIT HUP INT TERM
+    error "测试注入：CLI 交换后失败，已恢复原状态。"
     return 1
   fi
-  if [ -s "$current_tmp" ]; then
-    replacement_hash="$(sha256_file "$current_tmp" 2>/dev/null)"
-    [ -n "$replacement_hash" ] || {
-      cp -p "$current_tmp" "$VP_CLI_PATH"
-      rm -f "$current_tmp"
-      error "无法为交换后的回滚版本生成 SHA-256，已恢复当前版本。"
+  if [ "$current_present" = 1 ]; then
+    mv "$new_backup_stage" "$VP_CLI_BACKUP_PATH" || { restore_cli_exchange || true; cleanup_cli_exchange; trap - EXIT HUP INT TERM; return 1; }
+    new_backup_stage=""
+    if [ "${VP_ALLOW_TEST_HOOKS:-0}" = 1 ] && [ "${VP_TEST_CLI_ROLLBACK_FAIL_PHASE:-}" = after-backup ]; then
+      restore_cli_exchange || true
+      cleanup_cli_exchange; trap - EXIT HUP INT TERM
+      error "测试注入：回滚文件交换后失败，已恢复原状态。"
       return 1
-    }
-    mv "$current_tmp" "$VP_CLI_BACKUP_PATH"
-    printf '%s  %s\n' "$replacement_hash" "$(basename "$VP_CLI_BACKUP_PATH")" > "$VP_CLI_BACKUP_SHA256"
-    chmod 600 "$VP_CLI_BACKUP_SHA256"
+    fi
+    mv "$new_sidecar_stage" "$VP_CLI_BACKUP_SHA256" || { restore_cli_exchange || true; cleanup_cli_exchange; trap - EXIT HUP INT TERM; return 1; }
+    new_sidecar_stage=""
   else
-    rm -f "$current_tmp" "$VP_CLI_BACKUP_PATH" "$VP_CLI_BACKUP_SHA256"
+    rm -f "$VP_CLI_BACKUP_PATH" "$VP_CLI_BACKUP_SHA256"
   fi
-  ok "管理脚本已回滚到 $(sh "$VP_CLI_PATH" version)。"
+  cleanup_cli_exchange
+  trap - EXIT HUP INT TERM
+  ok "管理脚本已回滚到 $rollback_version。"
+}
+
+inspect_cli_rollback() {
+  ROLLBACK_STATE=none
+  ROLLBACK_VERSION=""
+  [ -f "$VP_CLI_BACKUP_PATH" ] || return 0
+  if [ ! -r "$VP_CLI_BACKUP_SHA256" ]; then
+    ROLLBACK_STATE=unverified
+    return 0
+  fi
+  if ! verify_script_sidecar "$VP_CLI_BACKUP_PATH" "$VP_CLI_BACKUP_SHA256"; then
+    ROLLBACK_STATE=checksum-failed
+    return 0
+  fi
+  if ! sh -n "$VP_CLI_BACKUP_PATH" 2>/dev/null; then
+    ROLLBACK_STATE=syntax-failed
+    return 0
+  fi
+  ROLLBACK_VERSION="$(VP_CONFIG_DIR="$VP_CONFIG_DIR" sh "$VP_CLI_BACKUP_PATH" version 2>/dev/null || true)"
+  if ! version_key "$ROLLBACK_VERSION" >/dev/null 2>&1; then
+    ROLLBACK_STATE=version-invalid
+    ROLLBACK_VERSION=""
+    return 0
+  fi
+  ROLLBACK_STATE=ready
+}
+
+show_cli_version_status() {
+  inspect_cli_rollback
+  displayed_current_version="$VP_VERSION"
+  if [ -f "$VP_CLI_PATH" ]; then
+    detected_current_version="$(VP_CONFIG_DIR="$VP_CONFIG_DIR" sh "$VP_CLI_PATH" version 2>/dev/null || true)"
+    if version_key "$detected_current_version" >/dev/null 2>&1; then
+      displayed_current_version="$detected_current_version"
+    else
+      displayed_current_version="异常（当前进程 $VP_VERSION）"
+    fi
+  fi
+  printf '管理脚本：当前 %s\n' "$displayed_current_version"
+  case "$ROLLBACK_STATE" in
+    ready) printf '回滚版本：%s（校验通过）\n' "$ROLLBACK_VERSION" ;;
+    none) printf '回滚版本：无\n' ;;
+    unverified) printf '回滚版本：存在，但缺少 SHA-256 校验\n' ;;
+    checksum-failed) printf '回滚版本：校验失败，已禁止回滚\n' ;;
+    syntax-failed) printf '回滚版本：脚本语法异常，已禁止回滚\n' ;;
+    version-invalid) printf '回滚版本：版本信息异常，已禁止回滚\n' ;;
+  esac
 }
 
 node_count() {
@@ -3008,6 +3110,8 @@ show_status() {
   printf '\nVPS-Node %s\n' "$VP_VERSION"
   printf '%s\n' '----------------------------------------'
   show_dashboard_summary
+  show_cli_version_status
+  printf '%s\n' '----------------------------------------'
   printf '代理核心：%s\n' "$(service_state "$VP_CORE_SERVICE")"
   printf 'Cloudflare Tunnel：%s\n' "$(service_state "$VP_TUNNEL_SERVICE")"
   printf 'Tunnel 本地指标端口：%s\n' "$VP_TUNNEL_METRICS_PORT"
@@ -3576,6 +3680,8 @@ interactive_backup() {
 }
 
 interactive_update() {
+  show_cli_version_status
+  printf '\n'
   printf '1. 检查并更新管理脚本\n2. 回滚上一个管理脚本\n0. 返回\n请选择：'
   read -r action || true
   case "$action" in 1) update_cli ;; 2) rollback_cli ;; 0) return 0 ;; *) warn "无效选择。" ;; esac
@@ -3695,6 +3801,7 @@ case "${1:-}" in
   repair|fix) safe_repair ;;
   optimize|optimization) optimize_and_verify ;;
   version|--version|-V) printf '%s\n' "$VP_VERSION" ;;
+  version-status|versions) show_cli_version_status ;;
   uninstall) shift; uninstall_project "$@" ;;
   debug-tx) shift; debug_transaction "$@" ;;
   _test-release-records) shift; test_release_asset_records "$@" ;;
@@ -3702,7 +3809,7 @@ case "${1:-}" in
   _test-select-release-record) shift; test_select_release_asset_record "$@" ;;
   _test-json-top-level) shift; test_json_top_level_string "$@" ;;
   help|-h|--help)
-    printf '用法：vp [status|doctor|health|repair|report|self-heal|monitor-install|stability|network|network-optimize|network-rollback|test-all|optimize|maintain|update|rollback|init|core-install|reality-add|tunnel-install|argo-add|nodes|subscription|edit|delete|link|test-node|rotate|rotations|rotate-finalize|backup|restore|migrate-mh|uninstall|version]\n'
+    printf '用法：vp [status|version-status|doctor|health|repair|report|self-heal|monitor-install|stability|network|network-optimize|network-rollback|test-all|optimize|maintain|update|rollback|init|core-install|reality-add|tunnel-install|argo-add|nodes|subscription|edit|delete|link|test-node|rotate|rotations|rotate-finalize|backup|restore|migrate-mh|uninstall|version]\n'
     ;;
   '') menu ;;
   *) error "未知命令：$1"; exit 2 ;;

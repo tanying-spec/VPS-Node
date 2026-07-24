@@ -636,6 +636,10 @@ update_root="$TMP/update"
 mkdir -p "$update_root/good" "$update_root/bad" "$update_root/lower" "$update_root/same"
 cp "$ROOT/vp.sh" "$update_root/installed-vp"
 chmod 755 "$update_root/installed-vp"
+initial_version_status="$(VP_CONFIG_DIR="$TMP/etc" VP_CLI_PATH="$update_root/installed-vp" \
+  VP_CLI_BACKUP_PATH="$update_root/installed-vp.previous" sh "$ROOT/vp.sh" version-status)"
+printf '%s\n' "$initial_version_status" | grep -q "管理脚本：当前 $CURRENT_VERSION"
+printf '%s\n' "$initial_version_status" | grep -q '回滚版本：无'
 sed 's/^VP_VERSION=.*/VP_VERSION="0.2.0-dev.99"/' "$ROOT/vp.sh" > "$update_root/good/vp.sh"
 printf '%s  vp.sh\n' "$(sha256sum "$update_root/good/vp.sh" | awk '{print $1}')" > "$update_root/good/vp.sh.sha256"
 cp "$update_root/good/vp.sh" "$update_root/bad/vp.sh"
@@ -687,6 +691,24 @@ VP_ALLOW_TEST_HOOKS=1 \
 sh "$ROOT/vp.sh" update >/dev/null
 [ "$(sh "$update_root/installed-vp" version)" = '0.2.0-dev.99' ]
 (cd "$update_root" && sha256sum -c installed-vp.previous.sha256 >/dev/null)
+ready_version_status="$(VP_CONFIG_DIR="$TMP/etc" VP_CLI_PATH="$update_root/installed-vp" \
+  VP_CLI_BACKUP_PATH="$update_root/installed-vp.previous" sh "$ROOT/vp.sh" version-status)"
+printf '%s\n' "$ready_version_status" | grep -q '管理脚本：当前 0.2.0-dev.99'
+printf '%s\n' "$ready_version_status" | grep -q "回滚版本：$CURRENT_VERSION（校验通过）"
+rollback_cli_hash="$(sha256sum "$update_root/installed-vp" | awk '{print $1}')"
+rollback_backup_hash="$(sha256sum "$update_root/installed-vp.previous" | awk '{print $1}')"
+rollback_sidecar_hash="$(sha256sum "$update_root/installed-vp.previous.sha256" | awk '{print $1}')"
+for rollback_fail_phase in after-cli after-backup; do
+  if VP_CONFIG_DIR="$TMP/etc" VP_CLI_PATH="$update_root/installed-vp" \
+    VP_CLI_BACKUP_PATH="$update_root/installed-vp.previous" VP_ALLOW_TEST_HOOKS=1 \
+    VP_TEST_CLI_ROLLBACK_FAIL_PHASE="$rollback_fail_phase" sh "$ROOT/vp.sh" rollback >/dev/null 2>&1; then
+    printf 'injected CLI rollback failure unexpectedly succeeded: %s\n' "$rollback_fail_phase" >&2
+    exit 1
+  fi
+  [ "$(sha256sum "$update_root/installed-vp" | awk '{print $1}')" = "$rollback_cli_hash" ]
+  [ "$(sha256sum "$update_root/installed-vp.previous" | awk '{print $1}')" = "$rollback_backup_hash" ]
+  [ "$(sha256sum "$update_root/installed-vp.previous.sha256" | awk '{print $1}')" = "$rollback_sidecar_hash" ]
+done
 VP_CONFIG_DIR="$TMP/etc" VP_CLI_PATH="$update_root/installed-vp" \
 VP_CLI_BACKUP_PATH="$update_root/installed-vp.previous" sh "$ROOT/vp.sh" rollback >/dev/null
 [ "$(sh "$update_root/installed-vp" version)" = "$CURRENT_VERSION" ]
@@ -695,6 +717,9 @@ VP_CLI_BACKUP_PATH="$update_root/installed-vp.previous" VP_UPDATE_SOURCE_DIR="$u
 VP_ALLOW_TEST_HOOKS=1 \
 sh "$ROOT/vp.sh" update >/dev/null
 printf '\n# harmless syntax-preserving corruption\n' >> "$update_root/installed-vp.previous"
+bad_version_status="$(VP_CONFIG_DIR="$TMP/etc" VP_CLI_PATH="$update_root/installed-vp" \
+  VP_CLI_BACKUP_PATH="$update_root/installed-vp.previous" sh "$ROOT/vp.sh" version-status)"
+printf '%s\n' "$bad_version_status" | grep -q '回滚版本：校验失败，已禁止回滚'
 if VP_CONFIG_DIR="$TMP/etc" VP_CLI_PATH="$update_root/installed-vp" \
   VP_CLI_BACKUP_PATH="$update_root/installed-vp.previous" sh "$ROOT/vp.sh" rollback >/dev/null 2>&1; then
   printf 'corrupted rollback script unexpectedly accepted\n' >&2
