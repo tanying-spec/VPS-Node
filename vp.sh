@@ -2,7 +2,7 @@
 
 set -u
 
-VP_VERSION="0.2.0-dev.87"
+VP_VERSION="0.2.0-dev.88"
 VP_CONFIG_DIR="${VP_CONFIG_DIR:-/etc/vps-node}"
 VP_DATA_DIR="${VP_DATA_DIR:-/var/lib/vps-node}"
 VP_LOG_DIR="${VP_LOG_DIR:-/var/log/vps-node}"
@@ -23,6 +23,8 @@ VP_DNS_TEST_HOST="${VP_DNS_TEST_HOST:-github.com}"
 VP_DNS_PUBLIC_SERVERS="${VP_DNS_PUBLIC_SERVERS:-1.1.1.1 8.8.8.8}"
 VP_DNS_QUERY_TOOL="${VP_DNS_QUERY_TOOL:-none}"
 VP_CORE_RUNNER="$VP_LIB_DIR/bin/mihomo-run"
+VP_CORE_SYSTEMD_SERVICE="${VP_CORE_SYSTEMD_SERVICE:-/etc/systemd/system/${VP_CORE_SERVICE}.service}"
+VP_CORE_OPENRC_SERVICE="${VP_CORE_OPENRC_SERVICE:-/etc/init.d/$VP_CORE_SERVICE}"
 VP_MIXED_PORT_OVERRIDE="${VP_MIXED_PORT:-}"
 VP_CONTROLLER_PORT_OVERRIDE="${VP_CONTROLLER_PORT:-}"
 VP_MIXED_PORT_SAVED="$(awk -F= '$1=="VP_MIXED_PORT"{print $2;exit}' "$VP_STATE_FILE" 2>/dev/null || true)"
@@ -35,6 +37,8 @@ VP_TUNNEL_BACKUP_BIN="${VP_TUNNEL_BACKUP_BIN:-$VP_LIB_DIR/bin/cloudflared.previo
 VP_TUNNEL_SERVICE="${VP_TUNNEL_SERVICE:-vps-node-tunnel}"
 VP_TUNNEL_TOKEN_FILE="$VP_SECRETS_DIR/cloudflared.token"
 VP_TUNNEL_RUNNER="$VP_LIB_DIR/bin/cloudflared-run"
+VP_TUNNEL_SYSTEMD_SERVICE="${VP_TUNNEL_SYSTEMD_SERVICE:-/etc/systemd/system/${VP_TUNNEL_SERVICE}.service}"
+VP_TUNNEL_OPENRC_SERVICE="${VP_TUNNEL_OPENRC_SERVICE:-/etc/init.d/$VP_TUNNEL_SERVICE}"
 VP_TUNNEL_METRICS_PORT_OVERRIDE="${VP_TUNNEL_METRICS_PORT:-}"
 VP_TUNNEL_METRICS_PORT_SAVED="$(awk -F= '$1=="VP_TUNNEL_METRICS_PORT"{print $2;exit}' "$VP_STATE_FILE" 2>/dev/null || true)"
 VP_TUNNEL_METRICS_PORT="${VP_TUNNEL_METRICS_PORT_OVERRIDE:-${VP_TUNNEL_METRICS_PORT_SAVED:-22041}}"
@@ -602,6 +606,34 @@ service_action() {
   esac
 }
 
+core_service_file_owned() {
+  owned_core_service_path="$1"
+  [ -f "$owned_core_service_path" ] && [ ! -L "$owned_core_service_path" ] && [ -r "$owned_core_service_path" ] || return 1
+  grep -Fqx '# Managed by VPS-Node core service' "$owned_core_service_path" 2>/dev/null && return 0
+  grep -Fq 'VPS-Node proxy core' "$owned_core_service_path" 2>/dev/null &&
+    grep -Fq "$VP_CORE_RUNNER" "$owned_core_service_path" 2>/dev/null
+}
+
+tunnel_service_file_owned() {
+  owned_tunnel_service_path="$1"
+  [ -f "$owned_tunnel_service_path" ] && [ ! -L "$owned_tunnel_service_path" ] && [ -r "$owned_tunnel_service_path" ] || return 1
+  grep -Fqx '# Managed by VPS-Node tunnel service' "$owned_tunnel_service_path" 2>/dev/null && return 0
+  grep -Fq 'VPS-Node Cloudflare Tunnel' "$owned_tunnel_service_path" 2>/dev/null &&
+    grep -Fq "$VP_TUNNEL_RUNNER" "$owned_tunnel_service_path" 2>/dev/null
+}
+
+core_runner_owned() {
+  [ -f "$VP_CORE_RUNNER" ] && [ ! -L "$VP_CORE_RUNNER" ] && [ -r "$VP_CORE_RUNNER" ] || return 1
+  grep -Fqx '# Managed by VPS-Node core service' "$VP_CORE_RUNNER" 2>/dev/null && return 0
+  grep -Fq "exec \"$VP_CORE_BIN\" -d \"$VP_CONFIG_DIR\" -f \"$VP_CORE_CONFIG\"" "$VP_CORE_RUNNER" 2>/dev/null
+}
+
+tunnel_runner_owned() {
+  [ -f "$VP_TUNNEL_RUNNER" ] && [ ! -L "$VP_TUNNEL_RUNNER" ] && [ -r "$VP_TUNNEL_RUNNER" ] || return 1
+  grep -Fqx '# Managed by VPS-Node tunnel service' "$VP_TUNNEL_RUNNER" 2>/dev/null && return 0
+  grep -Fq "exec \"$VP_TUNNEL_BIN\" tunnel --no-autoupdate" "$VP_TUNNEL_RUNNER" 2>/dev/null
+}
+
 core_process_running() {
   if command -v pgrep >/dev/null 2>&1; then
     pgrep -f "$VP_CORE_BIN.*$VP_CORE_CONFIG" >/dev/null 2>&1
@@ -1035,49 +1067,70 @@ commit_tunnel_install_backup_point() {
   tunnel_prior_backup_snapshot=""
 }
 
-install_tunnel_service() {
-  [ "${VP_SKIP_SERVICE:-0}" = "1" ] && return 0
-  cat > "$VP_TUNNEL_RUNNER" <<EOF
-#!/bin/sh
-exec "$VP_TUNNEL_BIN" tunnel --no-autoupdate --protocol http2 --metrics "127.0.0.1:$VP_TUNNEL_METRICS_PORT" run --token-file "$VP_TUNNEL_TOKEN_FILE"
-EOF
-  chmod 700 "$VP_TUNNEL_RUNNER"
-  case "$(service_manager)" in
+restore_tunnel_service_install() {
+  [ -n "${tunnel_service_install_manager:-}" ] || return 0
+  if [ "${tunnel_runner_install_existed:-0}" -eq 1 ]; then cp -p "$tunnel_runner_install_backup" "$VP_TUNNEL_RUNNER" >/dev/null 2>&1 || true; else rm -f "$VP_TUNNEL_RUNNER"; fi
+  if [ "${tunnel_service_install_existed:-0}" -eq 1 ]; then cp -p "$tunnel_service_install_backup" "$tunnel_service_install_target" >/dev/null 2>&1 || true; else rm -f "$tunnel_service_install_target"; fi
+  case "$tunnel_service_install_manager" in
     systemd)
-      cat > "/etc/systemd/system/${VP_TUNNEL_SERVICE}.service" <<EOF
-[Unit]
-Description=VPS-Node Cloudflare Tunnel
-After=network-online.target $VP_CORE_SERVICE.service
-Wants=network-online.target
-
-[Service]
-Type=simple
-ExecStart=$VP_TUNNEL_RUNNER
-Restart=on-failure
-RestartSec=5s
-
-[Install]
-WantedBy=multi-user.target
-EOF
-      systemctl daemon-reload
-      systemctl enable "$VP_TUNNEL_SERVICE" >/dev/null
+      systemctl daemon-reload >/dev/null 2>&1 || true
+      if [ "${tunnel_service_install_enabled:-0}" -eq 1 ]; then systemctl enable "$VP_TUNNEL_SERVICE" >/dev/null 2>&1 || true; else systemctl disable "$VP_TUNNEL_SERVICE" >/dev/null 2>&1 || true; fi
       ;;
     openrc)
-      cat > "/etc/init.d/$VP_TUNNEL_SERVICE" <<EOF
-#!/sbin/openrc-run
-description="VPS-Node Cloudflare Tunnel"
-command="$VP_TUNNEL_RUNNER"
-supervisor="supervise-daemon"
-output_log="$VP_LOG_DIR/tunnel.log"
-error_log="$VP_LOG_DIR/tunnel.log"
-respawn_delay=5
-respawn_max=0
-depend() { need net; after $VP_CORE_SERVICE; }
-EOF
-      chmod 755 "/etc/init.d/$VP_TUNNEL_SERVICE"
-      rc-update add "$VP_TUNNEL_SERVICE" default >/dev/null
+      if [ "${tunnel_service_install_enabled:-0}" -eq 1 ]; then rc-update add "$VP_TUNNEL_SERVICE" default >/dev/null 2>&1 || true; else rc-update del "$VP_TUNNEL_SERVICE" default >/dev/null 2>&1 || true; fi
       ;;
-    *) error "无法安装 Tunnel 服务。"; return 1 ;;
+  esac
+  rm -f "${tunnel_runner_install_backup:-}" "${tunnel_service_install_backup:-}"
+  tunnel_service_install_manager=""
+}
+
+commit_tunnel_service_install() {
+  rm -f "${tunnel_runner_install_backup:-}" "${tunnel_service_install_backup:-}"
+  tunnel_service_install_manager=""
+}
+
+install_tunnel_service() {
+  [ "${VP_SKIP_SERVICE:-0}" = "1" ] && return 0
+  tunnel_service_install_manager="$(service_manager)"
+  case "$tunnel_service_install_manager" in
+    systemd) tunnel_service_install_target="$VP_TUNNEL_SYSTEMD_SERVICE" ;;
+    openrc) tunnel_service_install_target="$VP_TUNNEL_OPENRC_SERVICE" ;;
+    *) tunnel_service_install_manager=""; error "无法安装 Tunnel 服务。"; return 1 ;;
+  esac
+  tunnel_service_install_enabled=0
+  case "$tunnel_service_install_manager" in
+    systemd) systemctl is-enabled --quiet "$VP_TUNNEL_SERVICE" >/dev/null 2>&1 && tunnel_service_install_enabled=1 ;;
+    openrc) rc-update show default 2>/dev/null | grep -Eq "(^|[[:space:]])${VP_TUNNEL_SERVICE}([[:space:]]|$)" && tunnel_service_install_enabled=1 ;;
+  esac
+  if [ -e "$VP_TUNNEL_RUNNER" ] || [ -L "$VP_TUNNEL_RUNNER" ]; then tunnel_runner_owned || { tunnel_service_install_manager=""; error "Tunnel 服务运行器已被其他任务占用，拒绝覆盖：$VP_TUNNEL_RUNNER"; return 1; }; fi
+  if [ -e "$tunnel_service_install_target" ] || [ -L "$tunnel_service_install_target" ]; then tunnel_service_file_owned "$tunnel_service_install_target" || { tunnel_service_install_manager=""; error "Tunnel 同名服务定义不属于 VPS-Node，拒绝覆盖：$tunnel_service_install_target"; return 1; }; fi
+  approved_tunnel_runner_state="$(managed_file_state "$VP_TUNNEL_RUNNER")"
+  approved_tunnel_service_state="$(managed_file_state "$tunnel_service_install_target")"
+  tunnel_runner_install_existed=0; tunnel_service_install_existed=0
+  tunnel_runner_install_backup="$(mktemp /tmp/vp-tunnel-runner-service-before.XXXXXX)" || { tunnel_service_install_manager=""; return 1; }
+  tunnel_service_install_backup="$(mktemp /tmp/vp-tunnel-service-before.XXXXXX)" || { rm -f "$tunnel_runner_install_backup"; tunnel_service_install_manager=""; return 1; }
+  [ "$approved_tunnel_runner_state" = missing ] || { cp -p "$VP_TUNNEL_RUNNER" "$tunnel_runner_install_backup" || { restore_tunnel_service_install; return 1; }; tunnel_runner_install_existed=1; }
+  [ "$approved_tunnel_service_state" = missing ] || { cp -p "$tunnel_service_install_target" "$tunnel_service_install_backup" || { restore_tunnel_service_install; return 1; }; tunnel_service_install_existed=1; }
+  mkdir -p "$(dirname "$VP_TUNNEL_RUNNER")" "$(dirname "$tunnel_service_install_target")" || { restore_tunnel_service_install; return 1; }
+  tunnel_runner_stage="$(mktemp "$(dirname "$VP_TUNNEL_RUNNER")/.tunnel-runner.XXXXXX")" || { restore_tunnel_service_install; return 1; }
+  {
+    printf '#!/bin/sh\n# Managed by VPS-Node tunnel service\nexec "%s" tunnel --no-autoupdate --protocol http2 --metrics "127.0.0.1:%s" run --token-file "%s"\n' "$VP_TUNNEL_BIN" "$VP_TUNNEL_METRICS_PORT" "$VP_TUNNEL_TOKEN_FILE"
+  } > "$tunnel_runner_stage" && chmod 700 "$tunnel_runner_stage" || { rm -f "$tunnel_runner_stage"; restore_tunnel_service_install; return 1; }
+  tunnel_service_stage="$(mktemp "$(dirname "$tunnel_service_install_target")/.tunnel-service.XXXXXX")" || { rm -f "$tunnel_runner_stage"; restore_tunnel_service_install; return 1; }
+  if [ "$tunnel_service_install_manager" = systemd ]; then
+    {
+      printf '# Managed by VPS-Node tunnel service\n[Unit]\nDescription=VPS-Node Cloudflare Tunnel\nAfter=network-online.target %s.service\nWants=network-online.target\n\n[Service]\nType=simple\nExecStart=%s\nRestart=on-failure\nRestartSec=5s\n\n[Install]\nWantedBy=multi-user.target\n' "$VP_CORE_SERVICE" "$VP_TUNNEL_RUNNER"
+    } > "$tunnel_service_stage" && chmod 600 "$tunnel_service_stage" || { rm -f "$tunnel_runner_stage" "$tunnel_service_stage"; restore_tunnel_service_install; return 1; }
+  else
+    {
+      printf '#!/sbin/openrc-run\n# Managed by VPS-Node tunnel service\ndescription="VPS-Node Cloudflare Tunnel"\ncommand="%s"\nsupervisor="supervise-daemon"\noutput_log="%s/tunnel.log"\nerror_log="%s/tunnel.log"\nrespawn_delay=5\nrespawn_max=0\ndepend() { need net; after %s; }\n' "$VP_TUNNEL_RUNNER" "$VP_LOG_DIR" "$VP_LOG_DIR" "$VP_CORE_SERVICE"
+    } > "$tunnel_service_stage" && chmod 755 "$tunnel_service_stage" || { rm -f "$tunnel_runner_stage" "$tunnel_service_stage"; restore_tunnel_service_install; return 1; }
+  fi
+  [ "$(managed_file_state "$VP_TUNNEL_RUNNER")" = "$approved_tunnel_runner_state" ] && [ "$(managed_file_state "$tunnel_service_install_target")" = "$approved_tunnel_service_state" ] || { rm -f "$tunnel_runner_stage" "$tunnel_service_stage"; restore_tunnel_service_install; error "Tunnel 服务文件在提交前发生变化，已中止。"; return 1; }
+  mv "$tunnel_runner_stage" "$VP_TUNNEL_RUNNER" && mv "$tunnel_service_stage" "$tunnel_service_install_target" || { restore_tunnel_service_install; return 1; }
+  case "$tunnel_service_install_manager" in
+    systemd) systemctl daemon-reload >/dev/null 2>&1 && systemctl enable "$VP_TUNNEL_SERVICE" >/dev/null || { restore_tunnel_service_install; error "Tunnel systemd 服务启用失败，已恢复原定义。"; return 1; } ;;
+    openrc) rc-update add "$VP_TUNNEL_SERVICE" default >/dev/null || { restore_tunnel_service_install; error "Tunnel OpenRC 服务启用失败，已恢复原定义。"; return 1; } ;;
   esac
 }
 
@@ -1148,20 +1201,6 @@ rollback_tunnel_install() {
     rm -f "$VP_TUNNEL_RUNNER"
   fi
   if [ "${VP_SKIP_SERVICE:-0}" != "1" ]; then
-    if [ "$had_runner" = "0" ]; then
-      case "$(service_manager)" in
-        systemd)
-          systemctl disable --now "$VP_TUNNEL_SERVICE" >/dev/null 2>&1 || true
-          rm -f "/etc/systemd/system/${VP_TUNNEL_SERVICE}.service"
-          systemctl daemon-reload >/dev/null 2>&1 || true
-          ;;
-        openrc)
-          rc-service "$VP_TUNNEL_SERVICE" stop >/dev/null 2>&1 || true
-          rc-update del "$VP_TUNNEL_SERVICE" default >/dev/null 2>&1 || true
-          rm -f "/etc/init.d/$VP_TUNNEL_SERVICE"
-          ;;
-      esac
-    fi
     if [ "$was_running" = "1" ]; then
       service_action restart "$VP_TUNNEL_SERVICE" >/dev/null 2>&1 || true
     else
@@ -1245,6 +1284,7 @@ tunnel_install() {
   cleanup_interrupted_tunnel_install() {
     [ "${tunnel_install_cleanup_active:-0}" = 1 ] || return 0
     [ -z "${token_candidate:-}" ] || rm -f "$token_candidate"
+    restore_tunnel_service_install
     rollback_tunnel_install "$tunnel_had_binary" "$tunnel_had_token" "$token_backup" "$tunnel_was_running" "$tunnel_had_runner" "$runner_backup"
     abort_state_transaction
     rm -f "$token_backup" "$runner_backup"
@@ -1286,6 +1326,7 @@ tunnel_install() {
     error "Tunnel 状态提交失败，已恢复安装前状态。"
     return 1
   fi
+  commit_tunnel_service_install
   tunnel_install_cleanup_active=0
   commit_tunnel_install_backup_point
   rm -f "$token_backup" "$runner_backup"
@@ -1339,55 +1380,70 @@ argo_add() {
   warn "请确认 Cloudflare Tunnel 公网主机名的服务指向 http://127.0.0.1:$port。"
 }
 
-install_core_service() {
-  [ "${VP_SKIP_SERVICE:-0}" = "1" ] && return 0
-  cat > "$VP_CORE_RUNNER" <<EOF
-#!/bin/sh
-set -a
-. "$VP_CORE_ENV"
-set +a
-exec "$VP_CORE_BIN" -d "$VP_CONFIG_DIR" -f "$VP_CORE_CONFIG"
-EOF
-  chmod 700 "$VP_CORE_RUNNER"
-  manager="$(service_manager)"
-  case "$manager" in
+restore_core_service_install() {
+  [ -n "${core_service_install_manager:-}" ] || return 0
+  if [ "${core_runner_install_existed:-0}" -eq 1 ]; then cp -p "$core_runner_install_backup" "$VP_CORE_RUNNER" >/dev/null 2>&1 || true; else rm -f "$VP_CORE_RUNNER"; fi
+  if [ "${core_service_install_existed:-0}" -eq 1 ]; then cp -p "$core_service_install_backup" "$core_service_install_target" >/dev/null 2>&1 || true; else rm -f "$core_service_install_target"; fi
+  case "$core_service_install_manager" in
     systemd)
-      cat > "/etc/systemd/system/${VP_CORE_SERVICE}.service" <<EOF
-[Unit]
-Description=VPS-Node proxy core
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-ExecStart=$VP_CORE_RUNNER
-Restart=on-failure
-RestartSec=2s
-LimitNOFILE=1048576
-
-[Install]
-WantedBy=multi-user.target
-EOF
-      systemctl daemon-reload
-      systemctl enable "$VP_CORE_SERVICE" >/dev/null
+      systemctl daemon-reload >/dev/null 2>&1 || true
+      if [ "${core_service_install_enabled:-0}" -eq 1 ]; then systemctl enable "$VP_CORE_SERVICE" >/dev/null 2>&1 || true; else systemctl disable "$VP_CORE_SERVICE" >/dev/null 2>&1 || true; fi
       ;;
     openrc)
-      cat > "/etc/init.d/$VP_CORE_SERVICE" <<EOF
-#!/sbin/openrc-run
-description="VPS-Node proxy core"
-command="$VP_CORE_RUNNER"
-supervisor="supervise-daemon"
-output_log="$VP_LOG_DIR/core.log"
-error_log="$VP_LOG_DIR/core.err"
-respawn_delay=2
-respawn_max=0
-rc_ulimit="-n 1048576"
-depend() { need net; }
-EOF
-      chmod 755 "/etc/init.d/$VP_CORE_SERVICE"
-      rc-update add "$VP_CORE_SERVICE" default >/dev/null
+      if [ "${core_service_install_enabled:-0}" -eq 1 ]; then rc-update add "$VP_CORE_SERVICE" default >/dev/null 2>&1 || true; else rc-update del "$VP_CORE_SERVICE" default >/dev/null 2>&1 || true; fi
       ;;
-    *) error "无法安装服务：系统不支持 systemd 或 OpenRC。"; return 1 ;;
+  esac
+  rm -f "${core_runner_install_backup:-}" "${core_service_install_backup:-}"
+  core_service_install_manager=""
+}
+
+commit_core_service_install() {
+  rm -f "${core_runner_install_backup:-}" "${core_service_install_backup:-}"
+  core_service_install_manager=""
+}
+
+install_core_service() {
+  [ "${VP_SKIP_SERVICE:-0}" = "1" ] && return 0
+  core_service_install_manager="$(service_manager)"
+  case "$core_service_install_manager" in
+    systemd) core_service_install_target="$VP_CORE_SYSTEMD_SERVICE" ;;
+    openrc) core_service_install_target="$VP_CORE_OPENRC_SERVICE" ;;
+    *) core_service_install_manager=""; error "无法安装服务：系统不支持 systemd 或 OpenRC。"; return 1 ;;
+  esac
+  core_service_install_enabled=0
+  case "$core_service_install_manager" in
+    systemd) systemctl is-enabled --quiet "$VP_CORE_SERVICE" >/dev/null 2>&1 && core_service_install_enabled=1 ;;
+    openrc) rc-update show default 2>/dev/null | grep -Eq "(^|[[:space:]])${VP_CORE_SERVICE}([[:space:]]|$)" && core_service_install_enabled=1 ;;
+  esac
+  if [ -e "$VP_CORE_RUNNER" ] || [ -L "$VP_CORE_RUNNER" ]; then core_runner_owned || { core_service_install_manager=""; error "Mihomo 服务运行器已被其他任务占用，拒绝覆盖：$VP_CORE_RUNNER"; return 1; }; fi
+  if [ -e "$core_service_install_target" ] || [ -L "$core_service_install_target" ]; then core_service_file_owned "$core_service_install_target" || { core_service_install_manager=""; error "Mihomo 同名服务定义不属于 VPS-Node，拒绝覆盖：$core_service_install_target"; return 1; }; fi
+  approved_core_runner_state="$(managed_file_state "$VP_CORE_RUNNER")"
+  approved_core_service_state="$(managed_file_state "$core_service_install_target")"
+  core_runner_install_existed=0; core_service_install_existed=0
+  core_runner_install_backup="$(mktemp /tmp/vp-core-runner-before.XXXXXX)" || { core_service_install_manager=""; return 1; }
+  core_service_install_backup="$(mktemp /tmp/vp-core-service-before.XXXXXX)" || { rm -f "$core_runner_install_backup"; core_service_install_manager=""; return 1; }
+  [ "$approved_core_runner_state" = missing ] || { cp -p "$VP_CORE_RUNNER" "$core_runner_install_backup" || { restore_core_service_install; return 1; }; core_runner_install_existed=1; }
+  [ "$approved_core_service_state" = missing ] || { cp -p "$core_service_install_target" "$core_service_install_backup" || { restore_core_service_install; return 1; }; core_service_install_existed=1; }
+  mkdir -p "$(dirname "$VP_CORE_RUNNER")" "$(dirname "$core_service_install_target")" || { restore_core_service_install; return 1; }
+  core_runner_stage="$(mktemp "$(dirname "$VP_CORE_RUNNER")/.core-runner.XXXXXX")" || { restore_core_service_install; return 1; }
+  {
+    printf '#!/bin/sh\n# Managed by VPS-Node core service\nset -a\n. "%s"\nset +a\nexec "%s" -d "%s" -f "%s"\n' "$VP_CORE_ENV" "$VP_CORE_BIN" "$VP_CONFIG_DIR" "$VP_CORE_CONFIG"
+  } > "$core_runner_stage" && chmod 700 "$core_runner_stage" || { rm -f "$core_runner_stage"; restore_core_service_install; return 1; }
+  core_service_stage="$(mktemp "$(dirname "$core_service_install_target")/.core-service.XXXXXX")" || { rm -f "$core_runner_stage"; restore_core_service_install; return 1; }
+  if [ "$core_service_install_manager" = systemd ]; then
+    {
+      printf '# Managed by VPS-Node core service\n[Unit]\nDescription=VPS-Node proxy core\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nExecStart=%s\nRestart=on-failure\nRestartSec=2s\nLimitNOFILE=1048576\n\n[Install]\nWantedBy=multi-user.target\n' "$VP_CORE_RUNNER"
+    } > "$core_service_stage" && chmod 600 "$core_service_stage" || { rm -f "$core_runner_stage" "$core_service_stage"; restore_core_service_install; return 1; }
+  else
+    {
+      printf '#!/sbin/openrc-run\n# Managed by VPS-Node core service\ndescription="VPS-Node proxy core"\ncommand="%s"\nsupervisor="supervise-daemon"\noutput_log="%s/core.log"\nerror_log="%s/core.err"\nrespawn_delay=2\nrespawn_max=0\nrc_ulimit="-n 1048576"\ndepend() { need net; }\n' "$VP_CORE_RUNNER" "$VP_LOG_DIR" "$VP_LOG_DIR"
+    } > "$core_service_stage" && chmod 755 "$core_service_stage" || { rm -f "$core_runner_stage" "$core_service_stage"; restore_core_service_install; return 1; }
+  fi
+  [ "$(managed_file_state "$VP_CORE_RUNNER")" = "$approved_core_runner_state" ] && [ "$(managed_file_state "$core_service_install_target")" = "$approved_core_service_state" ] || { rm -f "$core_runner_stage" "$core_service_stage"; restore_core_service_install; error "Mihomo 服务文件在提交前发生变化，已中止。"; return 1; }
+  mv "$core_runner_stage" "$VP_CORE_RUNNER" && mv "$core_service_stage" "$core_service_install_target" || { restore_core_service_install; return 1; }
+  case "$core_service_install_manager" in
+    systemd) systemctl daemon-reload >/dev/null 2>&1 && systemctl enable "$VP_CORE_SERVICE" >/dev/null || { restore_core_service_install; error "Mihomo systemd 服务启用失败，已恢复原定义。"; return 1; } ;;
+    openrc) rc-update add "$VP_CORE_SERVICE" default >/dev/null || { restore_core_service_install; error "Mihomo OpenRC 服务启用失败，已恢复原定义。"; return 1; } ;;
   esac
 }
 
@@ -1603,6 +1659,7 @@ core_install() {
   cleanup_interrupted_core_install() {
     [ "${core_install_cleanup_active:-0}" = 1 ] || return 0
     abort_state_transaction
+    restore_core_service_install
     rollback_core_install "$core_had_binary"
     restore_core_env_backup "$core_had_env" "$core_env_backup"
     rm -f "$core_env_backup"
@@ -1645,6 +1702,7 @@ core_install() {
     return 1
   fi
   core_install_cleanup_active=0
+  commit_core_service_install
   commit_core_install_backup_point
   rm -f "$core_env_backup"
   trap - EXIT HUP INT TERM
@@ -4857,16 +4915,16 @@ uninstall_path_contains() {
 }
 
 uninstall_plan() {
-  printf '将停止并移除服务：%s、%s，以及可证明属于 VPS-Node 的 %s 监测定义\n' "$VP_CORE_SERVICE" "$VP_TUNNEL_SERVICE" "$VP_WATCHDOG_SERVICE"
+  printf '将停止并移除可证明属于 VPS-Node 的服务：%s、%s、%s\n' "$VP_CORE_SERVICE" "$VP_TUNNEL_SERVICE" "$VP_WATCHDOG_SERVICE"
   printf '将删除项目路径：\n'
   printf '  %s\n' "$VP_CONFIG_DIR" "$VP_DATA_DIR" "$VP_LOG_DIR" "$VP_LIB_DIR" "$VP_CLI_PATH" "$VP_CLI_BACKUP_PATH" "$VP_CLI_BACKUP_SHA256"
 }
 
 uninstall_restore_services() {
-  if [ "${uninstall_core_was_running:-0}" -eq 1 ]; then
+  if [ "${uninstall_core_service_owned:-0}" -eq 1 ] && [ "${uninstall_core_was_running:-0}" -eq 1 ]; then
     service_action restart "$VP_CORE_SERVICE" >/dev/null 2>&1 || true
   fi
-  if [ "${uninstall_tunnel_was_running:-0}" -eq 1 ]; then
+  if [ "${uninstall_tunnel_service_owned:-0}" -eq 1 ] && [ "${uninstall_tunnel_was_running:-0}" -eq 1 ]; then
     service_action restart "$VP_TUNNEL_SERVICE" >/dev/null 2>&1 || true
   fi
   if [ -n "${uninstall_watchdog_hold:-}" ] && [ -e "$uninstall_watchdog_hold" ]; then
@@ -4884,8 +4942,8 @@ uninstall_stop_services() {
   uninstall_tunnel_was_running=0
   uninstall_timer_was_running=0
   uninstall_watchdog_hold=""
-  case "$(service_state "$VP_CORE_SERVICE")" in active|started) uninstall_core_was_running=1 ;; esac
-  case "$(service_state "$VP_TUNNEL_SERVICE")" in active|started) uninstall_tunnel_was_running=1 ;; esac
+  if [ "${uninstall_core_service_owned:-0}" -eq 1 ]; then case "$(service_state "$VP_CORE_SERVICE")" in active|started) uninstall_core_was_running=1 ;; esac; fi
+  if [ "${uninstall_tunnel_service_owned:-0}" -eq 1 ]; then case "$(service_state "$VP_TUNNEL_SERVICE")" in active|started) uninstall_tunnel_was_running=1 ;; esac; fi
   if [ "${VP_ALLOW_TEST_HOOKS:-0}" = 1 ] && [ "${VP_TEST_UNINSTALL_STOP_FAIL:-0}" = 1 ]; then
     return 1
   fi
@@ -4895,23 +4953,23 @@ uninstall_stop_services() {
         systemctl is-active --quiet "${VP_WATCHDOG_SERVICE}.timer" >/dev/null 2>&1 && uninstall_timer_was_running=1
         systemctl stop "${VP_WATCHDOG_SERVICE}.timer" >/dev/null 2>&1 || [ "$uninstall_timer_was_running" -eq 0 ] || return 1
       fi
-      service_action stop "$VP_TUNNEL_SERVICE" >/dev/null 2>&1 || [ "$uninstall_tunnel_was_running" -eq 0 ] || { uninstall_restore_services; return 1; }
-      service_action stop "$VP_CORE_SERVICE" >/dev/null 2>&1 || [ "$uninstall_core_was_running" -eq 0 ] || { uninstall_restore_services; return 1; }
+      [ "${uninstall_tunnel_service_owned:-0}" -eq 0 ] || service_action stop "$VP_TUNNEL_SERVICE" >/dev/null 2>&1 || [ "$uninstall_tunnel_was_running" -eq 0 ] || { uninstall_restore_services; return 1; }
+      [ "${uninstall_core_service_owned:-0}" -eq 0 ] || service_action stop "$VP_CORE_SERVICE" >/dev/null 2>&1 || [ "$uninstall_core_was_running" -eq 0 ] || { uninstall_restore_services; return 1; }
       ;;
     openrc)
       if [ "${uninstall_watchdog_periodic_owned:-0}" -eq 1 ] && [ -e "$VP_WATCHDOG_PERIODIC" ]; then
         uninstall_watchdog_hold="$(dirname "$VP_WATCHDOG_PERIODIC")/.${VP_WATCHDOG_SERVICE}.uninstall.$$"
         mv "$VP_WATCHDOG_PERIODIC" "$uninstall_watchdog_hold" || return 1
       fi
-      service_action stop "$VP_TUNNEL_SERVICE" >/dev/null 2>&1 || [ "$uninstall_tunnel_was_running" -eq 0 ] || { uninstall_restore_services; return 1; }
-      service_action stop "$VP_CORE_SERVICE" >/dev/null 2>&1 || [ "$uninstall_core_was_running" -eq 0 ] || { uninstall_restore_services; return 1; }
+      [ "${uninstall_tunnel_service_owned:-0}" -eq 0 ] || service_action stop "$VP_TUNNEL_SERVICE" >/dev/null 2>&1 || [ "$uninstall_tunnel_was_running" -eq 0 ] || { uninstall_restore_services; return 1; }
+      [ "${uninstall_core_service_owned:-0}" -eq 0 ] || service_action stop "$VP_CORE_SERVICE" >/dev/null 2>&1 || [ "$uninstall_core_was_running" -eq 0 ] || { uninstall_restore_services; return 1; }
       ;;
     *)
       [ "$uninstall_core_was_running" -eq 0 ] && [ "$uninstall_tunnel_was_running" -eq 0 ] || return 1
       ;;
   esac
-  case "$(service_state "$VP_CORE_SERVICE")" in active|started) uninstall_restore_services; return 1 ;; esac
-  case "$(service_state "$VP_TUNNEL_SERVICE")" in active|started) uninstall_restore_services; return 1 ;; esac
+  if [ "${uninstall_core_service_owned:-0}" -eq 1 ]; then case "$(service_state "$VP_CORE_SERVICE")" in active|started) uninstall_restore_services; return 1 ;; esac; fi
+  if [ "${uninstall_tunnel_service_owned:-0}" -eq 1 ]; then case "$(service_state "$VP_TUNNEL_SERVICE")" in active|started) uninstall_restore_services; return 1 ;; esac; fi
   core_process_running && { uninstall_restore_services; return 1; }
   binary_process_running "$VP_TUNNEL_BIN" && { uninstall_restore_services; return 1; }
   return 0
@@ -4938,13 +4996,12 @@ uninstall_report_residuals() {
   done
   case "${uninstall_manager:-skip}" in
     systemd)
-      for residual_path in "/etc/systemd/system/${VP_TUNNEL_SERVICE}.service" \
-        "/etc/systemd/system/${VP_CORE_SERVICE}.service"; do
-        if [ -e "$residual_path" ] || [ -L "$residual_path" ]; then
-          printf '  残留：%s\n' "$residual_path" >&2
-          residual_count=$((residual_count + 1))
-        fi
-      done
+      if [ "${uninstall_tunnel_service_owned:-0}" -eq 1 ] && { [ -e "$VP_TUNNEL_SYSTEMD_SERVICE" ] || [ -L "$VP_TUNNEL_SYSTEMD_SERVICE" ]; }; then
+        printf '  残留：%s\n' "$VP_TUNNEL_SYSTEMD_SERVICE" >&2; residual_count=$((residual_count + 1))
+      fi
+      if [ "${uninstall_core_service_owned:-0}" -eq 1 ] && { [ -e "$VP_CORE_SYSTEMD_SERVICE" ] || [ -L "$VP_CORE_SYSTEMD_SERVICE" ]; }; then
+        printf '  残留：%s\n' "$VP_CORE_SYSTEMD_SERVICE" >&2; residual_count=$((residual_count + 1))
+      fi
       if [ "${uninstall_watchdog_timer_owned:-0}" -eq 1 ] && { [ -e "$VP_WATCHDOG_SYSTEMD_TIMER" ] || [ -L "$VP_WATCHDOG_SYSTEMD_TIMER" ]; }; then
         printf '  残留：%s\n' "$VP_WATCHDOG_SYSTEMD_TIMER" >&2; residual_count=$((residual_count + 1))
       fi
@@ -4953,7 +5010,13 @@ uninstall_report_residuals() {
       fi
       ;;
     openrc)
-      for residual_path in "/etc/init.d/$VP_TUNNEL_SERVICE" "/etc/init.d/$VP_CORE_SERVICE" "${uninstall_watchdog_hold:-}"; do
+      if [ "${uninstall_tunnel_service_owned:-0}" -eq 1 ] && { [ -e "$VP_TUNNEL_OPENRC_SERVICE" ] || [ -L "$VP_TUNNEL_OPENRC_SERVICE" ]; }; then
+        printf '  残留：%s\n' "$VP_TUNNEL_OPENRC_SERVICE" >&2; residual_count=$((residual_count + 1))
+      fi
+      if [ "${uninstall_core_service_owned:-0}" -eq 1 ] && { [ -e "$VP_CORE_OPENRC_SERVICE" ] || [ -L "$VP_CORE_OPENRC_SERVICE" ]; }; then
+        printf '  残留：%s\n' "$VP_CORE_OPENRC_SERVICE" >&2; residual_count=$((residual_count + 1))
+      fi
+      for residual_path in "${uninstall_watchdog_hold:-}"; do
         [ -n "$residual_path" ] || continue
         if [ -e "$residual_path" ] || [ -L "$residual_path" ]; then
           printf '  残留：%s\n' "$residual_path" >&2
@@ -5001,10 +5064,18 @@ uninstall_project() {
   uninstall_watchdog_service_owned=0
   uninstall_watchdog_timer_owned=0
   uninstall_watchdog_periodic_owned=0
+  uninstall_core_service_owned=0
+  uninstall_tunnel_service_owned=0
   if [ "${VP_SKIP_SERVICE:-0}" != "1" ]; then
     uninstall_manager="$(service_manager)"
     case "$uninstall_manager" in
       systemd)
+        if [ -e "$VP_CORE_SYSTEMD_SERVICE" ] || [ -L "$VP_CORE_SYSTEMD_SERVICE" ]; then
+          if core_service_file_owned "$VP_CORE_SYSTEMD_SERVICE"; then uninstall_core_service_owned=1; else warn "保留非 VPS-Node 所有的同名 Mihomo 服务：$VP_CORE_SYSTEMD_SERVICE"; fi
+        fi
+        if [ -e "$VP_TUNNEL_SYSTEMD_SERVICE" ] || [ -L "$VP_TUNNEL_SYSTEMD_SERVICE" ]; then
+          if tunnel_service_file_owned "$VP_TUNNEL_SYSTEMD_SERVICE"; then uninstall_tunnel_service_owned=1; else warn "保留非 VPS-Node 所有的同名 Tunnel 服务：$VP_TUNNEL_SYSTEMD_SERVICE"; fi
+        fi
         if [ -e "$VP_WATCHDOG_SYSTEMD_SERVICE" ] || [ -L "$VP_WATCHDOG_SYSTEMD_SERVICE" ]; then
           if watchdog_file_owned "$VP_WATCHDOG_SYSTEMD_SERVICE"; then uninstall_watchdog_service_owned=1; else warn "保留非 VPS-Node 所有的同名监测服务：$VP_WATCHDOG_SYSTEMD_SERVICE"; fi
         fi
@@ -5013,6 +5084,12 @@ uninstall_project() {
         fi
         ;;
       openrc)
+        if [ -e "$VP_CORE_OPENRC_SERVICE" ] || [ -L "$VP_CORE_OPENRC_SERVICE" ]; then
+          if core_service_file_owned "$VP_CORE_OPENRC_SERVICE"; then uninstall_core_service_owned=1; else warn "保留非 VPS-Node 所有的同名 Mihomo 服务：$VP_CORE_OPENRC_SERVICE"; fi
+        fi
+        if [ -e "$VP_TUNNEL_OPENRC_SERVICE" ] || [ -L "$VP_TUNNEL_OPENRC_SERVICE" ]; then
+          if tunnel_service_file_owned "$VP_TUNNEL_OPENRC_SERVICE"; then uninstall_tunnel_service_owned=1; else warn "保留非 VPS-Node 所有的同名 Tunnel 服务：$VP_TUNNEL_OPENRC_SERVICE"; fi
+        fi
         if [ -e "$VP_WATCHDOG_PERIODIC" ] || [ -L "$VP_WATCHDOG_PERIODIC" ]; then
           if watchdog_file_owned "$VP_WATCHDOG_PERIODIC"; then uninstall_watchdog_periodic_owned=1; else warn "保留非 VPS-Node 所有的同名周期任务：$VP_WATCHDOG_PERIODIC"; fi
         fi
@@ -5032,17 +5109,19 @@ uninstall_project() {
     case "$uninstall_manager" in
       systemd)
         [ "$uninstall_watchdog_timer_owned" -eq 0 ] || systemctl disable --now "${VP_WATCHDOG_SERVICE}.timer" >/dev/null 2>&1 || true
-        systemctl disable --now "$VP_TUNNEL_SERVICE" >/dev/null 2>&1 || true
-        systemctl disable --now "$VP_CORE_SERVICE" >/dev/null 2>&1 || true
+        [ "$uninstall_tunnel_service_owned" -eq 0 ] || systemctl disable --now "$VP_TUNNEL_SERVICE" >/dev/null 2>&1 || true
+        [ "$uninstall_core_service_owned" -eq 0 ] || systemctl disable --now "$VP_CORE_SERVICE" >/dev/null 2>&1 || true
         [ "$uninstall_watchdog_timer_owned" -eq 0 ] || rm -f "$VP_WATCHDOG_SYSTEMD_TIMER"
         [ "$uninstall_watchdog_service_owned" -eq 0 ] || rm -f "$VP_WATCHDOG_SYSTEMD_SERVICE"
-        rm -f "/etc/systemd/system/${VP_TUNNEL_SERVICE}.service" "/etc/systemd/system/${VP_CORE_SERVICE}.service"
+        [ "$uninstall_tunnel_service_owned" -eq 0 ] || rm -f "$VP_TUNNEL_SYSTEMD_SERVICE"
+        [ "$uninstall_core_service_owned" -eq 0 ] || rm -f "$VP_CORE_SYSTEMD_SERVICE"
         systemctl daemon-reload >/dev/null 2>&1 || true
         ;;
       openrc)
-        rc-update del "$VP_TUNNEL_SERVICE" default >/dev/null 2>&1 || true
-        rc-update del "$VP_CORE_SERVICE" default >/dev/null 2>&1 || true
-        rm -f "/etc/init.d/$VP_TUNNEL_SERVICE" "/etc/init.d/$VP_CORE_SERVICE"
+        [ "$uninstall_tunnel_service_owned" -eq 0 ] || rc-update del "$VP_TUNNEL_SERVICE" default >/dev/null 2>&1 || true
+        [ "$uninstall_core_service_owned" -eq 0 ] || rc-update del "$VP_CORE_SERVICE" default >/dev/null 2>&1 || true
+        [ "$uninstall_tunnel_service_owned" -eq 0 ] || rm -f "$VP_TUNNEL_OPENRC_SERVICE"
+        [ "$uninstall_core_service_owned" -eq 0 ] || rm -f "$VP_CORE_OPENRC_SERVICE"
         [ "$uninstall_watchdog_periodic_owned" -eq 0 ] || rm -f "$VP_WATCHDOG_PERIODIC"
         [ -z "$uninstall_watchdog_hold" ] || rm -f "$uninstall_watchdog_hold"
         ;;

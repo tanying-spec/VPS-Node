@@ -2014,4 +2014,78 @@ if [ -n "${VP_TEST_MIHOMO_BIN:-}" ]; then
   fi
 fi
 
+service_owner_root="$TMP/service-ownership"
+mkdir -p "$service_owner_root/bin" "$service_owner_root/services"
+cat > "$service_owner_root/bin/systemctl" <<'FAKE_SERVICE_SYSTEMCTL'
+#!/bin/sh
+case "${1:-}" in
+  is-active) printf 'inactive\n'; exit 3 ;;
+  is-enabled) exit 1 ;;
+  *) exit 0 ;;
+esac
+FAKE_SERVICE_SYSTEMCTL
+chmod 755 "$service_owner_root/bin/systemctl"
+cat > "$service_owner_root/fake-cloudflared" <<'FAKE_CLOUDFLARED'
+#!/bin/sh
+[ "${1:-}" = version ] && { printf 'cloudflared test\n'; exit 0; }
+exit 0
+FAKE_CLOUDFLARED
+chmod 755 "$service_owner_root/fake-cloudflared"
+
+external_core_runner_root="$service_owner_root/external-core-runner"
+mkdir -p "$external_core_runner_root/usr/bin"
+printf '#!/bin/sh\necho external-core-runner\n' > "$external_core_runner_root/usr/bin/mihomo-run"
+chmod 700 "$external_core_runner_root/usr/bin/mihomo-run"
+external_core_runner_hash="$(sha256sum "$external_core_runner_root/usr/bin/mihomo-run" | awk '{print $1}')"
+if PATH="$service_owner_root/bin:$PATH" VP_CONFIG_DIR="$external_core_runner_root/etc" \
+  VP_DATA_DIR="$external_core_runner_root/lib" VP_LOG_DIR="$external_core_runner_root/log" \
+  VP_LIB_DIR="$external_core_runner_root/usr" VP_CORE_BIN="$external_core_runner_root/usr/bin/mihomo" \
+  VP_CORE_BACKUP_BIN="$external_core_runner_root/usr/bin/mihomo.previous" VP_CORE_SOURCE_BIN="$fake_core" \
+  VP_CORE_SYSTEMD_SERVICE="$service_owner_root/services/external-core-runner.service" \
+  VP_ALLOW_TEST_HOOKS=1 VP_SERVICE_MANAGER_OVERRIDE=systemd sh "$ROOT/vp.sh" core-install >/dev/null 2>&1; then
+  printf 'core install overwrote an external runner\n' >&2
+  exit 1
+fi
+[ "$(sha256sum "$external_core_runner_root/usr/bin/mihomo-run" | awk '{print $1}')" = "$external_core_runner_hash" ]
+
+external_tunnel_service_root="$service_owner_root/external-tunnel-service"
+mkdir -p "$external_tunnel_service_root/usr/bin" "$external_tunnel_service_root/etc"
+printf '[Unit]\nDescription=external tunnel\n' > "$service_owner_root/services/external-tunnel.service"
+external_tunnel_service_hash="$(sha256sum "$service_owner_root/services/external-tunnel.service" | awk '{print $1}')"
+printf 'test.token_value-123\n' > "$external_tunnel_service_root/token"
+if PATH="$service_owner_root/bin:$PATH" VP_CONFIG_DIR="$external_tunnel_service_root/etc" \
+  VP_DATA_DIR="$external_tunnel_service_root/lib" VP_LOG_DIR="$external_tunnel_service_root/log" \
+  VP_LIB_DIR="$external_tunnel_service_root/usr" VP_TUNNEL_BIN="$external_tunnel_service_root/usr/bin/cloudflared" \
+  VP_TUNNEL_BACKUP_BIN="$external_tunnel_service_root/usr/bin/cloudflared.previous" \
+  VP_TUNNEL_SOURCE_BIN="$service_owner_root/fake-cloudflared" VP_TUNNEL_SYSTEMD_SERVICE="$service_owner_root/services/external-tunnel.service" \
+  VP_ALLOW_TEST_HOOKS=1 VP_SERVICE_MANAGER_OVERRIDE=systemd sh "$ROOT/vp.sh" tunnel-install "$external_tunnel_service_root/token" >/dev/null 2>&1; then
+  printf 'tunnel install overwrote an external service definition\n' >&2
+  exit 1
+fi
+[ "$(sha256sum "$service_owner_root/services/external-tunnel.service" | awk '{print $1}')" = "$external_tunnel_service_hash" ]
+
+external_uninstall_root="$service_owner_root/external-uninstall"
+mkdir -p "$external_uninstall_root"
+VP_CONFIG_DIR="$external_uninstall_root/etc" VP_DATA_DIR="$external_uninstall_root/lib" \
+  VP_LOG_DIR="$external_uninstall_root/log" VP_LIB_DIR="$external_uninstall_root/usr" \
+  sh "$ROOT/vp.sh" init >/dev/null
+printf '#!/bin/sh\n' > "$external_uninstall_root/vp"
+printf '#!/bin/sh\n' > "$external_uninstall_root/vp.previous"
+printf '%s  vp.previous\n' "$(sha256sum "$external_uninstall_root/vp.previous" | awk '{print $1}')" > "$external_uninstall_root/vp.previous.sha256"
+printf '[Unit]\nDescription=external core\n' > "$service_owner_root/services/external-uninstall-core.service"
+printf '[Unit]\nDescription=external tunnel\n' > "$service_owner_root/services/external-uninstall-tunnel.service"
+external_uninstall_core_hash="$(sha256sum "$service_owner_root/services/external-uninstall-core.service" | awk '{print $1}')"
+external_uninstall_tunnel_hash="$(sha256sum "$service_owner_root/services/external-uninstall-tunnel.service" | awk '{print $1}')"
+PATH="$service_owner_root/bin:$PATH" VP_CONFIG_DIR="$external_uninstall_root/etc" \
+  VP_DATA_DIR="$external_uninstall_root/lib" VP_LOG_DIR="$external_uninstall_root/log" \
+  VP_LIB_DIR="$external_uninstall_root/usr" VP_CLI_PATH="$external_uninstall_root/vp" \
+  VP_CLI_BACKUP_PATH="$external_uninstall_root/vp.previous" \
+  VP_UNINSTALL_BACKUP_DIR="$external_uninstall_root/recovery" \
+  VP_CORE_SYSTEMD_SERVICE="$service_owner_root/services/external-uninstall-core.service" \
+  VP_TUNNEL_SYSTEMD_SERVICE="$service_owner_root/services/external-uninstall-tunnel.service" \
+  VP_UNINSTALL_CONFIRM=DELETE VP_ALLOW_TEST_HOOKS=1 VP_SERVICE_MANAGER_OVERRIDE=systemd \
+  sh "$ROOT/vp.sh" uninstall >/dev/null
+[ "$(sha256sum "$service_owner_root/services/external-uninstall-core.service" | awk '{print $1}')" = "$external_uninstall_core_hash" ]
+[ "$(sha256sum "$service_owner_root/services/external-uninstall-tunnel.service" | awk '{print $1}')" = "$external_uninstall_tunnel_hash" ]
+
 printf 'smoke: ok\n'

@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.0-dev.88
+
+- README now stays focused on the project, current capabilities, installation and usage; detailed release history remains in this changelog.
+- Mihomo and Cloudflare Tunnel runner/service installation now refuses external same-name files and uses same-directory atomic replacement for owned definitions.
+- Failed enablement, restart, state activation, state commit or interruption restores the previous runner, service definition and enablement state.
+- Uninstall only stops, restores, disables, removes and audits core/tunnel service definitions proven to belong to VPS-Node; external definitions are preserved with a warning.
+- Regression coverage verifies external runner/service preservation and external same-name definitions surviving uninstall.
+
 ## 0.2.0-dev.87
 
 - Monitor installation now previews scheduler, cadence, behavior and target definitions and requires explicit `ENABLE` confirmation.
