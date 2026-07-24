@@ -44,6 +44,8 @@ jobs:
           grep -Fq '[int]$TunnelOriginPort' tests/run_authorized_host.ps1
           grep -Fq '[switch]$SelfTestEvidence' tests/run_authorized_host.ps1
           grep -Fq '[switch]$ValidateOnly' tests/run_authorized_host.ps1
+          grep -Fq '[switch]$PreflightOnly' tests/run_authorized_host.ps1
+          grep -Fq 'preflight_status=passed' tests/run_authorized_host.ps1
           grep -Fq 'tested_script_sha256=' tests/isolated_acceptance.sh
           grep -Fq 'formal_sensitive_state_digests_unchanged=yes' tests/isolated_acceptance.sh
           grep -Fq 'formal_process_images_and_cmdlines_unchanged=yes' tests/isolated_acceptance.sh

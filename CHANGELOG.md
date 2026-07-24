@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.0-dev.42
+
+- Added a mandatory read-only authorized-host preflight before any source upload or test execution, plus a standalone `-PreflightOnly` mode.
+- Preflight verifies the fixed public IP, Alpine/root environment, required commands, runnable/readable Mihomo, readable formal state, `/tmp` capacity and the exact Cloudflare transfer endpoint used by memory acceptance.
+- When requested, it also verifies cgroup v2 memory capability or independent Tunnel token separation, free origin port, cloudflared availability and public-edge reachability without printing sensitive values.
+- Full acceptance stores the redacted preflight result with SHA-256 and revalidates its semantics locally; offline tests reject a preflight that claims a required endpoint is unavailable.
+
 ## 0.2.0-dev.41
 
 - Each enforced memory profile now runs four simultaneous 1 MiB downloads through the isolated real Mihomo process rather than a single transfer.

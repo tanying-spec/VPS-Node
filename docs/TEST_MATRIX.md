@@ -2,7 +2,7 @@
 
 所有需要真实 Mihomo、OpenRC、网络出口或资源压力的实机测试只能在 `134.209.180.134` 运行。当前版本的实机验收尚未执行；SSH 公钥授权仍缺失。
 
-Windows 远程编排入口 `tests/run_authorized_host.ps1` 同样将主机和端口写死，禁用密码认证，只上传验收白名单文件，并在下载后本地复核脱敏证据 SHA-256；CI 对这些约束执行静态守卫。
+Windows 远程编排入口 `tests/run_authorized_host.ps1` 同样将主机和端口写死，禁用密码认证；上传前先执行只读能力预检，只上传验收白名单文件，并在下载后本地复核脱敏预检/验收证据 SHA-256 及语义；CI 对这些约束执行静态守卫。
 
 ## 当前版本已有证据
 
@@ -25,7 +25,7 @@ Windows 远程编排入口 `tests/run_authorized_host.ps1` 同样将主机和端
 
 ## 历史结果的处理
 
-早期开发阶段曾记录 Reality/VLESS-WS、Cloudflare Tunnel、4×10 MiB 压力和约 16 MiB/s Tunnel 吞吐结果。这些结果可以作为设计参考，但不是 `0.2.0-dev.41` 当前代码的验收证据，因此不用于宣称当前版本已通过。
+早期开发阶段曾记录 Reality/VLESS-WS、Cloudflare Tunnel、4×10 MiB 压力和约 16 MiB/s Tunnel 吞吐结果。这些结果可以作为设计参考，但不是 `0.2.0-dev.42` 当前代码的验收证据，因此不用于宣称当前版本已通过。
 
 旧的 `system_argo_test.sh` 和 `system_pressure_test.sh` 会正式安装管理脚本并停止已有服务，不符合“隔离且正式服务前后不变”的硬约束，已删除。后续实机证据只能由锁定主机的隔离验收入口产生。
 

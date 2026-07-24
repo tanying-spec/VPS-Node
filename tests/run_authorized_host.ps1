@@ -8,6 +8,7 @@ param(
     [int]$TunnelOriginPort = 0,
     [switch]$SelfTestEvidence,
     [switch]$ValidateOnly,
+    [switch]$PreflightOnly,
     [switch]$SkipMemoryProfiles
 )
 
@@ -195,6 +196,47 @@ function Assert-MemoryEvidence([string]$Directory) {
     }
 }
 
+function Assert-PreflightResult([string[]]$Output, [bool]$MemoryRequested, [bool]$TunnelRequested) {
+    $values = @{}
+    foreach ($line in $Output) {
+        if ($line -notmatch '^preflight_([a-z0-9_]+)=(.*)$') { continue }
+        if ($values.ContainsKey($Matches[1])) { throw "Preflight output contains a duplicate key: $($Matches[1])" }
+        $values[$Matches[1]] = $Matches[2]
+    }
+    $required = @{
+        status = 'passed'
+        authorized_host = 'yes'
+        root = 'yes'
+        alpine = 'yes'
+        commands = 'yes'
+        mihomo = 'yes'
+        ipify = 'yes'
+        speed_endpoint = 'yes'
+        formal_snapshot = 'yes'
+        memory_mode = $(if ($MemoryRequested) { 'required' } else { 'skipped' })
+        tunnel_mode = $(if ($TunnelRequested) { 'required' } else { 'skipped' })
+    }
+    if ($MemoryRequested) {
+        $required.cgroup_v2 = 'yes'
+        $required.memory_controller = 'yes'
+        $required.cgroup_root_writable = 'yes'
+    }
+    if ($TunnelRequested) {
+        $required.cloudflared = 'yes'
+        $required.independent_tunnel_inputs = 'yes'
+        $required.tunnel_edge = 'reachable'
+    }
+    foreach ($key in $required.Keys) {
+        if (-not $values.ContainsKey($key) -or $values[$key] -ne $required[$key]) {
+            throw "Authorized-host preflight did not prove required result: $key"
+        }
+    }
+    if (-not $values.ContainsKey('tmp_free_mib') -or [int64]$values.tmp_free_mib -lt 128) {
+        throw 'Authorized-host preflight did not prove at least 128 MiB free in /tmp.'
+    }
+    return @($Output | Where-Object { $_ -match '^preflight_[a-z0-9_]+=' })
+}
+
 $TunnelInputCount = 0
 foreach ($tunnelInputPresent in @(
     -not [string]::IsNullOrWhiteSpace($TunnelTokenFile),
@@ -320,7 +362,30 @@ if ($SelfTestEvidence) {
         $truncatedTransferRejected = $false
         try { Assert-MemoryEvidence $selfTestDirectory } catch { $truncatedTransferRejected = $true }
         if (-not $truncatedTransferRejected) { throw 'Evidence self-test failed to reject truncated concurrent transfers.' }
-        Write-Host 'Acceptance and memory evidence verification self-test passed; no network connection was attempted.'
+
+        $validPreflight = @(
+            'preflight_status=passed',
+            'preflight_authorized_host=yes',
+            'preflight_root=yes',
+            'preflight_alpine=yes',
+            'preflight_commands=yes',
+            'preflight_mihomo=yes',
+            'preflight_ipify=yes',
+            'preflight_speed_endpoint=yes',
+            'preflight_tmp_free_mib=512',
+            'preflight_formal_snapshot=yes',
+            'preflight_memory_mode=required',
+            'preflight_cgroup_v2=yes',
+            'preflight_memory_controller=yes',
+            'preflight_cgroup_root_writable=yes',
+            'preflight_tunnel_mode=skipped'
+        )
+        Assert-PreflightResult $validPreflight $true $false | Out-Null
+        $badPreflight = $validPreflight -replace 'preflight_speed_endpoint=yes', 'preflight_speed_endpoint=no'
+        $preflightRejected = $false
+        try { Assert-PreflightResult $badPreflight $true $false | Out-Null } catch { $preflightRejected = $true }
+        if (-not $preflightRejected) { throw 'Evidence self-test failed to reject an unavailable transfer endpoint.' }
+        Write-Host 'Acceptance, memory and preflight verification self-test passed; no network connection was attempted.'
         return
     }
     finally {
@@ -344,7 +409,7 @@ foreach ($required in @('vp.sh', 'vp.sh.sha256', 'tests\isolated_acceptance.sh',
         throw "Required local acceptance file is missing: $required"
     }
 }
-if ((Test-Path -LiteralPath $EvidenceDirectory) -and @(Get-ChildItem -LiteralPath $EvidenceDirectory -Force).Count -ne 0) {
+if (-not $PreflightOnly -and (Test-Path -LiteralPath $EvidenceDirectory) -and @(Get-ChildItem -LiteralPath $EvidenceDirectory -Force).Count -ne 0) {
     throw "Evidence directory must be absent or empty to prevent mixing runs: $EvidenceDirectory"
 }
 
@@ -352,6 +417,103 @@ Write-Host "Connecting read-only to the only authorized host $AuthorizedHost`:$A
 $probe = Invoke-AuthorizedSsh "printf 'authorized-host-connected\n'"
 if (($probe.Output -join "`n") -notmatch 'authorized-host-connected') {
     throw 'SSH probe did not return the expected marker.'
+}
+
+$preflightScript = @'
+set -eu
+fail() { printf 'preflight_status=failed\npreflight_reason=%s\n' "$1"; exit 1; }
+[ "$(id -u)" = 0 ] || fail root-required
+observed_host=$(curl -4 -fsS --max-time 8 https://api.ipify.org 2>/dev/null || true)
+[ "$observed_host" = "134.209.180.134" ] || fail unauthorized-host
+[ -r /etc/os-release ] && grep -q '^ID=alpine$' /etc/os-release || fail alpine-required
+for command_name in sh curl tar sha256sum awk sed grep rc-service rc-update pidof readlink netstat df; do
+  command -v "$command_name" >/dev/null 2>&1 || fail "missing-command-$command_name"
+done
+mihomo_found=no
+mihomo_path=
+for process_pid in $(pidof mihomo 2>/dev/null || true); do
+  candidate=$(readlink -f "/proc/$process_pid/exe" 2>/dev/null || true)
+  if [ -n "$candidate" ] && [ -x "$candidate" ] && "$candidate" -v >/dev/null 2>&1; then mihomo_found=yes; mihomo_path=$candidate; break; fi
+done
+if [ "$mihomo_found" = no ]; then
+  for candidate in "$(command -v mihomo 2>/dev/null || true)" /usr/local/bin/mihomo /usr/bin/mihomo /etc/mihomo/mihomo /usr/local/lib/mihomo/mihomo; do
+    if [ -n "$candidate" ] && [ -x "$candidate" ] && "$candidate" -v >/dev/null 2>&1; then mihomo_found=yes; mihomo_path=$candidate; break; fi
+  done
+fi
+[ "$mihomo_found" = yes ] || fail mihomo-unavailable
+sha256sum "$mihomo_path" >/dev/null 2>&1 || fail mihomo-unreadable
+rc-service mihomo status >/dev/null 2>&1 || true
+rc-service cloudflared-tunnel status >/dev/null 2>&1 || true
+for formal_file in /etc/mihomo/config.yaml /etc/mihomo/nodes.db /etc/mihomo/state.env /etc/init.d/mihomo /etc/init.d/cloudflared-tunnel /etc/cloudflared/token; do
+  if [ -e "$formal_file" ]; then sha256sum "$formal_file" >/dev/null 2>&1 || fail formal-state-unreadable; fi
+done
+for formal_pid in $(pidof mihomo 2>/dev/null || true) $(pidof cloudflared 2>/dev/null || true); do
+  [ -r "/proc/$formal_pid/cmdline" ] || fail formal-process-unreadable
+  readlink -f "/proc/$formal_pid/exe" >/dev/null 2>&1 || fail formal-process-unreadable
+done
+tmp_free_mib=$(df -Pk /tmp | awk 'NR==2{print int($4/1024)}')
+[ "${tmp_free_mib:-0}" -ge 128 ] || fail insufficient-tmp-space
+speed_bytes=$(curl -4 -fsS --max-time 12 -o /dev/null -w '%{size_download}' 'https://speed.cloudflare.com/__down?bytes=1' 2>/dev/null || true)
+[ "$speed_bytes" = 1 ] || fail speed-endpoint-unavailable
+if [ "$PREFLIGHT_MEMORY" = 1 ]; then
+  [ -f /sys/fs/cgroup/cgroup.controllers ] || fail cgroup-v2-required
+  grep -qw memory /sys/fs/cgroup/cgroup.controllers || fail memory-controller-unavailable
+  [ -w /sys/fs/cgroup ] || fail cgroup-root-not-writable
+fi
+if [ "$PREFLIGHT_TUNNEL" = 1 ]; then
+  [ -r "$PREFLIGHT_TOKEN_FILE" ] || fail independent-token-unreadable
+  if [ -r /etc/cloudflared/token ] && [ "$(sha256sum "$PREFLIGHT_TOKEN_FILE" | awk '{print $1}')" = "$(sha256sum /etc/cloudflared/token | awk '{print $1}')" ]; then
+    fail formal-token-reused
+  fi
+  if [ -r /etc/mihomo/nodes.db ] && grep -Fq "$PREFLIGHT_HOST" /etc/mihomo/nodes.db; then fail formal-host-reused; fi
+  netstat -lnt 2>/dev/null | awk '{print $4}' | grep -Eq "[:.]$PREFLIGHT_PORT$" && fail origin-port-in-use
+  cloudflared_found=no
+  for process_pid in $(pidof cloudflared 2>/dev/null || true); do
+    candidate=$(readlink -f "/proc/$process_pid/exe" 2>/dev/null || true)
+    if [ -n "$candidate" ] && [ -x "$candidate" ] && "$candidate" --version >/dev/null 2>&1; then cloudflared_found=yes; break; fi
+  done
+  if [ "$cloudflared_found" = no ]; then
+    for candidate in "$(command -v cloudflared 2>/dev/null || true)" /usr/local/bin/cloudflared /usr/bin/cloudflared /etc/cloudflared/cloudflared; do
+      if [ -n "$candidate" ] && [ -x "$candidate" ] && "$candidate" --version >/dev/null 2>&1; then cloudflared_found=yes; break; fi
+    done
+  fi
+  [ "$cloudflared_found" = yes ] || fail cloudflared-unavailable
+  edge_code=$(curl -4 -sS --max-time 12 -o /dev/null -w '%{http_code}' "https://$PREFLIGHT_HOST$PREFLIGHT_PATH" 2>/dev/null || true)
+  [ -n "$edge_code" ] && [ "$edge_code" != 000 ] || fail tunnel-edge-unreachable
+fi
+printf 'preflight_status=passed\n'
+printf 'preflight_authorized_host=yes\n'
+printf 'preflight_root=yes\n'
+printf 'preflight_alpine=yes\n'
+printf 'preflight_commands=yes\n'
+printf 'preflight_mihomo=yes\n'
+printf 'preflight_ipify=yes\n'
+printf 'preflight_speed_endpoint=yes\n'
+printf 'preflight_tmp_free_mib=%s\n' "$tmp_free_mib"
+printf 'preflight_formal_snapshot=yes\n'
+if [ "$PREFLIGHT_MEMORY" = 1 ]; then
+  printf 'preflight_memory_mode=required\npreflight_cgroup_v2=yes\npreflight_memory_controller=yes\npreflight_cgroup_root_writable=yes\n'
+else
+  printf 'preflight_memory_mode=skipped\n'
+fi
+if [ "$PREFLIGHT_TUNNEL" = 1 ]; then
+  printf 'preflight_tunnel_mode=required\npreflight_cloudflared=yes\npreflight_independent_tunnel_inputs=yes\npreflight_tunnel_edge=reachable\n'
+else
+  printf 'preflight_tunnel_mode=skipped\n'
+fi
+'@
+$preflightCommand = "PREFLIGHT_MEMORY=$(if ($SkipMemoryProfiles) { '0' } else { '1' }) " +
+    "PREFLIGHT_TUNNEL=$(if ($TunnelInputCount -eq 4) { '1' } else { '0' }) " +
+    "PREFLIGHT_TOKEN_FILE=$(Quote-Sh $TunnelTokenFile) " +
+    "PREFLIGHT_HOST=$(Quote-Sh $TunnelHost) " +
+    "PREFLIGHT_PATH=$(Quote-Sh $TunnelPath) " +
+    "PREFLIGHT_PORT=$(Quote-Sh ([string]$TunnelOriginPort)) " + $preflightScript
+$preflight = Invoke-AuthorizedSsh $preflightCommand
+$PreflightLines = Assert-PreflightResult $preflight.Output (-not $SkipMemoryProfiles) ($TunnelInputCount -eq 4)
+$PreflightLines | ForEach-Object { Write-Host $_ }
+if ($PreflightOnly) {
+    Write-Host 'Authorized-host preflight passed; no files were uploaded and no test was started.'
+    return
 }
 
 try {
@@ -424,7 +586,12 @@ exit 1
     New-Item -ItemType Directory -Force -Path $EvidenceDirectory | Out-Null
     & scp @ScpOptions "$AuthorizedUser@$AuthorizedHost`:$RemoteRoot/evidence/*" "$EvidenceDirectory\"
     if ($LASTEXITCODE -ne 0) { throw 'Failed to download redacted acceptance evidence.' }
+    $preflightEvidence = Join-Path $EvidenceDirectory 'authorized-host-preflight.txt'
+    $PreflightLines | Set-Content -LiteralPath $preflightEvidence -Encoding ascii
+    $preflightHash = (Get-FileHash -LiteralPath $preflightEvidence -Algorithm SHA256).Hash.ToLowerInvariant()
+    "$preflightHash  authorized-host-preflight.txt" | Set-Content -LiteralPath "$preflightEvidence.sha256" -Encoding ascii
     Assert-EvidenceChecksums $EvidenceDirectory
+    Assert-PreflightResult (Get-Content -LiteralPath $preflightEvidence) (-not $SkipMemoryProfiles) ($TunnelInputCount -eq 4) | Out-Null
     Assert-AcceptanceEvidence $EvidenceDirectory ($TunnelInputCount -eq 4)
     if (-not $SkipMemoryProfiles) { Assert-MemoryEvidence $EvidenceDirectory }
     Write-Host "Acceptance complete; downloaded evidence passed SHA-256 verification: $EvidenceDirectory"
