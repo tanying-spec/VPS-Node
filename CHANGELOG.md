@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.0-dev.77
+
+- Reality and Argo node creation now preview non-secret listener and endpoint settings plus service impact before requiring `CREATE`.
+- UUID, Reality keypair, Short ID and automatic WebSocket path generation all occur only after approval.
+- Duplicate names are rejected before preview, while the existing transaction still rechecks the authoritative candidate for concurrent additions.
+- Cancellation tests for both protocols prove node, rotation, generated configuration and state files remain byte-identical without transaction residue.
+
 ## 0.2.0-dev.76
 
 - `vp edit` now previews protocol, old/new name and port plus Reality SNI/address family or Tunnel hostname/WebSocket path before requiring `EDIT`.

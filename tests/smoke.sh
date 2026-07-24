@@ -10,6 +10,7 @@ export VP_CORE_INSTALL_CONFIRM=INSTALL
 export VP_TUNNEL_INSTALL_CONFIRM=INSTALL
 export VP_ROTATION_START_CONFIRM=ROTATE
 export VP_EDIT_CONFIRM=EDIT
+export VP_NODE_CREATE_CONFIRM=CREATE
 
 cancel_install_root="$TMP/cancel-install"
 cancelled_core_install="$(VP_CONFIG_DIR="$cancel_install_root/etc" VP_DATA_DIR="$cancel_install_root/lib" \
@@ -124,6 +125,29 @@ case "${1:-}" in
 esac
 FAKE_CORE
 chmod 755 "$fake_core"
+cancel_create_root="$TMP/cancel-create"
+VP_CONFIG_DIR="$cancel_create_root/etc" VP_DATA_DIR="$cancel_create_root/lib" \
+VP_LOG_DIR="$cancel_create_root/log" VP_LIB_DIR="$cancel_create_root/usr" \
+VP_SKIP_SERVICE=1 sh "$ROOT/vp.sh" init >/dev/null
+cancel_create_nodes_hash="$(sha256sum "$cancel_create_root/etc/nodes.db" | awk '{print $1}')"
+cancel_create_rotations_hash="$(sha256sum "$cancel_create_root/etc/credential-rotations.db" | awk '{print $1}')"
+cancel_create_config_hash="$(sha256sum "$cancel_create_root/etc/generated/mihomo.yaml" | awk '{print $1}')"
+cancel_create_state_hash="$(sha256sum "$cancel_create_root/etc/state.env" | awk '{print $1}')"
+cancelled_reality_create="$(VP_CONFIG_DIR="$cancel_create_root/etc" VP_DATA_DIR="$cancel_create_root/lib" \
+  VP_LOG_DIR="$cancel_create_root/log" VP_LIB_DIR="$cancel_create_root/usr" VP_CORE_BIN="$fake_core" \
+  VP_SKIP_SERVICE=1 VP_NODE_CREATE_CONFIRM=CANCEL \
+  sh "$ROOT/vp.sh" reality-add cancelled-reality 25430 www.amd.com ipv4 2>&1 || true)"
+printf '%s\n' "$cancelled_reality_create" | grep -q '已取消节点创建'
+cancelled_argo_create="$(VP_CONFIG_DIR="$cancel_create_root/etc" VP_DATA_DIR="$cancel_create_root/lib" \
+  VP_LOG_DIR="$cancel_create_root/log" VP_LIB_DIR="$cancel_create_root/usr" VP_CORE_BIN="$fake_core" \
+  VP_SKIP_SERVICE=1 VP_NODE_CREATE_CONFIRM=CANCEL \
+  sh "$ROOT/vp.sh" argo-add cancelled-argo 25431 cancelled.example.com 2>&1 || true)"
+printf '%s\n' "$cancelled_argo_create" | grep -q '已取消节点创建'
+[ "$(sha256sum "$cancel_create_root/etc/nodes.db" | awk '{print $1}')" = "$cancel_create_nodes_hash" ]
+[ "$(sha256sum "$cancel_create_root/etc/credential-rotations.db" | awk '{print $1}')" = "$cancel_create_rotations_hash" ]
+[ "$(sha256sum "$cancel_create_root/etc/generated/mihomo.yaml" | awk '{print $1}')" = "$cancel_create_config_hash" ]
+[ "$(sha256sum "$cancel_create_root/etc/state.env" | awk '{print $1}')" = "$cancel_create_state_hash" ]
+[ ! -e "$cancel_create_root/etc/transactions/active" ]
 core_install_race="$TMP/core-install-race"
 mkdir -p "$core_install_race/usr/bin"
 cp "$fake_core" "$core_install_race/usr/bin/mihomo"

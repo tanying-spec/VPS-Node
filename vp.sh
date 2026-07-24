@@ -2,7 +2,7 @@
 
 set -u
 
-VP_VERSION="0.2.0-dev.76"
+VP_VERSION="0.2.0-dev.77"
 VP_CONFIG_DIR="${VP_CONFIG_DIR:-/etc/vps-node}"
 VP_DATA_DIR="${VP_DATA_DIR:-/var/lib/vps-node}"
 VP_LOG_DIR="${VP_LOG_DIR:-/var/log/vps-node}"
@@ -1291,12 +1291,25 @@ argo_add() {
   name="${1:-argo-1}"
   requested_port="${2:-}"
   host="${3:-}"
-  path="${4:-/$(random_hex 8)}"
+  path="${4:-}"
   [ -n "$host" ] || { error "请提供 Tunnel 公网域名。"; return 1; }
   case "$name$host$path" in *'|'*|*' '*|*\"*|*\'*) error "参数包含非法字符。"; return 1 ;; esac
-  case "$path" in /*) ;; *) path="/$path" ;; esac
+  if [ -n "$path" ]; then case "$path" in /*) ;; *) path="/$path" ;; esac; fi
   port="$(choose_port "$requested_port")" || { error "本地端口不可用。"; return 1; }
   created_name="$name"
+  if awk -F'|' -v n="$name" '$2==n{found=1} END{exit found?0:1}' "$VP_NODES_DB" 2>/dev/null; then
+    error "节点名称已存在。"
+    return 1
+  fi
+  printf 'Argo 备用节点创建预览：\n'
+  printf '  名称：%s\n' "$name"
+  printf '  本地监听：127.0.0.1:%s\n' "$port"
+  printf '  Tunnel 公网主机名：%s\n' "$host"
+  [ -n "$path" ] && printf '  WebSocket 路径：%s\n' "$path" || printf '  WebSocket 路径：确认后随机生成\n'
+  printf '  影响范围：生成新 UUID、写入节点并重启 Mihomo\n'
+  if [ -n "${VP_NODE_CREATE_CONFIRM:-}" ]; then create_confirm="$VP_NODE_CREATE_CONFIRM"; else printf '输入 CREATE 确认创建节点：'; read -r create_confirm || true; fi
+  [ "$create_confirm" = CREATE ] || { warn "已取消节点创建，未生成凭据或修改配置。"; return 2; }
+  [ -n "$path" ] || path="/$(random_hex 8)"
   uuid="$(new_uuid)"
   begin_state_transaction argo-add || return 1
   candidate_root="$VP_TX_ACTIVE/candidate"
@@ -1693,6 +1706,18 @@ reality_add() {
   port="$(choose_port "$requested_port")" || { error "端口不可用。"; return 1; }
   created_name="$name"
   created_port="$port"
+  if awk -F'|' -v n="$name" '$2==n{found=1} END{exit found?0:1}' "$VP_NODES_DB" 2>/dev/null; then
+    error "节点名称已存在。"
+    return 1
+  fi
+  printf 'Reality 主节点创建预览：\n'
+  printf '  名称：%s\n' "$name"
+  printf '  监听端口：%s\n' "$port"
+  printf '  SNI：%s\n' "$sni"
+  printf '  地址族：%s\n' "$address_family"
+  printf '  影响范围：生成 UUID、Reality 密钥和 Short ID，写入节点并重启 Mihomo\n'
+  if [ -n "${VP_NODE_CREATE_CONFIRM:-}" ]; then create_confirm="$VP_NODE_CREATE_CONFIRM"; else printf '输入 CREATE 确认创建节点：'; read -r create_confirm || true; fi
+  [ "$create_confirm" = CREATE ] || { warn "已取消节点创建，未生成凭据、密钥或修改配置。"; return 2; }
   uuid="$(new_uuid)"
   pair="$(reality_keypair)" || { error "Reality 密钥生成失败。"; return 1; }
   private="${pair%%|*}"
