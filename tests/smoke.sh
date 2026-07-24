@@ -26,6 +26,12 @@ VP_LOG_DIR="$TMP/log" \
 VP_LIB_DIR="$TMP/usr-lib" \
 sh "$ROOT/vp.sh" status | grep -q '实际工作内存'
 
+VP_CONFIG_DIR="$TMP/etc" \
+VP_DATA_DIR="$TMP/lib" \
+VP_LOG_DIR="$TMP/log" \
+VP_LIB_DIR="$TMP/usr-lib" \
+VP_SKIP_SERVICE=1 sh "$ROOT/vp.sh" optimize >/dev/null
+
 printf 'TEST_VALUE=before\n' >> "$TMP/etc/state.env"
 VP_CONFIG_DIR="$TMP/etc" VP_DATA_DIR="$TMP/lib" VP_LOG_DIR="$TMP/log" VP_LIB_DIR="$TMP/usr-lib" \
 VP_ALLOW_TEST_HOOKS=1 sh "$ROOT/vp.sh" debug-tx commit TEST_VALUE committed
