@@ -14,19 +14,16 @@
 
 ```text
 /usr/local/bin/vp                 管理入口
-/usr/local/lib/vps-node/          内核适配与辅助组件
+/usr/local/lib/vps-node/          内核适配与 runner
 /etc/vps-node/state.env           非敏感状态
 /etc/vps-node/nodes.db            节点数据库（0600）
-/etc/vps-node/secrets/            凭据和私钥（0700/0600）
+/etc/vps-node/credential-rotations.db 轮换宽限记录（0600）
+/etc/vps-node/secrets/            凭据和 Token（0700/0600）
 /etc/vps-node/generated/          已提交的内核配置
 /etc/vps-node/transactions/       配置事务快照
 /var/lib/vps-node/                运行数据与备份索引
 /var/log/vps-node/                限额日志
 ```
-
-## 节点状态模型
-
-节点数据库保存协议无关字段。内核适配器负责将其渲染为 Mihomo、sing-box 或 Xray 配置。首个稳定版本默认使用一个经过实机验证的内核，不同时运行多个内核。
 
 ## 事务状态
 
@@ -35,5 +32,15 @@ prepare -> validate -> activate -> verify -> commit
                           \-> rollback
 ```
 
-事务目录必须记录 PID、阶段、旧状态清单和候选文件校验值。启动任何写操作前，先恢复死亡 PID 留下的未完成事务。
+事务目录记录 PID、阶段、旧状态清单和候选文件。启动任何写操作前，先恢复死亡 PID 留下的未完成事务。
+
+## 更新链
+
+```text
+GitHub Commit API -> 精确 SHA -> raw 文件 -> SHA-256 -> sh -n -> 原子替换
+```
+
+Release 二进制通过 GitHub Release API 的资产级 digest 校验，缺少 digest 时拒绝安装。
+
+Mihomo 由 `mihomo-run` 启动包装器加载动态内存参数，Tunnel 由独立 runner 启动。OpenRC 和 systemd 使用相同的运行参数来源。
 

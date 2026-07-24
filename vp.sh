@@ -19,6 +19,7 @@ VP_CORE_BACKUP_BIN="${VP_CORE_BACKUP_BIN:-$VP_LIB_DIR/bin/mihomo.previous}"
 VP_CORE_CONFIG="$VP_GENERATED_DIR/mihomo.yaml"
 VP_CORE_SERVICE="${VP_CORE_SERVICE:-vps-node-core}"
 VP_CORE_ENV="$VP_CONFIG_DIR/core.env"
+VP_CORE_RUNNER="$VP_LIB_DIR/bin/mihomo-run"
 VP_MIXED_PORT="${VP_MIXED_PORT:-17890}"
 VP_CONTROLLER_PORT="${VP_CONTROLLER_PORT:-19090}"
 VP_MIHOMO_API="${VP_MIHOMO_API:-https://api.github.com/repos/MetaCubeX/mihomo/releases/latest}"
@@ -253,7 +254,7 @@ memory_snapshot() {
 
   if [ -n "$current_file" ]; then
     MEM_TOTAL_BYTES="$(cat "$current_file" 2>/dev/null || printf 0)"
-    MEM_LIMIT_BYTES="$(cat "$max_file" 2>/dev/null || printf 0)"
+    MEM_LIMIT_BYTES="${VP_MEMORY_LIMIT_BYTES_OVERRIDE:-$(cat "$max_file" 2>/dev/null || printf 0)}"
     [ "$MEM_LIMIT_BYTES" = "max" ] && MEM_LIMIT_BYTES=0
     MEM_ANON_BYTES="$(awk '$1=="anon"{print $2;exit}' "$stat_file" 2>/dev/null)"
     MEM_FILE_BYTES="$(awk '$1=="file"{print $2;exit}' "$stat_file" 2>/dev/null)"
@@ -398,19 +399,31 @@ install_core_binary() {
 
 write_core_runtime_env() {
   memory_snapshot
-  limit_mib="$(bytes_to_mib "$MEM_LIMIT_BYTES" | awk -F. '{print $1}')"
+  limit_mib=$((MEM_LIMIT_BYTES / 1048576))
   case "$limit_mib" in ''|*[!0-9]*) limit_mib=0 ;; esac
-  if [ "$limit_mib" -gt 0 ] && [ "$limit_mib" -le 160 ]; then
-    gomemlimit=64MiB; gogc=60; gomaxprocs=1; profile=compact
-  elif [ "$limit_mib" -gt 0 ] && [ "$limit_mib" -le 320 ]; then
-    gomemlimit=128MiB; gogc=80; gomaxprocs=2; profile=balanced
-  elif [ "$limit_mib" -gt 0 ] && [ "$limit_mib" -le 640 ]; then
-    gomemlimit=256MiB; gogc=100; gomaxprocs=2; profile=standard
+  [ "$limit_mib" -gt 0 ] || limit_mib=1024
+  budget_mib=$((limit_mib * 60 / 100))
+  [ "$budget_mib" -ge 32 ] || budget_mib=32
+  [ "$budget_mib" -le 512 ] || budget_mib=512
+  cpu_count="${VP_CPU_COUNT_OVERRIDE:-$(getconf _NPROCESSORS_ONLN 2>/dev/null || printf 1)}"
+  case "$cpu_count" in ''|*[!0-9]*) cpu_count=1 ;; esac
+  [ "$cpu_count" -ge 1 ] || cpu_count=1
+  if [ "$limit_mib" -le 96 ]; then
+    gogc=50; gomaxprocs=1; profile=ultra-compact
+  elif [ "$limit_mib" -le 160 ]; then
+    gogc=60; gomaxprocs=1; profile=compact
+  elif [ "$limit_mib" -le 320 ]; then
+    gogc=80; gomaxprocs=2; profile=balanced
+  elif [ "$limit_mib" -le 640 ]; then
+    gogc=100; gomaxprocs=2; profile=standard
   else
-    gomemlimit=512MiB; gogc=100; gomaxprocs=4; profile=performance
+    gogc=100; gomaxprocs="$cpu_count"; [ "$gomaxprocs" -le 4 ] || gomaxprocs=4; profile=performance
   fi
+  gomemlimit="${budget_mib}MiB"
   {
     printf 'VP_MEMORY_PROFILE=%s\n' "$profile"
+    printf 'VP_MEMORY_LIMIT_MIB=%s\n' "$limit_mib"
+    printf 'VP_CORE_BUDGET_MIB=%s\n' "$budget_mib"
     printf 'GOMEMLIMIT=%s\n' "$gomemlimit"
     printf 'GOGC=%s\n' "$gogc"
     printf 'GOMAXPROCS=%s\n' "$gomaxprocs"
@@ -611,9 +624,14 @@ argo_add() {
 
 install_core_service() {
   [ "${VP_SKIP_SERVICE:-0}" = "1" ] && return 0
-  GOMEMLIMIT="$(awk -F= '$1=="GOMEMLIMIT"{print $2;exit}' "$VP_CORE_ENV")"
-  GOGC="$(awk -F= '$1=="GOGC"{print $2;exit}' "$VP_CORE_ENV")"
-  GOMAXPROCS="$(awk -F= '$1=="GOMAXPROCS"{print $2;exit}' "$VP_CORE_ENV")"
+  cat > "$VP_CORE_RUNNER" <<EOF
+#!/bin/sh
+set -a
+. "$VP_CORE_ENV"
+set +a
+exec "$VP_CORE_BIN" -d "$VP_CONFIG_DIR" -f "$VP_CORE_CONFIG"
+EOF
+  chmod 700 "$VP_CORE_RUNNER"
   manager="$(service_manager)"
   case "$manager" in
     systemd)
@@ -625,8 +643,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-EnvironmentFile=$VP_CORE_ENV
-ExecStart=$VP_CORE_BIN -d $VP_CONFIG_DIR -f $VP_CORE_CONFIG
+ExecStart=$VP_CORE_RUNNER
 Restart=on-failure
 RestartSec=2s
 LimitNOFILE=1048576
@@ -641,17 +658,13 @@ EOF
       cat > "/etc/init.d/$VP_CORE_SERVICE" <<EOF
 #!/sbin/openrc-run
 description="VPS-Node proxy core"
-command="$VP_CORE_BIN"
-command_args="-d $VP_CONFIG_DIR -f $VP_CORE_CONFIG"
+command="$VP_CORE_RUNNER"
 supervisor="supervise-daemon"
 output_log="$VP_LOG_DIR/core.log"
 error_log="$VP_LOG_DIR/core.err"
 respawn_delay=2
 respawn_max=0
 rc_ulimit="-n 1048576"
-export GOMEMLIMIT="$GOMEMLIMIT"
-export GOGC="$GOGC"
-export GOMAXPROCS="$GOMAXPROCS"
 depend() { need net; }
 EOF
       chmod 755 "/etc/init.d/$VP_CORE_SERVICE"
@@ -1423,6 +1436,16 @@ layered_health_check() {
     else
       health_error "进程层：代理核心未运行。"
     fi
+    memory_snapshot
+    current_limit_mib=$((MEM_LIMIT_BYTES / 1048576))
+    saved_limit_mib="$(awk -F= '$1=="VP_MEMORY_LIMIT_MIB"{print $2;exit}' "$VP_CORE_ENV" 2>/dev/null)"
+    case "$saved_limit_mib" in ''|*[!0-9]*) saved_limit_mib=0 ;; esac
+    if [ "$saved_limit_mib" -gt 0 ] && [ "$current_limit_mib" -ne "$saved_limit_mib" ]; then
+      health_warn "资源配置层：内存限制已从 ${saved_limit_mib} MiB 变为 ${current_limit_mib} MiB，执行 vp repair 可重新适配。"
+    else
+      profile="$(awk -F= '$1=="VP_MEMORY_PROFILE"{print $2;exit}' "$VP_CORE_ENV" 2>/dev/null)"
+      health_ok "资源配置层：内存档位 ${profile:-未知} 与当前限制一致。"
+    fi
   else
     health_warn "内核配置层：尚未安装代理核心。"
   fi
@@ -1493,6 +1516,7 @@ layered_health_check() {
 safe_repair() {
   need_root || return 1
   repaired=0
+  runtime_changed=0
   if [ -d "$VP_TX_ACTIVE" ]; then
     recover_state_transaction || return 1
     repaired=$((repaired + 1))
@@ -1504,6 +1528,15 @@ safe_repair() {
       repaired=$((repaired + 1))
     fi
   done
+  if [ -x "$VP_CORE_BIN" ]; then
+    old_runtime="$(cat "$VP_CORE_ENV" 2>/dev/null || true)"
+    write_core_runtime_env || return 1
+    new_runtime="$(cat "$VP_CORE_ENV" 2>/dev/null || true)"
+    if [ "$old_runtime" != "$new_runtime" ]; then
+      runtime_changed=1
+      repaired=$((repaired + 1))
+    fi
+  fi
   if [ -x "$VP_CORE_BIN" ] && [ -r "$VP_NODES_DB" ]; then
     repair_tmp="$(mktemp /tmp/vp-repair-config.XXXXXX)" || return 1
     render_mihomo_config "$VP_NODES_DB" "$repair_tmp"
@@ -1516,7 +1549,7 @@ safe_repair() {
       else
         rm -f "$repair_tmp"
       fi
-      if [ "${VP_SKIP_SERVICE:-0}" != "1" ] && ! core_process_running; then
+      if [ "${VP_SKIP_SERVICE:-0}" != "1" ] && { ! core_process_running || [ "$runtime_changed" = "1" ]; }; then
         core_service_restart && repaired=$((repaired + 1))
       fi
     else
