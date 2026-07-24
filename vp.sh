@@ -2,7 +2,7 @@
 
 set -u
 
-VP_VERSION="0.2.0-dev.17"
+VP_VERSION="0.2.0-dev.18"
 VP_CONFIG_DIR="${VP_CONFIG_DIR:-/etc/vps-node}"
 VP_DATA_DIR="${VP_DATA_DIR:-/var/lib/vps-node}"
 VP_LOG_DIR="${VP_LOG_DIR:-/var/log/vps-node}"
@@ -1880,10 +1880,19 @@ create_backup() {
 }
 
 backup_archive_safe() {
-  tar -tzf "$1" 2>/dev/null | awk '
-    /^\// {bad=1}
-    /(^|\/)\.\.($|\/)/ {bad=1}
-    END {exit bad ? 1 : 0}
+  archive_to_check="$1"
+  tar -tzf "$archive_to_check" 2>/dev/null | awk '
+    /^\// { bad=1 }
+    /(^|\/)\.\.($|\/)/ { bad=1 }
+    !/^(manifest\.env|config\/?|config\/.*|data\/?|data\/.*)$/ { bad=1 }
+    END { exit bad ? 1 : 0 }
+  ' || return 1
+  tar -tvzf "$archive_to_check" 2>/dev/null | awk '
+    {
+      entry_type=substr($1,1,1)
+      if (entry_type != "-" && entry_type != "d") bad=1
+    }
+    END { exit bad ? 1 : 0 }
   '
 }
 

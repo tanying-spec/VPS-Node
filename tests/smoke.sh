@@ -325,6 +325,34 @@ set -e
 [ ! -e "$fresh_tunnel/usr/bin/cloudflared" ]
 [ ! -e "$fresh_tunnel/etc/secrets/cloudflared.token" ]
 
+printf 'BACKUP_TEST_MARKER=original\n' >> "$TMP/dns-etc/state.env"
+portable_backup="$TMP/portable-backup.tar.gz"
+VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log" \
+VP_LIB_DIR="$TMP/dns-usr" VP_CORE_BIN="$TMP/dns-usr/bin/mihomo" VP_SKIP_SERVICE=1 \
+sh "$ROOT/vp.sh" backup "$portable_backup" >/dev/null
+[ -s "$portable_backup" ]
+[ -s "$portable_backup.sha256" ]
+sed -i 's/BACKUP_TEST_MARKER=original/BACKUP_TEST_MARKER=changed/' "$TMP/dns-etc/state.env"
+VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log" \
+VP_LIB_DIR="$TMP/dns-usr" VP_CORE_BIN="$TMP/dns-usr/bin/mihomo" VP_SKIP_SERVICE=1 \
+sh "$ROOT/vp.sh" restore "$portable_backup" >/dev/null
+grep -q '^BACKUP_TEST_MARKER=original$' "$TMP/dns-etc/state.env"
+
+malicious_package="$TMP/malicious-package"
+mkdir -p "$malicious_package/config" "$malicious_package/data"
+printf 'FORMAT_VERSION=1\n' > "$malicious_package/manifest.env"
+printf 'SCHEMA_VERSION=1\nACTIVE_CORE=none\n' > "$malicious_package/config/state.env"
+: > "$malicious_package/config/nodes.db"
+ln -s "$TMP/outside-target" "$malicious_package/config/secrets"
+tar -czf "$TMP/malicious-backup.tar.gz" -C "$malicious_package" manifest.env config data
+if VP_CONFIG_DIR="$TMP/malicious-restore/etc" VP_DATA_DIR="$TMP/malicious-restore/lib" \
+  VP_LOG_DIR="$TMP/malicious-restore/log" VP_LIB_DIR="$TMP/malicious-restore/usr" VP_SKIP_SERVICE=1 \
+  sh "$ROOT/vp.sh" restore "$TMP/malicious-backup.tar.gz" >/dev/null 2>&1; then
+  printf 'symlink backup unexpectedly accepted\n' >&2
+  exit 1
+fi
+[ ! -e "$TMP/outside-target" ]
+
 VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log" \
 VP_LIB_DIR="$TMP/dns-usr" VP_CORE_BIN="$TMP/dns-usr/bin/mihomo" \
 VP_CORE_BACKUP_BIN="$TMP/dns-usr/bin/mihomo.previous" VP_SKIP_SERVICE=1 \

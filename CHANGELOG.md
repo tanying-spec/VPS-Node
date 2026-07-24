@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.0-dev.18
+
+- Backup restore now accepts only the documented manifest/config/data layout and rejects unexpected top-level paths.
+- Archives containing symlinks, hard links, devices or other special entries are rejected before extraction under root.
+- Added portable round-trip backup/restore coverage and a malicious-symlink archive rejection test.
+
 ## 0.2.0-dev.17
 
 - Cloudflare Tunnel installation and token rotation are now atomic across the binary, token file and service restart.
