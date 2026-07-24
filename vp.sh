@@ -2,7 +2,7 @@
 
 set -u
 
-VP_VERSION="0.2.0-dev.14"
+VP_VERSION="0.2.0-dev.15"
 VP_CONFIG_DIR="${VP_CONFIG_DIR:-/etc/vps-node}"
 VP_DATA_DIR="${VP_DATA_DIR:-/var/lib/vps-node}"
 VP_LOG_DIR="${VP_LOG_DIR:-/var/log/vps-node}"
@@ -1853,6 +1853,98 @@ restore_backup() {
   ok "备份恢复完成。"
 }
 
+migrate_from_mihomo_lite() {
+  need_root || return 1
+  source_db="${1:-/etc/mihomo/nodes.db}"
+  mode="${2:---dry-run}"
+  case "$source_db" in /*) ;; *) error "旧项目数据库必须使用绝对路径。"; return 2 ;; esac
+  case "$mode" in --dry-run|--apply) ;; *) error "迁移模式只能是 --dry-run 或 --apply。"; return 2 ;; esac
+  [ -r "$source_db" ] || { error "无法读取旧项目节点数据库：$source_db"; return 1; }
+  [ "$source_db" != "$VP_NODES_DB" ] || { error "源数据库不能是当前 VPS-Node 数据库。"; return 1; }
+  import_tmp="$(mktemp /tmp/vp-migrate-mh.XXXXXX)" || return 1
+  : > "$import_tmp"
+  supported=0
+  skipped_protocol=0
+  skipped_lossy=0
+  skipped_conflict=0
+  runtime_conflict=0
+  while IFS='|' read -r old_proto old_name old_port old_v1 old_v2 old_v3 old_v4 old_v5 old_v6 extra; do
+    [ -n "$old_proto" ] || continue
+    [ -z "$extra" ] || { skipped_lossy=$((skipped_lossy + 1)); continue; }
+    import_record=""
+    case "$old_proto" in
+      vless-reality)
+        if [ -n "$old_name" ] && [ -n "$old_port" ] && [ -n "$old_v1" ] && [ -n "$old_v2" ] && \
+           [ -n "$old_v3" ] && [ -n "$old_v4" ] && [ -n "$old_v5" ] && [ -n "$old_v6" ]; then
+          import_record="reality|$old_name|$old_port|$old_v1|$old_v2|$old_v3|$old_v4|$old_v5|$old_v6|ipv4"
+        else
+          skipped_lossy=$((skipped_lossy + 1))
+        fi
+        ;;
+      vless-ws)
+        if [ "$old_v4" = argo ] && [ -n "$old_name" ] && [ -n "$old_port" ] && [ -n "$old_v1" ] && \
+           [ -n "$old_v2" ] && [ -n "$old_v3" ] && { [ -z "$old_v5" ] || [ "$old_v5" = "$old_v3" ]; } && \
+           { [ -z "$old_v6" ] || [ "$old_v6" = 443 ]; }; then
+          import_record="argo|$old_name|$old_port|$old_v1|$old_v2|$old_v3"
+        else
+          skipped_lossy=$((skipped_lossy + 1))
+        fi
+        ;;
+      *) skipped_protocol=$((skipped_protocol + 1)) ;;
+    esac
+    [ -n "$import_record" ] || continue
+    case "$old_name" in *'|'*|*' '*|*\"*|*\'*)
+      skipped_lossy=$((skipped_lossy + 1)); continue ;;
+    esac
+    case "$old_port" in ''|*[!0-9]*) skipped_lossy=$((skipped_lossy + 1)); continue ;; esac
+    [ "$old_port" -ge 1024 ] && [ "$old_port" -le 65535 ] || { skipped_lossy=$((skipped_lossy + 1)); continue; }
+    if awk -F'|' -v n="$old_name" -v p="$old_port" '$2==n || $3==p{found=1}END{exit found?0:1}' "$VP_NODES_DB" "$import_tmp" 2>/dev/null; then
+      skipped_conflict=$((skipped_conflict + 1))
+      continue
+    fi
+    port_in_use "$old_port" && runtime_conflict=$((runtime_conflict + 1))
+    printf '%s\n' "$import_record" >> "$import_tmp"
+    supported=$((supported + 1))
+  done < "$source_db"
+  printf '旧项目迁移预览：可无损导入 %s，协议不支持 %s，字段/模式不可无损转换 %s，名称或端口冲突 %s。\n' \
+    "$supported" "$skipped_protocol" "$skipped_lossy" "$skipped_conflict"
+  [ "$runtime_conflict" -gt 0 ] && warn "$runtime_conflict 个待导入端口当前正在监听；应用前必须停止旧项目对应服务。"
+  printf '仅支持：VLESS-Reality；入口地址等于 Host 且入口端口为 443 的 Argo VLESS-WS。\n'
+  printf '不会迁移：Hysteria2、AnyTLS、直连/CDN WS、多用户、流量规则、cron、Token 或 sysctl。\n'
+  if [ "$mode" = --dry-run ]; then
+    rm -f "$import_tmp"
+    ok "迁移预览完成，未修改任何文件或服务。"
+    return 0
+  fi
+  [ "$supported" -gt 0 ] || { rm -f "$import_tmp"; error "没有可无损导入的节点。"; return 1; }
+  [ "$runtime_conflict" -eq 0 ] || { rm -f "$import_tmp"; error "待导入端口仍被占用，未执行迁移。"; return 1; }
+  [ -x "$VP_CORE_BIN" ] || { rm -f "$import_tmp"; error "请先安装 VPS-Node Mihomo 内核，再执行迁移。"; return 1; }
+  if [ "${VP_MIGRATE_CONFIRM:-}" != MIGRATE ]; then
+    printf '请输入 MIGRATE 确认导入 %s 个节点：' "$supported"
+    read -r answer || true
+    [ "$answer" = MIGRATE ] || { rm -f "$import_tmp"; warn "已取消。"; return 2; }
+  fi
+  create_backup "$VP_BACKUP_DIR" >/dev/null || { rm -f "$import_tmp"; error "迁移前备份失败。"; return 1; }
+  begin_state_transaction migrate-mihomo-lite || { rm -f "$import_tmp"; return 1; }
+  candidate_root="$VP_TX_ACTIVE/candidate"
+  cat "$import_tmp" >> "$candidate_root/nodes.db"
+  rm -f "$import_tmp"
+  chmod 600 "$candidate_root/nodes.db"
+  render_mihomo_config "$candidate_root/nodes.db" "$candidate_root/generated/mihomo.yaml" "$candidate_root/credential-rotations.db"
+  if ! validate_state_candidate || ! "$VP_CORE_BIN" -t -d "$VP_CONFIG_DIR" -f "$candidate_root/generated/mihomo.yaml" >/dev/null 2>&1; then
+    abort_state_transaction; error "迁移候选配置验证失败，已保留原状态。"; return 1
+  fi
+  activate_state_candidate || { abort_state_transaction; return 1; }
+  if ! core_service_restart; then
+    abort_state_transaction; core_service_restart >/dev/null 2>&1 || true
+    error "迁移后服务启动失败，已恢复迁移前状态。"
+    return 1
+  fi
+  commit_state_transaction
+  ok "已从 Mihomo-lite-argo 无损导入 $supported 个节点。"
+  warn "Cloudflare Tunnel Token 不会迁移；如导入了 Argo 节点，请单独执行 Tunnel 配置。"
+}
+
 trim_log_file() {
   log_file="$1"
   max_bytes="${2:-1048576}"
@@ -2741,11 +2833,13 @@ interactive_health() {
 }
 
 interactive_backup() {
-  printf '1. 创建备份\n2. 恢复备份\n0. 返回\n请选择：'
+  printf '1. 创建备份\n2. 恢复 VPS-Node 备份\n3. 预览旧 Mihomo-lite-argo 迁移\n4. 应用旧项目无损迁移\n0. 返回\n请选择：'
   read -r action || true
   case "$action" in
     1) create_backup "$VP_BACKUP_DIR" ;;
     2) printf '请输入备份文件完整路径：'; read -r archive || true; restore_backup "$archive" ;;
+    3) printf '旧项目 nodes.db 路径（默认 /etc/mihomo/nodes.db）：'; read -r source_db || true; migrate_from_mihomo_lite "${source_db:-/etc/mihomo/nodes.db}" --dry-run ;;
+    4) printf '旧项目 nodes.db 路径（默认 /etc/mihomo/nodes.db）：'; read -r source_db || true; migrate_from_mihomo_lite "${source_db:-/etc/mihomo/nodes.db}" --apply ;;
     0) return 0 ;;
     *) warn "无效选择。" ;;
   esac
@@ -2855,6 +2949,7 @@ case "${1:-}" in
   rotate-finalize|rotation-finalize) shift; finalize_rotation "$@" ;;
   backup) shift; create_backup "$@" ;;
   restore) shift; restore_backup "$@" ;;
+  migrate-mh|migrate-from-mh) shift; migrate_from_mihomo_lite "$@" ;;
   maintain|maintenance) maintenance_mode ;;
   report|diagnostic) shift; diagnostic_report "$@" ;;
   self-heal|selfheal) shift; self_heal_once "$@" ;;
@@ -2873,7 +2968,7 @@ case "${1:-}" in
   uninstall) shift; uninstall_project "$@" ;;
   debug-tx) shift; debug_transaction "$@" ;;
   help|-h|--help)
-    printf '用法：vp [status|doctor|health|repair|report|self-heal|monitor-install|stability|network|network-optimize|network-rollback|test-all|optimize|maintain|update|rollback|init|core-install|reality-add|tunnel-install|argo-add|nodes|subscription|edit|delete|link|test-node|rotate|rotations|rotate-finalize|backup|restore|uninstall|version]\n'
+    printf '用法：vp [status|doctor|health|repair|report|self-heal|monitor-install|stability|network|network-optimize|network-rollback|test-all|optimize|maintain|update|rollback|init|core-install|reality-add|tunnel-install|argo-add|nodes|subscription|edit|delete|link|test-node|rotate|rotations|rotate-finalize|backup|restore|migrate-mh|uninstall|version]\n'
     ;;
   '') menu ;;
   *) error "未知命令：$1"; exit 2 ;;

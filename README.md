@@ -1,5 +1,7 @@
 # VPS-Node
 
+> `0.2.0-dev.15` 新增 `vp migrate-mh /etc/mihomo/nodes.db --dry-run` 和 `--apply`。只迁移能够无损映射的 Reality 与标准 Argo WS；不猜测转换其他协议，也不读取旧 Tunnel Token、用户、iptables、cron 或 sysctl。
+
 > `0.2.0-dev.13` Reality 节点可明确选择 `ipv4` 或 `ipv6`；IPv6 会先验证公网可用性，分享链接自动使用方括号。`vp subscription base64` 可导出全部节点，并在凭据轮换宽限期内同时包含新旧链接。
 
 > `0.2.0-dev.12` 内存自适应进一步加入 cgroup CPU quota 与 cpuset：`GOMAXPROCS` 不再只看宿主可见核心数。首页会区分 OOM 历史累计和自上次确认后的新增次数。
@@ -74,6 +76,8 @@ vp rotate home 24
 vp rotate-finalize home
 vp backup
 vp restore /path/to/backup.tar.gz
+vp migrate-mh /etc/mihomo/nodes.db --dry-run
+vp migrate-mh /etc/mihomo/nodes.db --apply
 vp maintain
 vp update
 vp rollback

@@ -123,6 +123,26 @@ printf '%s\n' "$plain_subscription" | grep -Fq "vless://$old_uuid@"
 base64_subscription="$(VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log" \
   VP_LIB_DIR="$TMP/dns-usr" VP_PUBLIC_IPV6_OVERRIDE=2001:db8::10 sh "$ROOT/vp.sh" subscription base64)"
 [ "$(printf '%s' "$base64_subscription" | base64 -d | grep -c '^vless://')" -eq 3 ]
+legacy_db="$TMP/legacy-nodes.db"
+cat > "$legacy_db" <<'LEGACY_DB'
+vless-reality|legacy-reality|26433|11111111-1111-4111-8111-111111111111|www.amd.com|www.amd.com:443|legacy-private|legacy-public|a1b2c3d4e5f60708
+vless-ws|legacy-argo|26434|22222222-2222-4222-8222-222222222222|/legacy|legacy.example.com|argo|legacy.example.com|443
+hysteria2|legacy-hy2|26435|password|www.amd.com|cert|key||
+vless-ws|legacy-cdn|26436|33333333-3333-4333-8333-333333333333|/cdn|cdn.example.com|cdn|preferred.example.com|443
+LEGACY_DB
+legacy_hash_before="$(sha256sum "$legacy_db" | awk '{print $1}')"
+migration_preview="$(VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log" \
+  VP_LIB_DIR="$TMP/dns-usr" VP_CORE_BIN="$TMP/dns-usr/bin/mihomo" VP_SKIP_SERVICE=1 \
+  sh "$ROOT/vp.sh" migrate-mh "$legacy_db" --dry-run)"
+printf '%s\n' "$migration_preview" | grep -q '可无损导入 2，协议不支持 1，字段/模式不可无损转换 1'
+VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log" \
+VP_LIB_DIR="$TMP/dns-usr" VP_CORE_BIN="$TMP/dns-usr/bin/mihomo" \
+VP_CORE_BACKUP_BIN="$TMP/dns-usr/bin/mihomo.previous" VP_MIGRATE_CONFIRM=MIGRATE VP_SKIP_SERVICE=1 \
+sh "$ROOT/vp.sh" migrate-mh "$legacy_db" --apply >/dev/null
+grep -q '^reality|legacy-reality|26433|11111111-1111-4111-8111-111111111111|www.amd.com|www.amd.com:443|legacy-private|legacy-public|a1b2c3d4e5f60708|ipv4$' "$TMP/dns-etc/nodes.db"
+grep -q '^argo|legacy-argo|26434|22222222-2222-4222-8222-222222222222|/legacy|legacy.example.com$' "$TMP/dns-etc/nodes.db"
+! grep -q 'legacy-hy2\|legacy-cdn' "$TMP/dns-etc/nodes.db"
+[ "$legacy_hash_before" = "$(sha256sum "$legacy_db" | awk '{print $1}')" ]
 fake_curl="$TMP/fake-curl"
 cat > "$fake_curl" <<'FAKE_CURL'
 #!/bin/sh

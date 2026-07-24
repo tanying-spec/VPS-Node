@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.0-dev.15
+
+- Added preview-first migration from Mihomo-lite-argo `nodes.db`.
+- Only lossless VLESS-Reality and standard Argo VLESS-WS records are imported; unsupported protocols and lossy CDN/direct WS mappings are explicitly counted and skipped.
+- Apply mode requires `MIGRATE`, creates a VPS-Node backup, validates the complete Mihomo candidate, restarts and rolls back transactionally on failure.
+- Migration preserves the source database and never imports Tunnel tokens, users, traffic/firewall rules, cron jobs or sysctl settings.
+
 ## 0.2.0-dev.14
 
 - Added a host-locked isolated acceptance harness for the only authorized test machine (`134.209.180.134`).
