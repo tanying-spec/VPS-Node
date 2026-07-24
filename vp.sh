@@ -2,7 +2,7 @@
 
 set -u
 
-VP_VERSION="0.2.0-dev.63"
+VP_VERSION="0.2.0-dev.64"
 VP_CONFIG_DIR="${VP_CONFIG_DIR:-/etc/vps-node}"
 VP_DATA_DIR="${VP_DATA_DIR:-/var/lib/vps-node}"
 VP_LOG_DIR="${VP_LOG_DIR:-/var/log/vps-node}"
@@ -1614,11 +1614,18 @@ delete_node() {
   [ -n "$target" ] || { error "请指定节点名称。"; return 1; }
   record="$(awk -F'|' -v n="$target" '$2==n{print;exit}' "$VP_NODES_DB" 2>/dev/null)"
   [ -n "$record" ] || { error "未找到节点。"; return 1; }
+  approved_delete_nodes_state="$(managed_file_state "$VP_NODES_DB")"
+  approved_delete_rotations_state="$(managed_file_state "$VP_ROTATIONS_DB")"
   if [ "${VP_DELETE_CONFIRM:-}" != "DELETE" ]; then
     printf '删除节点 %s？请输入 DELETE：' "$target"
     read -r answer || true
     [ "$answer" = "DELETE" ] || { warn "已取消。"; return 0; }
   fi
+  if [ "${VP_ALLOW_TEST_HOOKS:-0}" = 1 ] && [ "${VP_TEST_DELETE_NODE_RACE:-0}" = 1 ]; then
+    printf '%s\n' 'argo|concurrent-node|29991|99999999-9999-4999-8999-999999999999|/concurrent|concurrent.example.com' >> "$VP_NODES_DB"
+  fi
+  [ "$(managed_file_state "$VP_NODES_DB")" = "$approved_delete_nodes_state" ] || { error "节点数据库在删除确认期间发生变化，已中止且未删除任何节点。"; return 1; }
+  [ "$(managed_file_state "$VP_ROTATIONS_DB")" = "$approved_delete_rotations_state" ] || { error "凭据轮换记录在删除确认期间发生变化，已中止删除。"; return 1; }
   begin_state_transaction node-delete || return 1
   candidate_root="$VP_TX_ACTIVE/candidate"
   awk -F'|' -v n="$target" '$2!=n' "$candidate_root/nodes.db" > "$candidate_root/nodes.db.tmp"

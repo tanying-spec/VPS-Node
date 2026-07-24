@@ -889,6 +889,27 @@ sh "$ROOT/vp.sh" monitor-install >/dev/null
 [ -x "$TMP/dns-usr/bin/watchdog-run" ]
 grep -Fq "exec \"$ROOT/vp.sh\" self-heal --quiet" "$TMP/dns-usr/bin/watchdog-run"
 
+delete_race_root="$TMP/delete-race"
+VP_CONFIG_DIR="$delete_race_root/etc" VP_DATA_DIR="$delete_race_root/lib" \
+VP_LOG_DIR="$delete_race_root/log" VP_LIB_DIR="$delete_race_root/usr" \
+VP_SKIP_SERVICE=1 sh "$ROOT/vp.sh" init >/dev/null
+printf '%s\n' 'argo|delete-target|29990|88888888-8888-4888-8888-888888888888|/target|target.example.com' \
+  > "$delete_race_root/etc/nodes.db"
+delete_race_state_hash="$(sha256sum "$delete_race_root/etc/state.env" | awk '{print $1}')"
+delete_race_rotations_hash="$(sha256sum "$delete_race_root/etc/credential-rotations.db" | awk '{print $1}')"
+if VP_CONFIG_DIR="$delete_race_root/etc" VP_DATA_DIR="$delete_race_root/lib" \
+  VP_LOG_DIR="$delete_race_root/log" VP_LIB_DIR="$delete_race_root/usr" VP_SKIP_SERVICE=1 \
+  VP_DELETE_CONFIRM=DELETE VP_ALLOW_TEST_HOOKS=1 VP_TEST_DELETE_NODE_RACE=1 \
+  sh "$ROOT/vp.sh" delete delete-target >/dev/null 2>&1; then
+  printf 'node deletion accepted a database changed after confirmation\n' >&2
+  exit 1
+fi
+grep -q '^argo|delete-target|' "$delete_race_root/etc/nodes.db"
+grep -q '^argo|concurrent-node|' "$delete_race_root/etc/nodes.db"
+[ "$(sha256sum "$delete_race_root/etc/state.env" | awk '{print $1}')" = "$delete_race_state_hash" ]
+[ "$(sha256sum "$delete_race_root/etc/credential-rotations.db" | awk '{print $1}')" = "$delete_race_rotations_hash" ]
+[ ! -e "$delete_race_root/etc/transactions/active" ]
+
 uninstall_fail_root="$TMP/uninstall-stop-failure"
 mkdir -p "$uninstall_fail_root"
 : > "$uninstall_fail_root/vp"

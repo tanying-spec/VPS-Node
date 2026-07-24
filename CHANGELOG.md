@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.0-dev.64
+
+- Node deletion now binds `DELETE` approval to the exact node and credential-rotation database states shown before confirmation.
+- Any concurrent add, edit, rotation or deletion detected after confirmation aborts before a state transaction is created.
+- The concurrent database content is preserved and the originally selected node is not removed under stale approval.
+- Regression tests inject a valid concurrent node and prove no transaction, state change, rotation change or target deletion occurs.
+
 ## 0.2.0-dev.63
 
 - Backup pruning now records the exact archive and sidecar file states for every validated recovery point in the displayed deletion plan.
