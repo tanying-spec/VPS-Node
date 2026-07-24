@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.0-dev.75
+
+- Starting credential rotation now previews the node, protocol, grace period, dual-credential impact and exact finalization command before requiring `ROTATE`.
+- The confirmation belongs to `vp rotate` itself, so direct CLI and numbered-menu use share one safety boundary.
+- Cancellation occurs before UUID generation or transaction creation and leaves node, rotation, generated configuration and state files untouched.
+- Portable and isolated-host tests explicitly authorize rotation; regression coverage proves cancellation is byte-identical and transaction-free.
+
 ## 0.2.0-dev.74
 
 - Core and Tunnel installation now arm dedicated `EXIT`, `HUP`, `INT` and `TERM` recovery immediately after binary promotion.

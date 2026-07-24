@@ -8,6 +8,7 @@ trap 'rm -rf "$TMP"' EXIT HUP INT TERM
 CURRENT_VERSION="$(sh "$ROOT/vp.sh" version)"
 export VP_CORE_INSTALL_CONFIRM=INSTALL
 export VP_TUNNEL_INSTALL_CONFIRM=INSTALL
+export VP_ROTATION_START_CONFIRM=ROTATE
 
 cancel_install_root="$TMP/cancel-install"
 cancelled_core_install="$(VP_CONFIG_DIR="$cancel_install_root/etc" VP_DATA_DIR="$cancel_install_root/lib" \
@@ -1107,6 +1108,18 @@ VP_SKIP_SERVICE=1 sh "$ROOT/vp.sh" init >/dev/null
 rotate_race_record='argo|rotate-target|29996|33333333-3333-4333-8333-333333333333|/rotate|rotate.example.com'
 printf '%s\n' "$rotate_race_record" > "$rotate_race_root/etc/nodes.db"
 rotate_race_state_hash="$(sha256sum "$rotate_race_root/etc/state.env" | awk '{print $1}')"
+rotate_cancel_nodes_hash="$(sha256sum "$rotate_race_root/etc/nodes.db" | awk '{print $1}')"
+rotate_cancel_rotations_hash="$(sha256sum "$rotate_race_root/etc/credential-rotations.db" | awk '{print $1}')"
+rotate_cancel_config_hash="$(sha256sum "$rotate_race_root/etc/generated/mihomo.yaml" | awk '{print $1}')"
+cancelled_rotation="$(VP_CONFIG_DIR="$rotate_race_root/etc" VP_DATA_DIR="$rotate_race_root/lib" \
+  VP_LOG_DIR="$rotate_race_root/log" VP_LIB_DIR="$rotate_race_root/usr" VP_SKIP_SERVICE=1 \
+  VP_ROTATION_START_CONFIRM=CANCEL sh "$ROOT/vp.sh" rotate rotate-target 24 2>&1 || true)"
+printf '%s\n' "$cancelled_rotation" | grep -q '已取消凭据轮换'
+[ "$(sha256sum "$rotate_race_root/etc/nodes.db" | awk '{print $1}')" = "$rotate_cancel_nodes_hash" ]
+[ "$(sha256sum "$rotate_race_root/etc/credential-rotations.db" | awk '{print $1}')" = "$rotate_cancel_rotations_hash" ]
+[ "$(sha256sum "$rotate_race_root/etc/generated/mihomo.yaml" | awk '{print $1}')" = "$rotate_cancel_config_hash" ]
+[ "$(sha256sum "$rotate_race_root/etc/state.env" | awk '{print $1}')" = "$rotate_race_state_hash" ]
+[ ! -e "$rotate_race_root/etc/transactions/active" ]
 if VP_CONFIG_DIR="$rotate_race_root/etc" VP_DATA_DIR="$rotate_race_root/lib" \
   VP_LOG_DIR="$rotate_race_root/log" VP_LIB_DIR="$rotate_race_root/usr" VP_SKIP_SERVICE=1 \
   VP_ALLOW_TEST_HOOKS=1 VP_TEST_ROTATE_CREDENTIAL_RACE=1 \

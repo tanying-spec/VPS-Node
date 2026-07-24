@@ -2,7 +2,7 @@
 
 set -u
 
-VP_VERSION="0.2.0-dev.74"
+VP_VERSION="0.2.0-dev.75"
 VP_CONFIG_DIR="${VP_CONFIG_DIR:-/etc/vps-node}"
 VP_DATA_DIR="${VP_DATA_DIR:-/var/lib/vps-node}"
 VP_LOG_DIR="${VP_LOG_DIR:-/var/log/vps-node}"
@@ -1900,6 +1900,21 @@ EOF
   if awk -F'|' -v n="$target" -v now="$now" '$1==n && $5+0>now{found=1} END{exit found?0:1}' "$VP_ROTATIONS_DB" 2>/dev/null; then
     error "该节点已有进行中的轮换，请先验证并正式切换。"
     return 1
+  fi
+  printf '凭据轮换预览：\n'
+  printf '  节点：%s\n' "$target"
+  printf '  协议：%s\n' "$proto"
+  printf '  宽限期：%s 小时（新旧凭据同时有效）\n' "$grace_hours"
+  printf '  后续操作：验证新链接后再执行 vp rotate-finalize %s\n' "$target"
+  if [ -n "${VP_ROTATION_START_CONFIRM:-}" ]; then
+    rotate_confirm="$VP_ROTATION_START_CONFIRM"
+  else
+    printf '输入 ROTATE 确认生成新凭据并重启 Mihomo：'
+    read -r rotate_confirm || true
+  fi
+  if [ "$rotate_confirm" != ROTATE ]; then
+    warn "已取消凭据轮换，节点、凭据和轮换记录未修改。"
+    return 2
   fi
   new_uuid="$(new_uuid)"
   expires=$((now + grace_hours * 3600))
