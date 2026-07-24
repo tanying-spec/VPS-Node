@@ -343,14 +343,30 @@ detect_arch() {
   esac
 }
 
-mihomo_download_url() {
+release_asset_records() {
+  printf '%s\n' "$1" | awk '
+    /"name"[[:space:]]*:/ {
+      value=$0; sub(/^.*"name"[[:space:]]*:[[:space:]]*"/, "", value); sub(/".*$/, "", value); name=value
+    }
+    /"digest"[[:space:]]*:/ {
+      value=$0; sub(/^.*"digest"[[:space:]]*:[[:space:]]*"sha256:/, "", value); sub(/".*$/, "", value); digest=value
+    }
+    /"browser_download_url"[[:space:]]*:/ {
+      value=$0; sub(/^.*"browser_download_url"[[:space:]]*:[[:space:]]*"/, "", value); sub(/".*$/, "", value)
+      if (name != "") print name "|" value "|" digest
+      name=""; digest=""
+    }
+  '
+}
+
+mihomo_asset_record() {
   arch="$(detect_arch)" || return 1
   release_json="$(curl -fsSL --max-time 30 "$VP_MIHOMO_API")" || { error "无法访问 Mihomo Release API。"; return 1; }
-  urls="$(printf '%s\n' "$release_json" | sed -n 's/.*"browser_download_url"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
-  url="$(printf '%s\n' "$urls" | grep -Ei "mihomo-linux-${arch}.*compatible.*\.gz$" | head -n 1 || true)"
-  [ -n "$url" ] || url="$(printf '%s\n' "$urls" | grep -Ei "mihomo-linux-${arch}.*\.gz$" | head -n 1 || true)"
-  [ -n "$url" ] || { error "Release 中没有 linux-$arch 内核。"; return 1; }
-  printf '%s' "$url"
+  records="$(release_asset_records "$release_json")"
+  record="$(printf '%s\n' "$records" | grep -Ei "^mihomo-linux-${arch}.*compatible.*\.gz\|" | head -n 1 || true)"
+  [ -n "$record" ] || record="$(printf '%s\n' "$records" | grep -Ei "^mihomo-linux-${arch}.*\.gz\|" | head -n 1 || true)"
+  [ -n "$record" ] || { error "Release 中没有 linux-$arch 内核。"; return 1; }
+  printf '%s' "$record"
 }
 
 install_core_binary() {
@@ -363,9 +379,13 @@ install_core_binary() {
   else
     command -v curl >/dev/null 2>&1 || { error "缺少 curl。"; rm -f "$binary_tmp" "$archive_tmp"; return 1; }
     command -v gzip >/dev/null 2>&1 || { error "缺少 gzip。"; rm -f "$binary_tmp" "$archive_tmp"; return 1; }
-    download_url="$(mihomo_download_url)" || { rm -f "$binary_tmp" "$archive_tmp"; return 1; }
+    asset="$(mihomo_asset_record)" || { rm -f "$binary_tmp" "$archive_tmp"; return 1; }
+    asset_name="${asset%%|*}"; asset_rest="${asset#*|}"; download_url="${asset_rest%%|*}"; expected_digest="${asset_rest#*|}"
+    case "$expected_digest" in ''|*[!0-9a-fA-F]*) error "GitHub 未提供有效的 Mihomo SHA-256。"; rm -f "$binary_tmp" "$archive_tmp"; return 1 ;; esac
     info "正在下载 Mihomo 内核。"
     curl -fL --max-time 180 "$download_url" -o "$archive_tmp" || { error "Mihomo 下载失败。"; rm -f "$binary_tmp" "$archive_tmp"; return 1; }
+    actual_digest="$(sha256_file "$archive_tmp" 2>/dev/null | tr 'A-F' 'a-f')"
+    [ "$(printf '%s' "$expected_digest" | tr 'A-F' 'a-f')" = "$actual_digest" ] || { error "Mihomo SHA-256 校验失败。"; rm -f "$binary_tmp" "$archive_tmp"; return 1; }
     gzip -dc "$archive_tmp" > "$binary_tmp" || { error "Mihomo 解压失败。"; rm -f "$binary_tmp" "$archive_tmp"; return 1; }
   fi
   rm -f "$archive_tmp"
@@ -440,7 +460,7 @@ render_mihomo_config() {
   chmod 600 "$output_file"
 }
 
-cloudflared_download_url() {
+cloudflared_asset_record() {
   case "$(detect_arch)" in
     amd64) cf_arch=amd64 ;;
     arm64) cf_arch=arm64 ;;
@@ -448,9 +468,9 @@ cloudflared_download_url() {
     *) error "cloudflared 不支持当前架构。"; return 1 ;;
   esac
   release_json="$(curl -fsSL --max-time 30 "$VP_CLOUDFLARED_API")" || { error "无法访问 cloudflared Release API。"; return 1; }
-  url="$(printf '%s\n' "$release_json" | sed -n 's/.*"browser_download_url"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | grep -E "cloudflared-linux-${cf_arch}$" | head -n 1 || true)"
-  [ -n "$url" ] || { error "Release 中没有适配的 cloudflared。"; return 1; }
-  printf '%s' "$url"
+  record="$(release_asset_records "$release_json" | grep -E "^cloudflared-linux-${cf_arch}\|" | head -n 1 || true)"
+  [ -n "$record" ] || { error "Release 中没有适配的 cloudflared。"; return 1; }
+  printf '%s' "$record"
 }
 
 install_tunnel_binary() {
@@ -459,9 +479,13 @@ install_tunnel_binary() {
   if [ -n "${VP_TUNNEL_SOURCE_BIN:-}" ]; then
     cp "$VP_TUNNEL_SOURCE_BIN" "$tunnel_tmp" || { rm -f "$tunnel_tmp"; return 1; }
   else
-    url="$(cloudflared_download_url)" || { rm -f "$tunnel_tmp"; return 1; }
+    asset="$(cloudflared_asset_record)" || { rm -f "$tunnel_tmp"; return 1; }
+    asset_name="${asset%%|*}"; asset_rest="${asset#*|}"; url="${asset_rest%%|*}"; expected_digest="${asset_rest#*|}"
+    case "$expected_digest" in ''|*[!0-9a-fA-F]*) error "GitHub 未提供有效的 cloudflared SHA-256。"; rm -f "$tunnel_tmp"; return 1 ;; esac
     info "正在下载 cloudflared。"
     curl -fL --max-time 180 "$url" -o "$tunnel_tmp" || { rm -f "$tunnel_tmp"; error "cloudflared 下载失败。"; return 1; }
+    actual_digest="$(sha256_file "$tunnel_tmp" 2>/dev/null | tr 'A-F' 'a-f')"
+    [ "$(printf '%s' "$expected_digest" | tr 'A-F' 'a-f')" = "$actual_digest" ] || { rm -f "$tunnel_tmp"; error "cloudflared SHA-256 校验失败。"; return 1; }
   fi
   chmod 755 "$tunnel_tmp"
   "$tunnel_tmp" version >/dev/null 2>&1 || { rm -f "$tunnel_tmp"; error "cloudflared 无法运行。"; return 1; }
@@ -644,6 +668,52 @@ rollback_core_binary() {
   elif [ "$had_binary" = "0" ]; then
     rm -f "$VP_CORE_BIN"
   fi
+}
+
+core_binary_rollback() {
+  need_root || return 1
+  [ -x "$VP_CORE_BACKUP_BIN" ] || { error "没有可回滚的 Mihomo 内核。"; return 1; }
+  candidate="$(mktemp /tmp/vp-core-rollback.XXXXXX)" || return 1
+  cp "$VP_CORE_BACKUP_BIN" "$candidate" || { rm -f "$candidate"; return 1; }
+  chmod 755 "$candidate"
+  "$candidate" -v >/dev/null 2>&1 || { rm -f "$candidate"; error "备份内核无法运行。"; return 1; }
+  [ -f "$VP_CORE_CONFIG" ] && "$candidate" -t -d "$VP_CONFIG_DIR" -f "$VP_CORE_CONFIG" >/dev/null 2>&1 || { rm -f "$candidate"; error "备份内核无法加载当前配置。"; return 1; }
+  current="$(mktemp /tmp/vp-core-current.XXXXXX)" || { rm -f "$candidate"; return 1; }
+  cp "$VP_CORE_BIN" "$current"
+  mv "$candidate" "$VP_CORE_BIN"
+  chmod 755 "$VP_CORE_BIN"
+  if core_service_restart; then
+    mv "$current" "$VP_CORE_BACKUP_BIN"
+    chmod 755 "$VP_CORE_BACKUP_BIN"
+    ok "Mihomo 内核已回滚。"
+    return 0
+  fi
+  mv "$current" "$VP_CORE_BIN"
+  chmod 755 "$VP_CORE_BIN"
+  core_service_restart >/dev/null 2>&1 || true
+  error "备份内核启动失败，已恢复回滚前版本。"
+  return 1
+}
+
+tunnel_binary_rollback() {
+  need_root || return 1
+  [ -x "$VP_TUNNEL_BACKUP_BIN" ] || { error "没有可回滚的 cloudflared。"; return 1; }
+  "$VP_TUNNEL_BACKUP_BIN" version >/dev/null 2>&1 || { error "备份 cloudflared 无法运行。"; return 1; }
+  current="$(mktemp /tmp/vp-tunnel-current.XXXXXX)" || return 1
+  cp "$VP_TUNNEL_BIN" "$current"
+  cp "$VP_TUNNEL_BACKUP_BIN" "$VP_TUNNEL_BIN"
+  chmod 755 "$VP_TUNNEL_BIN"
+  if tunnel_service_restart; then
+    mv "$current" "$VP_TUNNEL_BACKUP_BIN"
+    chmod 755 "$VP_TUNNEL_BACKUP_BIN"
+    ok "cloudflared 已回滚。"
+    return 0
+  fi
+  mv "$current" "$VP_TUNNEL_BIN"
+  chmod 755 "$VP_TUNNEL_BIN"
+  tunnel_service_restart >/dev/null 2>&1 || true
+  error "备份 cloudflared 启动失败，已恢复回滚前版本。"
+  return 1
 }
 
 core_install() {
@@ -1455,11 +1525,32 @@ safe_repair() {
 uninstall_project() {
   need_root || return 1
   warn "该操作将删除 VPS-Node 的状态和凭据。"
-  printf '请输入 DELETE 确认：'
-  read -r answer || true
+  if [ -n "${VP_UNINSTALL_CONFIRM:-}" ]; then
+    answer="$VP_UNINSTALL_CONFIRM"
+  else
+    printf '请输入 DELETE 确认：'
+    read -r answer || true
+  fi
   [ "$answer" = "DELETE" ] || { warn "已取消。"; return 0; }
+  if [ "${VP_SKIP_SERVICE:-0}" != "1" ]; then
+    case "$(service_manager)" in
+      systemd)
+        systemctl disable --now "$VP_TUNNEL_SERVICE" >/dev/null 2>&1 || true
+        systemctl disable --now "$VP_CORE_SERVICE" >/dev/null 2>&1 || true
+        rm -f "/etc/systemd/system/${VP_TUNNEL_SERVICE}.service" "/etc/systemd/system/${VP_CORE_SERVICE}.service"
+        systemctl daemon-reload >/dev/null 2>&1 || true
+        ;;
+      openrc)
+        rc-service "$VP_TUNNEL_SERVICE" stop >/dev/null 2>&1 || true
+        rc-service "$VP_CORE_SERVICE" stop >/dev/null 2>&1 || true
+        rc-update del "$VP_TUNNEL_SERVICE" default >/dev/null 2>&1 || true
+        rc-update del "$VP_CORE_SERVICE" default >/dev/null 2>&1 || true
+        rm -f "/etc/init.d/$VP_TUNNEL_SERVICE" "/etc/init.d/$VP_CORE_SERVICE"
+        ;;
+    esac
+  fi
   rm -rf "$VP_CONFIG_DIR" "$VP_DATA_DIR" "$VP_LOG_DIR" "$VP_LIB_DIR"
-  rm -f /usr/local/bin/vp /usr/local/bin/vp.previous
+  rm -f "$VP_CLI_PATH" "$VP_CLI_BACKUP_PATH"
   ok "VPS-Node 已卸载。"
 }
 
@@ -1620,6 +1711,8 @@ case "${1:-}" in
   maintain|maintenance) maintenance_mode ;;
   update) update_cli ;;
   rollback) rollback_cli ;;
+  core-rollback) core_binary_rollback ;;
+  tunnel-rollback) tunnel_binary_rollback ;;
   status) show_status ;;
   doctor) doctor ;;
   health|check) layered_health_check ;;
