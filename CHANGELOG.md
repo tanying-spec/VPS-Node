@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.0-dev.50
+
+- Portable backups no longer include host-bound runtime data such as network rollback snapshots, OOM baselines, self-heal locks or nested managed backups.
+- Restore no longer deletes or replaces the destination host's data directory while restoring node configuration, runtime parameters and secrets.
+- Legacy archives that contain a `data/` payload remain readable, but that host-specific payload is intentionally ignored.
+- Regression tests prove new archives exclude runtime data and both new and legacy restores preserve the destination host's network rollback and local-state markers.
+
 ## 0.2.0-dev.49
 
 - Restore now rejects archives and SHA-256 sidecars that are not readable regular files, including symlinks.

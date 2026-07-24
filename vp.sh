@@ -2,7 +2,7 @@
 
 set -u
 
-VP_VERSION="0.2.0-dev.49"
+VP_VERSION="0.2.0-dev.50"
 VP_CONFIG_DIR="${VP_CONFIG_DIR:-/etc/vps-node}"
 VP_DATA_DIR="${VP_DATA_DIR:-/var/lib/vps-node}"
 VP_LOG_DIR="${VP_LOG_DIR:-/var/log/vps-node}"
@@ -2272,10 +2272,9 @@ create_backup() {
     cp -R -p "$VP_CONFIG_DIR/." "$package/config/"
     rm -rf "$package/config/transactions"
   fi
-  if [ -d "$VP_DATA_DIR" ]; then
-    cp -R -p "$VP_DATA_DIR/." "$package/data/"
-    rm -rf "$package/data/backups"
-  fi
+  # VP_DATA_DIR only contains host-bound runtime state: network rollback data,
+  # OOM baselines, self-heal locks and managed backup files. None of it is
+  # portable node configuration, so it must not cross hosts through a backup.
   {
     printf 'FORMAT_VERSION=1\n'
     printf 'VP_VERSION=%s\n' "$VP_VERSION"
@@ -2426,10 +2425,9 @@ backup_archive_safe() {
 restore_extra_snapshot() {
   extra="$VP_TX_ACTIVE/restore-extra"
   [ -d "$extra" ] || return 0
-  rm -rf "$VP_SECRETS_DIR" "$VP_DATA_DIR"
+  rm -rf "$VP_SECRETS_DIR"
   rm -f "$VP_CORE_ENV"
   [ -d "$extra/secrets" ] && cp -R -p "$extra/secrets" "$VP_SECRETS_DIR"
-  [ -d "$extra/data" ] && { mkdir -p "$VP_DATA_DIR"; cp -R -p "$extra/data/." "$VP_DATA_DIR/"; }
   [ -f "$extra/core.env" ] && cp -p "$extra/core.env" "$VP_CORE_ENV"
 }
 
@@ -2503,7 +2501,8 @@ restore_backup() {
   printf '恢复预览：版本=%s，创建时间=%s\n' "${backup_version:-未知}" "${backup_created:-未知}"
   printf '  节点：%s（Reality %s / Argo %s）\n' "$backup_nodes" "$backup_reality" "$backup_argo"
   printf '  凭据轮换记录：%s；Tunnel Token：%s（内容不显示）\n' "$backup_rotations" "$backup_token"
-  printf '  将替换：VPS-Node 节点、轮换、运行参数、Token 与项目数据。\n'
+  printf '  将替换：VPS-Node 节点、轮换、运行参数与 Token。\n'
+  printf '  主机状态保持：网络回滚快照、OOM 基线、自愈锁与本机备份不会从归档迁移或被删除。\n'
   printf '  不会修改：SSH、防火墙、其他代理项目或非 VPS-Node 文件。\n'
   if [ "$restore_mode" = --dry-run ]; then
     cleanup_restore; trap - EXIT HUP INT TERM
@@ -2525,7 +2524,6 @@ restore_backup() {
   extra="$VP_TX_ACTIVE/restore-extra"
   mkdir -p "$extra"
   [ -d "$VP_SECRETS_DIR" ] && cp -R -p "$VP_SECRETS_DIR" "$extra/secrets"
-  [ -d "$VP_DATA_DIR" ] && cp -R -p "$VP_DATA_DIR/." "$extra/data"
   [ -f "$VP_CORE_ENV" ] && cp -p "$VP_CORE_ENV" "$extra/core.env"
   cp -p "$package/config/nodes.db" "$VP_TX_ACTIVE/candidate/nodes.db"
   if [ -f "$package/config/credential-rotations.db" ]; then
@@ -2543,11 +2541,9 @@ restore_backup() {
     abort_state_transaction; cleanup_restore; trap - EXIT HUP INT TERM; error "备份中的 Mihomo 配置无效。"; return 1
   fi
   activate_state_candidate || { abort_state_transaction; cleanup_restore; trap - EXIT HUP INT TERM; return 1; }
-  rm -rf "$VP_SECRETS_DIR" "$VP_DATA_DIR"
+  rm -rf "$VP_SECRETS_DIR"
   [ -d "$package/config/secrets" ] && cp -R -p "$package/config/secrets" "$VP_SECRETS_DIR" || mkdir -p "$VP_SECRETS_DIR"
   [ -f "$package/config/core.env" ] && cp -p "$package/config/core.env" "$VP_CORE_ENV"
-  mkdir -p "$VP_DATA_DIR"
-  [ -d "$package/data" ] && cp -R -p "$package/data/." "$VP_DATA_DIR/"
   chmod 700 "$VP_SECRETS_DIR"
   find "$VP_SECRETS_DIR" -type f -exec chmod 600 {} \; 2>/dev/null || true
 

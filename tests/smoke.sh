@@ -523,12 +523,18 @@ selected_metrics_port="$(awk -F= '$1=="VP_TUNNEL_METRICS_PORT"{print $2;exit}' "
 [ "$selected_metrics_port" != 19090 ]
 
 printf 'BACKUP_TEST_MARKER=original\n' >> "$TMP/dns-etc/state.env"
+printf 'HOST_LOCAL_MARKER=preserve\n' > "$TMP/dns-lib/host-local.state"
+printf 'BEFORE_CC=cubic\nBEFORE_QDISC=pfifo_fast\n' > "$TMP/dns-lib/network-before.env"
 portable_backup="$TMP/portable-backup.tar.gz"
 VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log" \
 VP_LIB_DIR="$TMP/dns-usr" VP_CORE_BIN="$TMP/dns-usr/bin/mihomo" VP_SKIP_SERVICE=1 \
 sh "$ROOT/vp.sh" backup "$portable_backup" >/dev/null
 [ -s "$portable_backup" ]
 [ -s "$portable_backup.sha256" ]
+if tar -tzf "$portable_backup" | grep -Eq '^data/.+'; then
+  printf 'portable backup unexpectedly contains host-bound runtime data\n' >&2
+  exit 1
+fi
 managed_data="$TMP/managed-lib"
 managed_backups="$managed_data/backups"
 mkdir -p "$managed_backups"
@@ -586,6 +592,24 @@ VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log
 VP_LIB_DIR="$TMP/dns-usr" VP_CORE_BIN="$TMP/dns-usr/bin/mihomo" VP_SKIP_SERVICE=1 \
 VP_RESTORE_CONFIRM=RESTORE sh "$ROOT/vp.sh" restore "$portable_backup" --apply >/dev/null
 grep -q '^BACKUP_TEST_MARKER=original$' "$TMP/dns-etc/state.env"
+grep -q '^HOST_LOCAL_MARKER=preserve$' "$TMP/dns-lib/host-local.state"
+grep -q '^BEFORE_CC=cubic$' "$TMP/dns-lib/network-before.env"
+
+legacy_data_package="$TMP/legacy-data-package"
+legacy_data_backup="$TMP/legacy-data-backup.tar.gz"
+mkdir -p "$legacy_data_package"
+tar -xzf "$portable_backup" -C "$legacy_data_package"
+printf 'HOST_LOCAL_MARKER=foreign-host\n' > "$legacy_data_package/data/host-local.state"
+printf 'BEFORE_CC=foreign\nBEFORE_QDISC=foreign\n' > "$legacy_data_package/data/network-before.env"
+tar -czf "$legacy_data_backup" -C "$legacy_data_package" manifest.env config data
+printf '%s  %s\n' "$(sha256sum "$legacy_data_backup" | awk '{print $1}')" "$(basename "$legacy_data_backup")" > "$legacy_data_backup.sha256"
+sed -i 's/BACKUP_TEST_MARKER=original/BACKUP_TEST_MARKER=changed-again/' "$TMP/dns-etc/state.env"
+VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log" \
+VP_LIB_DIR="$TMP/dns-usr" VP_CORE_BIN="$TMP/dns-usr/bin/mihomo" VP_SKIP_SERVICE=1 \
+VP_RESTORE_CONFIRM=RESTORE sh "$ROOT/vp.sh" restore "$legacy_data_backup" --apply >/dev/null
+grep -q '^BACKUP_TEST_MARKER=original$' "$TMP/dns-etc/state.env"
+grep -q '^HOST_LOCAL_MARKER=preserve$' "$TMP/dns-lib/host-local.state"
+grep -q '^BEFORE_CC=cubic$' "$TMP/dns-lib/network-before.env"
 
 unverified_backup="$TMP/unverified-backup.tar.gz"
 cp "$portable_backup" "$unverified_backup"
