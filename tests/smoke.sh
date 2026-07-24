@@ -32,6 +32,23 @@ VP_LOG_DIR="$TMP/log" \
 VP_LIB_DIR="$TMP/usr-lib" \
 VP_SKIP_SERVICE=1 sh "$ROOT/vp.sh" optimize >/dev/null
 
+fake_core="$TMP/fake-mihomo"
+cat > "$fake_core" <<'FAKE_CORE'
+#!/bin/sh
+case "${1:-}" in
+  -v|-t) exit 0 ;;
+  *) exit 0 ;;
+esac
+FAKE_CORE
+chmod 755 "$fake_core"
+VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log" \
+VP_LIB_DIR="$TMP/dns-usr" VP_CORE_BIN="$TMP/dns-usr/bin/mihomo" \
+VP_CORE_BACKUP_BIN="$TMP/dns-usr/bin/mihomo.previous" VP_CORE_SOURCE_BIN="$fake_core" \
+VP_DNS_PUBLIC_SERVERS=192.0.2.1 VP_SKIP_SERVICE=1 \
+sh "$ROOT/vp.sh" core-install >/dev/null
+grep -q '^VP_DNS_MODE=system$' "$TMP/dns-etc/core.env"
+! grep -q '1\.1\.1\.1\|8\.8\.8\.8' "$TMP/dns-etc/generated/mihomo.yaml"
+
 printf 'TEST_VALUE=before\n' >> "$TMP/etc/state.env"
 VP_CONFIG_DIR="$TMP/etc" VP_DATA_DIR="$TMP/lib" VP_LOG_DIR="$TMP/log" VP_LIB_DIR="$TMP/usr-lib" \
 VP_ALLOW_TEST_HOOKS=1 sh "$ROOT/vp.sh" debug-tx commit TEST_VALUE committed

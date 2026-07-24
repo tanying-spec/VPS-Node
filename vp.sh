@@ -19,6 +19,9 @@ VP_CORE_BACKUP_BIN="${VP_CORE_BACKUP_BIN:-$VP_LIB_DIR/bin/mihomo.previous}"
 VP_CORE_CONFIG="$VP_GENERATED_DIR/mihomo.yaml"
 VP_CORE_SERVICE="${VP_CORE_SERVICE:-vps-node-core}"
 VP_CORE_ENV="$VP_CONFIG_DIR/core.env"
+VP_DNS_TEST_HOST="${VP_DNS_TEST_HOST:-github.com}"
+VP_DNS_PUBLIC_SERVERS="${VP_DNS_PUBLIC_SERVERS:-1.1.1.1 8.8.8.8}"
+VP_DNS_QUERY_TOOL="${VP_DNS_QUERY_TOOL:-none}"
 VP_CORE_RUNNER="$VP_LIB_DIR/bin/mihomo-run"
 VP_MIXED_PORT="${VP_MIXED_PORT:-17890}"
 VP_CONTROLLER_PORT="${VP_CONTROLLER_PORT:-19090}"
@@ -269,6 +272,84 @@ bytes_to_mib() {
   case "$value" in ''|*[!0-9]*) printf '0' ;; *) awk -v n="$value" 'BEGIN { printf "%.1f", n / 1048576 }' ;; esac
 }
 
+dns_server_query_probe() {
+  dns_server="$1"
+  if command -v nslookup >/dev/null 2>&1; then
+    nslookup "$VP_DNS_TEST_HOST" "$dns_server" >/dev/null 2>&1
+  elif command -v dig >/dev/null 2>&1; then
+    dig +time=2 +tries=1 +short @"$dns_server" "$VP_DNS_TEST_HOST" A >/dev/null 2>&1
+  else
+    return 2
+  fi
+}
+
+dns_server_tcp_probe() {
+  dns_server="$1"
+  command -v nc >/dev/null 2>&1 || return 2
+  nc -z -w 2 "$dns_server" 53 >/dev/null 2>&1
+}
+
+detect_dns_profile() {
+  VP_DNS_MODE=system
+  VP_DNS_SERVERS=""
+  VP_DNS_PUBLIC_OK=0
+  VP_DNS_SYSTEM_OK=0
+  VP_DNS_QUERY_TOOL=none
+  VP_DNS_TCP_CHECK=skipped
+  if command -v nslookup >/dev/null 2>&1; then
+    VP_DNS_QUERY_TOOL=nslookup
+  elif command -v dig >/dev/null 2>&1; then
+    VP_DNS_QUERY_TOOL=dig
+  fi
+
+  if [ "$VP_DNS_QUERY_TOOL" != none ]; then
+    for dns_server in $VP_DNS_PUBLIC_SERVERS; do
+      dns_server_query_probe "$dns_server" || continue
+      if dns_server_tcp_probe "$dns_server" >/dev/null 2>&1; then
+        VP_DNS_TCP_CHECK=passed
+      elif [ "$?" -eq 2 ]; then
+        VP_DNS_TCP_CHECK=skipped
+      else
+        continue
+      fi
+      if [ -n "$VP_DNS_SERVERS" ]; then
+        VP_DNS_SERVERS="$VP_DNS_SERVERS,$dns_server"
+      else
+        VP_DNS_SERVERS="$dns_server"
+      fi
+    done
+  fi
+
+  if [ -n "$VP_DNS_SERVERS" ]; then
+    VP_DNS_MODE=public
+    VP_DNS_PUBLIC_OK=1
+  elif dns_probe >/dev/null 2>&1; then
+    VP_DNS_SYSTEM_OK=1
+    VP_DNS_SERVERS="$(awk '/^[[:space:]]*nameserver[[:space:]]+/{if (n++) printf ","; printf $2} END{print ""}' /etc/resolv.conf 2>/dev/null || true)"
+    [ -n "$VP_DNS_SERVERS" ] || VP_DNS_SERVERS=system
+  fi
+}
+
+dns_profile_probe() {
+  dns_mode="$1"
+  dns_servers="$2"
+  case "$dns_mode" in
+    public|system)
+      [ -n "$dns_servers" ] || return 1
+      [ "$dns_servers" = system ] && dns_probe && return 0
+      if ! command -v nslookup >/dev/null 2>&1 && ! command -v dig >/dev/null 2>&1; then
+        dns_probe
+        return $?
+      fi
+      for dns_server in $(printf '%s' "$dns_servers" | tr ',' ' '); do
+        dns_server_query_probe "$dns_server" || return 1
+      done
+      return 0
+      ;;
+    *) dns_probe ;;
+  esac
+}
+
 memory_snapshot() {
   current_file="$(cgroup_file memory.current 2>/dev/null || true)"
   max_file="$(cgroup_file memory.max 2>/dev/null || true)"
@@ -422,6 +503,7 @@ install_core_binary() {
 
 write_core_runtime_env() {
   memory_snapshot
+  detect_dns_profile
   limit_mib=$((MEM_LIMIT_BYTES / 1048576))
   case "$limit_mib" in ''|*[!0-9]*) limit_mib=0 ;; esac
   [ "$limit_mib" -gt 0 ] || limit_mib=1024
@@ -450,6 +532,12 @@ write_core_runtime_env() {
     printf 'GOMEMLIMIT=%s\n' "$gomemlimit"
     printf 'GOGC=%s\n' "$gogc"
     printf 'GOMAXPROCS=%s\n' "$gomaxprocs"
+    printf 'VP_DNS_MODE=%s\n' "$VP_DNS_MODE"
+    printf 'VP_DNS_SERVERS=%s\n' "$VP_DNS_SERVERS"
+    printf 'VP_DNS_PUBLIC_OK=%s\n' "$VP_DNS_PUBLIC_OK"
+    printf 'VP_DNS_SYSTEM_OK=%s\n' "$VP_DNS_SYSTEM_OK"
+    printf 'VP_DNS_QUERY_TOOL=%s\n' "$VP_DNS_QUERY_TOOL"
+    printf 'VP_DNS_TCP_CHECK=%s\n' "$VP_DNS_TCP_CHECK"
   } > "$VP_CORE_ENV"
   chmod 600 "$VP_CORE_ENV"
 }
@@ -464,10 +552,22 @@ render_mihomo_config() {
   rotations_file="${3:-$VP_ROTATIONS_DB}"
   render_now="$(date +%s 2>/dev/null || printf 0)"
   mkdir -p "$(dirname "$output_file")"
+  dns_mode="$(awk -F= '$1=="VP_DNS_MODE"{print $2;exit}' "$VP_CORE_ENV" 2>/dev/null || true)"
+  dns_servers="$(awk -F= '$1=="VP_DNS_SERVERS"{print $2;exit}' "$VP_CORE_ENV" 2>/dev/null || true)"
   {
     printf 'mixed-port: %s\n' "$VP_MIXED_PORT"
     printf "external-controller: '127.0.0.1:%s'\n" "$VP_CONTROLLER_PORT"
     printf 'allow-lan: false\nmode: rule\nlog-level: warning\nipv6: false\n'
+    case "$dns_mode" in
+      public|system)
+        if [ -n "$dns_servers" ] && [ "$dns_servers" != system ]; then
+          printf 'dns:\n  enable: true\n  ipv6: false\n  nameserver:\n'
+          for dns_server in $(printf '%s' "$dns_servers" | tr ',' ' '); do
+            printf '    - %s\n' "$dns_server"
+          done
+        fi
+        ;;
+    esac
     printf 'listeners:\n'
     while IFS='|' read -r proto name port uuid sni dest private_key public_key short_id; do
       [ -n "$proto" ] || continue
@@ -1404,6 +1504,9 @@ show_status() {
     printf '  GOGC / GOMAXPROCS：%s / %s\n' \
       "$(awk -F= '$1=="GOGC"{print $2;exit}' "$VP_CORE_ENV" 2>/dev/null || printf '未知')" \
       "$(awk -F= '$1=="GOMAXPROCS"{print $2;exit}' "$VP_CORE_ENV" 2>/dev/null || printf '未知')"
+    printf '  DNS 策略：%s（%s）\n' \
+      "$(awk -F= '$1=="VP_DNS_MODE"{print $2;exit}' "$VP_CORE_ENV" 2>/dev/null || printf '未知')" \
+      "$(awk -F= '$1=="VP_DNS_SERVERS"{print $2;exit}' "$VP_CORE_ENV" 2>/dev/null || printf '未检测')"
   fi
   printf '%s\n\n' '----------------------------------------'
 }
@@ -1565,10 +1668,16 @@ layered_health_check() {
     health_error "监听层：$node_listening/$node_total 个节点端口正在监听。"
   fi
 
-  if dns_probe; then
-    health_ok "DNS 层：系统解析正常。"
+  dns_mode="$(awk -F= '$1=="VP_DNS_MODE"{print $2;exit}' "$VP_CORE_ENV" 2>/dev/null || true)"
+  dns_servers="$(awk -F= '$1=="VP_DNS_SERVERS"{print $2;exit}' "$VP_CORE_ENV" 2>/dev/null || true)"
+  if dns_profile_probe "${dns_mode:-system}" "${dns_servers:-system}"; then
+    health_ok "DNS 层：${dns_mode:-系统} 上游解析正常。"
   else
-    health_error "DNS 层：系统 DNS 无法解析。"
+    if [ "$dns_mode" = public ]; then
+      health_error "DNS 上游不可达：公共 DNS（$dns_servers）解析失败；这不等同于节点协议故障。"
+    else
+      health_error "DNS 上游不可达：系统 DNS 无法解析；节点协议尚未判定为故障。"
+    fi
   fi
   if command -v curl >/dev/null 2>&1 && [ "$(curl -sS -o /dev/null -w '%{http_code}' --max-time 10 https://cp.cloudflare.com/generate_204 2>/dev/null)" = "204" ]; then
     health_ok "公网层：服务器直接出站正常。"

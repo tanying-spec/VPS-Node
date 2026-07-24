@@ -9,6 +9,7 @@
 5. 健康检查按进程、本地端口、协议、DNS、公网和 Tunnel 边缘分层报告。
 6. 内存展示必须区分匿名工作内存、文件缓存、Swap 和 cgroup 限制。
 7. 日志、分享链接和诊断输出不得暴露完整 UUID、Token、私钥或订阅凭据。
+8. DNS 上游必须先实测再选择；公共 DNS 失败时回退系统解析，并在健康检查中独立报告。
 
 ## 文件布局
 
@@ -43,4 +44,3 @@ GitHub Commit API -> 精确 SHA -> raw 文件 -> SHA-256 -> sh -n -> 原子替�
 Release 二进制通过 GitHub Release API 的资产级 digest 校验，缺少 digest 时拒绝安装。
 
 Mihomo 由 `mihomo-run` 启动包装器加载动态内存参数，Tunnel 由独立 runner 启动。OpenRC 和 systemd 使用相同的运行参数来源。
-
