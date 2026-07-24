@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.0-dev.48
+
+- Network rollback now treats congestion-control and qdisc restoration as a compensated transaction.
+- If qdisc restoration fails after congestion control changed, both values are restored to their pre-call state instead of leaving a mixed kernel configuration.
+- Failed rollback keeps the persistent configuration and snapshot intact so the user can safely retry after the underlying write failure is resolved.
+- Added a one-shot qdisc failure-injection regression test that proves compensation and the subsequent successful retry.
+
 ## 0.2.0-dev.47
 
 - Network optimization now stages rollback snapshots and persistent sysctl configuration in their target directories, applies mode checks and commits each file atomically.

@@ -2,7 +2,7 @@
 
 set -u
 
-VP_VERSION="0.2.0-dev.47"
+VP_VERSION="0.2.0-dev.48"
 VP_CONFIG_DIR="${VP_CONFIG_DIR:-/etc/vps-node}"
 VP_DATA_DIR="${VP_DATA_DIR:-/var/lib/vps-node}"
 VP_LOG_DIR="${VP_LOG_DIR:-/var/log/vps-node}"
@@ -2015,8 +2015,17 @@ network_sysctl_value() {
 network_restore_values() {
   restore_cc="$1"
   restore_qdisc="$2"
+  original_cc="$(network_sysctl_value net.ipv4.tcp_congestion_control || true)"
+  original_qdisc="$(network_sysctl_value net.core.default_qdisc || true)"
+  [ -n "$original_cc" ] && [ -n "$original_qdisc" ] || return 1
   "$VP_SYSCTL_BIN" -w "net.ipv4.tcp_congestion_control=$restore_cc" >/dev/null 2>&1 || return 1
-  "$VP_SYSCTL_BIN" -w "net.core.default_qdisc=$restore_qdisc" >/dev/null 2>&1 || return 1
+  if ! "$VP_SYSCTL_BIN" -w "net.core.default_qdisc=$restore_qdisc" >/dev/null 2>&1; then
+    compensation_ok=1
+    "$VP_SYSCTL_BIN" -w "net.ipv4.tcp_congestion_control=$original_cc" >/dev/null 2>&1 || compensation_ok=0
+    "$VP_SYSCTL_BIN" -w "net.core.default_qdisc=$original_qdisc" >/dev/null 2>&1 || compensation_ok=0
+    [ "$compensation_ok" -eq 1 ] || error "网络参数恢复失败，且补偿原状态未完整成功，请立即运行 vp network 查看当前状态。"
+    return 1
+  fi
 }
 
 network_rollback() {
