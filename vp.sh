@@ -1065,6 +1065,50 @@ restore_backup() {
   ok "备份恢复完成。"
 }
 
+trim_log_file() {
+  log_file="$1"
+  max_bytes="${2:-1048576}"
+  [ -f "$log_file" ] || return 0
+  size="$(wc -c < "$log_file" 2>/dev/null || printf 0)"
+  case "$size" in ''|*[!0-9]*) size=0 ;; esac
+  if [ "$size" -gt "$max_bytes" ]; then
+    tail -c "$max_bytes" "$log_file" > "$log_file.tmp" && mv "$log_file.tmp" "$log_file"
+    chmod 600 "$log_file" 2>/dev/null || true
+  fi
+}
+
+maintenance_mode() {
+  need_root || return 1
+  init_layout >/dev/null || return 1
+  info "安全维护开始：先创建恢复点。"
+  create_backup "$VP_BACKUP_DIR" || { error "备份失败，维护已停止。"; return 1; }
+  recover_state_transaction || return 1
+  safe_repair || return 1
+  finalize_rotation --expired || return 1
+
+  trimmed=0
+  if [ -d "$VP_LOG_DIR" ]; then
+    for log_file in "$VP_LOG_DIR"/*.log "$VP_LOG_DIR"/*.err; do
+      [ -f "$log_file" ] || continue
+      before="$(wc -c < "$log_file" 2>/dev/null || printf 0)"
+      trim_log_file "$log_file" 1048576
+      after="$(wc -c < "$log_file" 2>/dev/null || printf 0)"
+      [ "$after" -lt "$before" ] && trimmed=$((trimmed + 1))
+    done
+  fi
+
+  temp_removed=0
+  for temp_path in /tmp/vp-node-test.* /tmp/vp-backup.* /tmp/vp-restore.* /tmp/vp-repair-config.* /tmp/vp-reality-key.*; do
+    [ -e "$temp_path" ] || continue
+    if find "$temp_path" -maxdepth 0 -mmin +60 >/dev/null 2>&1 && [ -n "$(find "$temp_path" -maxdepth 0 -mmin +60 -print 2>/dev/null)" ]; then
+      rm -rf "$temp_path"
+      temp_removed=$((temp_removed + 1))
+    fi
+  done
+  ok "维护清理完成：截断 $trimmed 个过大日志，删除 $temp_removed 个过期临时项。"
+  layered_health_check
+}
+
 node_count() {
   if [ -r "$VP_NODES_DB" ]; then
     awk 'NF { n++ } END { print n + 0 }' "$VP_NODES_DB" 2>/dev/null
@@ -1371,6 +1415,7 @@ case "${1:-}" in
   rotate-finalize|rotation-finalize) shift; finalize_rotation "$@" ;;
   backup) shift; create_backup "$@" ;;
   restore) shift; restore_backup "$@" ;;
+  maintain|maintenance) maintenance_mode ;;
   status) show_status ;;
   doctor) doctor ;;
   health|check) layered_health_check ;;
@@ -1379,7 +1424,7 @@ case "${1:-}" in
   uninstall) uninstall_project ;;
   debug-tx) shift; debug_transaction "$@" ;;
   help|-h|--help)
-    printf '用法：vp [status|doctor|health|repair|init|core-install|reality-add|tunnel-install|argo-add|nodes|link|test-node|rotate|rotations|rotate-finalize|backup|restore|uninstall|version]\n'
+    printf '用法：vp [status|doctor|health|repair|maintain|init|core-install|reality-add|tunnel-install|argo-add|nodes|link|test-node|rotate|rotations|rotate-finalize|backup|restore|uninstall|version]\n'
     ;;
   '') menu ;;
   *) error "未知命令：$1"; exit 2 ;;
