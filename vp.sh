@@ -2,7 +2,7 @@
 
 set -u
 
-VP_VERSION="0.2.0-dev.31"
+VP_VERSION="0.2.0-dev.32"
 VP_CONFIG_DIR="${VP_CONFIG_DIR:-/etc/vps-node}"
 VP_DATA_DIR="${VP_DATA_DIR:-/var/lib/vps-node}"
 VP_LOG_DIR="${VP_LOG_DIR:-/var/log/vps-node}"
@@ -623,28 +623,132 @@ detect_arch() {
 }
 
 release_asset_records() {
-  printf '%s\n' "$1" | awk '
-    /"name"[[:space:]]*:/ {
-      value=$0; sub(/^.*"name"[[:space:]]*:[[:space:]]*"/, "", value); sub(/".*$/, "", value); name=value
+  printf '%s' "$1" | awk '
+    function json_string(object, wanted,    i,c,escaped,depth,start,value,key,j) {
+      depth=0
+      for (i=1; i<=length(object); i++) {
+        c=substr(object,i,1)
+        if (c=="{") { depth++; continue }
+        if (c=="}") { depth--; continue }
+        if (c!="\"" || depth!=1) continue
+        start=i+1; escaped=0
+        for (j=start; j<=length(object); j++) {
+          c=substr(object,j,1)
+          if (escaped) { escaped=0; continue }
+          if (c=="\\") { escaped=1; continue }
+          if (c=="\"") break
+        }
+        key=substr(object,start,j-start); i=j+1
+        while (substr(object,i,1) ~ /[[:space:]]/) i++
+        if (substr(object,i,1)!=":") continue
+        i++; while (substr(object,i,1) ~ /[[:space:]]/) i++
+        if (substr(object,i,1)!="\"") {
+          if (substr(object,i,1)=="{") depth++
+          continue
+        }
+        start=i+1; escaped=0
+        for (j=start; j<=length(object); j++) {
+          c=substr(object,j,1)
+          if (escaped) { escaped=0; continue }
+          if (c=="\\") { escaped=1; continue }
+          if (c=="\"") break
+        }
+        value=substr(object,start,j-start)
+        gsub(/\\\//,"/",value)
+        i=j
+        if (key==wanted) return value
+      }
+      return ""
     }
-    /"digest"[[:space:]]*:/ {
-      value=$0; sub(/^.*"digest"[[:space:]]*:[[:space:]]*"sha256:/, "", value); sub(/".*$/, "", value); digest=value
-    }
-    /"browser_download_url"[[:space:]]*:/ {
-      value=$0; sub(/^.*"browser_download_url"[[:space:]]*:[[:space:]]*"/, "", value); sub(/".*$/, "", value)
-      if (name != "") print name "|" value "|" digest
-      name=""; digest=""
+    BEGIN { data="" }
+    { data=data $0 "\n" }
+    END {
+      marker=index(data,"\"assets\"")
+      if (!marker) exit
+      array_start=index(substr(data,marker),"[")
+      if (!array_start) exit
+      array_start=marker+array_start-1
+      depth=0; in_string=0; escaped=0; object_start=0
+      for (i=array_start+1; i<=length(data); i++) {
+        c=substr(data,i,1)
+        if (in_string) {
+          if (escaped) escaped=0
+          else if (c=="\\") escaped=1
+          else if (c=="\"") in_string=0
+          continue
+        }
+        if (c=="\"") { in_string=1; continue }
+        if (c=="{") { depth++; if (depth==1) object_start=i; continue }
+        if (c=="}") {
+          if (depth==1 && object_start) {
+            object=substr(data,object_start,i-object_start+1)
+            name=json_string(object,"name")
+            url=json_string(object,"browser_download_url")
+            digest=json_string(object,"digest")
+            sub(/^sha256:/,"",digest)
+            if (name!="" && url!="") print name "|" url "|" digest
+            object_start=0
+          }
+          depth--; continue
+        }
+        if (c=="]" && depth==0) break
+      }
     }
   '
+}
+
+valid_release_asset_record() {
+  record_to_check="$1"
+  expected_prefix="$2"
+  record_name="${record_to_check%%|*}"
+  record_rest="${record_to_check#*|}"
+  record_url="${record_rest%%|*}"
+  record_digest="${record_rest#*|}"
+  [ -n "$record_name" ] && [ "$record_name" != "$record_to_check" ] || return 1
+  case "$record_name" in *'|'*|*/*|*'\\'*) return 1 ;; esac
+  case "$record_url" in "$expected_prefix"*) ;; *) return 1 ;; esac
+  url_tail="${record_url#"$expected_prefix"}"
+  record_tag="${url_tail%%/*}"
+  url_asset_name="${url_tail#*/}"
+  [ -n "$record_tag" ] && [ "$url_asset_name" = "$record_name" ] || return 1
+  case "$record_tag" in *[!A-Za-z0-9._+-]*) return 1 ;; esac
+  [ "${#record_digest}" -eq 64 ] || return 1
+  case "$record_digest" in *[!0-9a-fA-F]*) return 1 ;; esac
+}
+
+select_unique_asset_record() {
+  records_to_select="$1"
+  asset_pattern="$2"
+  selected_records="$(printf '%s\n' "$records_to_select" | grep -E "$asset_pattern" || true)"
+  [ "$(printf '%s\n' "$selected_records" | sed '/^$/d' | wc -l | tr -d ' ')" = 1 ] || return 1
+  printf '%s\n' "$selected_records"
+}
+
+test_release_asset_records() {
+  [ "${VP_ALLOW_TEST_HOOKS:-0}" = 1 ] || return 2
+  [ -r "${1:-}" ] || return 2
+  release_asset_records "$(cat "$1")"
+}
+
+test_validate_release_asset_record() {
+  [ "${VP_ALLOW_TEST_HOOKS:-0}" = 1 ] || return 2
+  valid_release_asset_record "${1:-}" "${2:-}"
+}
+
+test_select_release_asset_record() {
+  [ "${VP_ALLOW_TEST_HOOKS:-0}" = 1 ] || return 2
+  [ -r "${1:-}" ] || return 2
+  select_unique_asset_record "$(cat "$1")" "${2:-}"
 }
 
 mihomo_asset_record() {
   arch="$(detect_arch)" || return 1
   release_json="$(curl -fsSL --max-time 30 "$VP_MIHOMO_API")" || { error "无法访问 Mihomo Release API。"; return 1; }
   records="$(release_asset_records "$release_json")"
-  record="$(printf '%s\n' "$records" | grep -Ei "^mihomo-linux-${arch}.*compatible.*\.gz\|" | head -n 1 || true)"
-  [ -n "$record" ] || record="$(printf '%s\n' "$records" | grep -Ei "^mihomo-linux-${arch}.*\.gz\|" | head -n 1 || true)"
+  record="$(select_unique_asset_record "$records" "^mihomo-linux-${arch}-compatible-v[0-9]+[.][0-9]+[.][0-9]+[.]gz[|]" || true)"
+  [ -n "$record" ] || record="$(select_unique_asset_record "$records" "^mihomo-linux-${arch}-v[0-9]+[.][0-9]+[.][0-9]+[.]gz[|]" || true)"
   [ -n "$record" ] || { error "Release 中没有 linux-$arch 内核。"; return 1; }
+  valid_release_asset_record "$record" "https://github.com/MetaCubeX/mihomo/releases/download/" || { error "Mihomo Release 资产来源或校验值无效。"; return 1; }
   printf '%s' "$record"
 }
 
@@ -660,7 +764,8 @@ install_core_binary() {
     command -v gzip >/dev/null 2>&1 || { error "缺少 gzip。"; rm -f "$binary_tmp" "$archive_tmp"; return 1; }
     asset="$(mihomo_asset_record)" || { rm -f "$binary_tmp" "$archive_tmp"; return 1; }
     asset_name="${asset%%|*}"; asset_rest="${asset#*|}"; download_url="${asset_rest%%|*}"; expected_digest="${asset_rest#*|}"
-    case "$expected_digest" in ''|*[!0-9a-fA-F]*) error "GitHub 未提供有效的 Mihomo SHA-256。"; rm -f "$binary_tmp" "$archive_tmp"; return 1 ;; esac
+    [ "${#expected_digest}" -eq 64 ] || { error "GitHub 未提供有效的 Mihomo SHA-256。"; rm -f "$binary_tmp" "$archive_tmp"; return 1; }
+    case "$expected_digest" in *[!0-9a-fA-F]*) error "GitHub 未提供有效的 Mihomo SHA-256。"; rm -f "$binary_tmp" "$archive_tmp"; return 1 ;; esac
     info "正在下载 Mihomo 内核。"
     curl -fL --max-time 180 "$download_url" -o "$archive_tmp" || { error "Mihomo 下载失败。"; rm -f "$binary_tmp" "$archive_tmp"; return 1; }
     actual_digest="$(sha256_file "$archive_tmp" 2>/dev/null | tr 'A-F' 'a-f')"
@@ -801,8 +906,9 @@ cloudflared_asset_record() {
     *) error "cloudflared 不支持当前架构。"; return 1 ;;
   esac
   release_json="$(curl -fsSL --max-time 30 "$VP_CLOUDFLARED_API")" || { error "无法访问 cloudflared Release API。"; return 1; }
-  record="$(release_asset_records "$release_json" | grep -E "^cloudflared-linux-${cf_arch}\|" | head -n 1 || true)"
+  record="$(select_unique_asset_record "$(release_asset_records "$release_json")" "^cloudflared-linux-${cf_arch}[|]" || true)"
   [ -n "$record" ] || { error "Release 中没有适配的 cloudflared。"; return 1; }
+  valid_release_asset_record "$record" "https://github.com/cloudflare/cloudflared/releases/download/" || { error "cloudflared Release 资产来源或校验值无效。"; return 1; }
   printf '%s' "$record"
 }
 
@@ -814,7 +920,8 @@ install_tunnel_binary() {
   else
     asset="$(cloudflared_asset_record)" || { rm -f "$tunnel_tmp"; return 1; }
     asset_name="${asset%%|*}"; asset_rest="${asset#*|}"; url="${asset_rest%%|*}"; expected_digest="${asset_rest#*|}"
-    case "$expected_digest" in ''|*[!0-9a-fA-F]*) error "GitHub 未提供有效的 cloudflared SHA-256。"; rm -f "$tunnel_tmp"; return 1 ;; esac
+    [ "${#expected_digest}" -eq 64 ] || { error "GitHub 未提供有效的 cloudflared SHA-256。"; rm -f "$tunnel_tmp"; return 1; }
+    case "$expected_digest" in *[!0-9a-fA-F]*) error "GitHub 未提供有效的 cloudflared SHA-256。"; rm -f "$tunnel_tmp"; return 1 ;; esac
     info "正在下载 cloudflared。"
     curl -fL --max-time 180 "$url" -o "$tunnel_tmp" || { rm -f "$tunnel_tmp"; error "cloudflared 下载失败。"; return 1; }
     actual_digest="$(sha256_file "$tunnel_tmp" 2>/dev/null | tr 'A-F' 'a-f')"
@@ -3483,6 +3590,9 @@ case "${1:-}" in
   version|--version|-V) printf '%s\n' "$VP_VERSION" ;;
   uninstall) shift; uninstall_project "$@" ;;
   debug-tx) shift; debug_transaction "$@" ;;
+  _test-release-records) shift; test_release_asset_records "$@" ;;
+  _test-validate-release-record) shift; test_validate_release_asset_record "$@" ;;
+  _test-select-release-record) shift; test_select_release_asset_record "$@" ;;
   help|-h|--help)
     printf '用法：vp [status|doctor|health|repair|report|self-heal|monitor-install|stability|network|network-optimize|network-rollback|test-all|optimize|maintain|update|rollback|init|core-install|reality-add|tunnel-install|argo-add|nodes|subscription|edit|delete|link|test-node|rotate|rotations|rotate-finalize|backup|restore|migrate-mh|uninstall|version]\n'
     ;;

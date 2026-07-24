@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.0-dev.32
+
+- Release asset parsing is independent of JSON line breaks and field order, including compact GitHub API responses and nested uploader objects.
+- Mihomo now selects exactly one compatible or baseline architecture asset; cloudflared selects exactly one extensionless architecture asset and rejects ambiguous duplicates.
+- Binary installation requires a 64-character hexadecimal SHA-256 digest and an official repository release-download URL whose final filename exactly matches the selected asset before any download starts.
+- Supply-chain regression tests cover reordered compact JSON, escaped URLs, untrusted download hosts, short digests and duplicate matching assets.
+
 ## 0.2.0-dev.31
 
 - Authorized-host acceptance can optionally validate an independent Cloudflare Tunnel using a separate binary/token/hostname/path/fixed origin port bundle.

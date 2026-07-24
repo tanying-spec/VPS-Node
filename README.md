@@ -1,5 +1,6 @@
 # VPS-Node
 
+> `0.2.0-dev.32` 加固 Mihomo/cloudflared 供应链下载：Release JSON 不再依赖换行或字段顺序，资产必须精确匹配架构且唯一，下载地址必须来自对应官方 GitHub Release，SHA-256 必须是完整 64 位；任何歧义或异常都会在下载前拒绝。
 > `0.2.0-dev.31` 隔离验收可选加入完全独立的 Cloudflare Tunnel：要求独立 Token、域名、路径和固定源站端口，拒绝正式 Token 或旧数据库已有域名；验证边缘连接、两路公网传输、cloudflared 崩溃拉起及恢复后再次传输。
 
 > `0.2.0-dev.30` 唯一测试机隔离验收进一步要求正式 Mihomo/cloudflared PID 全程不变，并覆盖备份预览/恢复、配置漂移自愈和有条件的 IPv6 Reality 回环；成功后在 `/root` 保留脱敏证据文件及 SHA-256，不随临时目录删除。

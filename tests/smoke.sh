@@ -7,6 +7,45 @@ TMP="$(mktemp -d /tmp/vps-node-test.XXXXXX)"
 trap 'rm -rf "$TMP"' EXIT HUP INT TERM
 CURRENT_VERSION="$(sh "$ROOT/vp.sh" version)"
 
+digest64="$(printf '%064d' 1)"
+compact_release="$TMP/release-compact.json"
+cat > "$compact_release" <<EOF
+{"tag_name":"v1.2.3","assets":[{"browser_download_url":"https:\/\/github.com\/MetaCubeX\/mihomo\/releases\/download\/v1.2.3\/mihomo-linux-amd64-compatible-v1.2.3.gz","uploader":{"name":"not-an-asset"},"digest":"sha256:$digest64","name":"mihomo-linux-amd64-compatible-v1.2.3.gz"}]}
+EOF
+parsed_record="$(VP_ALLOW_TEST_HOOKS=1 sh "$ROOT/vp.sh" _test-release-records "$compact_release")"
+[ "$parsed_record" = "mihomo-linux-amd64-compatible-v1.2.3.gz|https://github.com/MetaCubeX/mihomo/releases/download/v1.2.3/mihomo-linux-amd64-compatible-v1.2.3.gz|$digest64" ]
+VP_ALLOW_TEST_HOOKS=1 sh "$ROOT/vp.sh" _test-validate-release-record "$parsed_record" \
+  'https://github.com/MetaCubeX/mihomo/releases/download/'
+single_record="$TMP/release-single.txt"
+printf '%s\n' "$parsed_record" > "$single_record"
+[ "$(VP_ALLOW_TEST_HOOKS=1 sh "$ROOT/vp.sh" _test-select-release-record "$single_record" \
+  '^mihomo-linux-amd64-compatible-v[0-9]+[.][0-9]+[.][0-9]+[.]gz[|]')" = "$parsed_record" ]
+if VP_ALLOW_TEST_HOOKS=1 sh "$ROOT/vp.sh" _test-validate-release-record \
+  "mihomo-linux-amd64-compatible-v1.2.3.gz|https://example.com/mihomo.gz|$digest64" \
+  'https://github.com/MetaCubeX/mihomo/releases/download/'; then
+  echo 'untrusted release URL was accepted' >&2
+  exit 1
+fi
+if VP_ALLOW_TEST_HOOKS=1 sh "$ROOT/vp.sh" _test-validate-release-record \
+  "mihomo-linux-amd64-compatible-v1.2.3.gz|https://github.com/MetaCubeX/mihomo/releases/download/v1.2.3/other.gz|$digest64" \
+  'https://github.com/MetaCubeX/mihomo/releases/download/'; then
+  echo 'release URL with a mismatched asset name was accepted' >&2
+  exit 1
+fi
+if VP_ALLOW_TEST_HOOKS=1 sh "$ROOT/vp.sh" _test-validate-release-record \
+  "mihomo-linux-amd64-compatible-v1.2.3.gz|https://github.com/MetaCubeX/mihomo/releases/download/v1.2.3/mihomo.gz|${digest64%?}" \
+  'https://github.com/MetaCubeX/mihomo/releases/download/'; then
+  echo 'short release digest was accepted' >&2
+  exit 1
+fi
+duplicate_records="$TMP/release-duplicates.txt"
+printf '%s\n%s\n' "$parsed_record" "$parsed_record" > "$duplicate_records"
+if VP_ALLOW_TEST_HOOKS=1 sh "$ROOT/vp.sh" _test-select-release-record "$duplicate_records" \
+  '^mihomo-linux-amd64-compatible-v[0-9]+[.][0-9]+[.][0-9]+[.]gz[|]'; then
+  echo 'ambiguous duplicate release assets were accepted' >&2
+  exit 1
+fi
+
 VP_CONFIG_DIR="$TMP/etc" \
 VP_DATA_DIR="$TMP/lib" \
 VP_LOG_DIR="$TMP/log" \
