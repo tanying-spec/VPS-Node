@@ -1,5 +1,7 @@
 # VPS-Node
 
+> `0.2.0-dev.82` 新增 `vp network-repair`：只在回滚记录和持久化目标均严格有效、且实时参数发生漂移时，预览当前值与目标值并要求输入 `REPAIR`。修复绑定确认前的两份文件和实时 sysctl 状态，双参数应用失败会补偿回修复前状态，成功后再次读取内核参数并证明持久化文件未变；损坏或孤立状态拒绝自动猜测。
+
 > `0.2.0-dev.81` 将网络优化状态改为实时一致性检查：同时校验回滚记录、持久化 sysctl 目标和当前内核参数，明确区分未应用、运行时漂移、持久化损坏、孤立回滚记录和孤立配置。首页与 `vp network` 复用同一结论，不再因两个文件恰好存在就误报“已应用”。
 
 > `0.2.0-dev.80` 将网络回滚的实时参数和持久化文件合并为可补偿事务：执行前暂存回滚记录与 sysctl 配置，随后恢复内核参数并删除持久化文件；任一删除失败或进程被中断，都会恢复回滚前的 BBR/qdisc、两个原文件及权限，不留下临时快照。
@@ -182,6 +184,7 @@ vp test-all 4
 vp network
 vp network-optimize --dry-run
 vp network-optimize home 4
+vp network-repair
 vp network-rollback
 vp report
 vp self-heal

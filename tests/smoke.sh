@@ -645,9 +645,50 @@ drift_network_status="$(run_network_status)"
 printf '%s\n' "$drift_network_status" | grep -q 'VPS-Node 已验证优化：运行时漂移'
 printf '%s\n' "$drift_network_status" | grep -q '持久化目标：bbr / fq'
 printf '%s\n' "$drift_network_status" | grep -q '实时参数：cubic / fq'
+repair_config_hash="$(sha256sum "$network_config" | awk '{print $1}')"
+repair_snapshot_hash="$(sha256sum "$network_snapshot" | awk '{print $1}')"
+cancelled_network_repair="$(VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log" \
+  VP_LIB_DIR="$TMP/dns-usr" VP_SYSCTL_BIN="$fake_sysctl" VP_FAKE_SYSCTL_STATE="$sysctl_state" \
+  VP_SYSCTL_CONFIG="$network_config" VP_NETWORK_SNAPSHOT="$network_snapshot" \
+  VP_NETWORK_REPAIR_CONFIRM=CANCEL sh "$ROOT/vp.sh" network-repair 2>&1 || true)"
+printf '%s\n' "$cancelled_network_repair" | grep -q '已取消网络漂移修复'
+grep -q '^CC=cubic$' "$sysctl_state"
+grep -q '^QDISC=fq$' "$sysctl_state"
+[ "$(sha256sum "$network_config" | awk '{print $1}')" = "$repair_config_hash" ]
+[ "$(sha256sum "$network_snapshot" | awk '{print $1}')" = "$repair_snapshot_hash" ]
+
+network_repair_fail_once="$TMP/network-repair-failed-once"
+if VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log" \
+  VP_LIB_DIR="$TMP/dns-usr" VP_SYSCTL_BIN="$fake_sysctl" VP_FAKE_SYSCTL_STATE="$sysctl_state" \
+  VP_FAKE_SYSCTL_FAIL_ONCE_KEY=net.core.default_qdisc VP_FAKE_SYSCTL_FAIL_ONCE_FILE="$network_repair_fail_once" \
+  VP_SYSCTL_CONFIG="$network_config" VP_NETWORK_SNAPSHOT="$network_snapshot" \
+  VP_NETWORK_REPAIR_CONFIRM=REPAIR sh "$ROOT/vp.sh" network-repair >/dev/null 2>&1; then
+  printf 'partially failed network drift repair unexpectedly succeeded\n' >&2
+  exit 1
+fi
+grep -q '^CC=cubic$' "$sysctl_state"
+grep -q '^QDISC=fq$' "$sysctl_state"
+[ "$(sha256sum "$network_config" | awk '{print $1}')" = "$repair_config_hash" ]
+[ "$(sha256sum "$network_snapshot" | awk '{print $1}')" = "$repair_snapshot_hash" ]
+network_repair_output="$(VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log" \
+  VP_LIB_DIR="$TMP/dns-usr" VP_SYSCTL_BIN="$fake_sysctl" VP_FAKE_SYSCTL_STATE="$sysctl_state" \
+  VP_SYSCTL_CONFIG="$network_config" VP_NETWORK_SNAPSHOT="$network_snapshot" \
+  VP_NETWORK_REPAIR_CONFIRM=REPAIR sh "$ROOT/vp.sh" network-repair)"
+printf '%s\n' "$network_repair_output" | grep -q '已恢复并复核网络参数：bbr / fq'
+grep -q '^CC=bbr$' "$sysctl_state"
+grep -q '^QDISC=fq$' "$sysctl_state"
+[ "$(sha256sum "$network_config" | awk '{print $1}')" = "$repair_config_hash" ]
+[ "$(sha256sum "$network_snapshot" | awk '{print $1}')" = "$repair_snapshot_hash" ]
 
 printf '# Managed by VPS-Node after verified before/after benchmark\nnet.ipv4.tcp_congestion_control=bbr\n' > "$network_config"
 printf '%s\n' "$(run_network_status)" | grep -q 'VPS-Node 已验证优化：持久化记录异常'
+if VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log" \
+  VP_LIB_DIR="$TMP/dns-usr" VP_SYSCTL_BIN="$fake_sysctl" VP_FAKE_SYSCTL_STATE="$sysctl_state" \
+  VP_SYSCTL_CONFIG="$network_config" VP_NETWORK_SNAPSHOT="$network_snapshot" \
+  VP_NETWORK_REPAIR_CONFIRM=REPAIR sh "$ROOT/vp.sh" network-repair >/dev/null 2>&1; then
+  printf 'invalid persistence was unexpectedly auto-repaired\n' >&2
+  exit 1
+fi
 printf '# Managed by VPS-Node after verified before/after benchmark\nnet.ipv4.tcp_congestion_control=bbr\nnet.core.default_qdisc=fq\n' > "$network_config"
 rm -f "$network_config"
 printf '%s\n' "$(run_network_status)" | grep -q 'VPS-Node 已验证优化：仅有回滚记录'

@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.0-dev.82
+
+- Added `vp network-repair` for the only automatically provable anomaly: valid persistence whose live congestion control or qdisc has drifted.
+- Repair previews live and verified target values, explains its host-global impact and requires explicit `REPAIR` confirmation.
+- Approval is bound to both persistence files and both live sysctl values; changes during confirmation abort before any write.
+- Applying the two live parameters is compensated on partial failure, followed by live-value verification and proof that persistence files stayed byte-identical.
+- Invalid persistence and orphan snapshot/configuration states are explicitly refused instead of being guessed or overwritten; regression tests cover cancellation, partial failure, success and refusal.
+
 ## 0.2.0-dev.81
 
 - Network optimization status now validates the rollback snapshot and persistent sysctl configuration as strict regular files with exactly one valid value for each managed field.

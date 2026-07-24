@@ -2,7 +2,7 @@
 
 set -u
 
-VP_VERSION="0.2.0-dev.81"
+VP_VERSION="0.2.0-dev.82"
 VP_CONFIG_DIR="${VP_CONFIG_DIR:-/etc/vps-node}"
 VP_DATA_DIR="${VP_DATA_DIR:-/var/lib/vps-node}"
 VP_LOG_DIR="${VP_LOG_DIR:-/var/log/vps-node}"
@@ -2443,7 +2443,7 @@ show_network_status() {
       printf 'VPS-Node 已验证优化：运行时漂移\n'
       printf '  持久化目标：%s / %s\n' "$NETWORK_OPT_EXPECTED_CC" "$NETWORK_OPT_EXPECTED_QDISC"
       printf '  实时参数：%s / %s\n' "$NETWORK_OPT_LIVE_CC" "$NETWORK_OPT_LIVE_QDISC"
-      printf '建议：确认其他任务是否改过参数；需要恢复时执行 vp network-rollback，重新应用前必须再次测速验证。\n'
+      printf '建议：确认其他任务是否改过参数；可执行 vp network-repair 恢复已验证目标，或执行 vp network-rollback 撤销优化。\n'
       ;;
     persistence-invalid)
       printf 'VPS-Node 已验证优化：持久化记录异常，不能确认已应用\n'
@@ -2496,6 +2496,89 @@ network_restore_values() {
     [ "$compensation_ok" -eq 1 ] || error "网络参数恢复失败，且补偿原状态未完整成功，请立即运行 vp network 查看当前状态。"
     return 1
   fi
+}
+
+network_repair_drift() {
+  need_root || return 1
+  inspect_network_optimization
+  case "$NETWORK_OPT_STATE" in
+    active)
+      ok "网络优化持久化目标与实时参数一致，无需修复。"
+      return 0
+      ;;
+    none)
+      warn "当前没有 VPS-Node 已验证网络优化，不需要修复。"
+      return 0
+      ;;
+    runtime-drift) ;;
+    persistence-invalid)
+      error "持久化记录异常，无法证明安全目标，拒绝自动修改主机网络参数。"
+      return 1
+      ;;
+    orphan-snapshot)
+      error "仅有回滚记录但缺少持久化目标，拒绝猜测应恢复的网络参数。"
+      return 1
+      ;;
+    orphan-config)
+      error "持久化配置缺少安全回滚点，拒绝自动应用或删除。"
+      return 1
+      ;;
+    *)
+      error "无法判断网络优化状态，拒绝自动修复。"
+      return 1
+      ;;
+  esac
+
+  repair_snapshot_state="$(managed_file_state "$VP_NETWORK_SNAPSHOT")"
+  repair_config_state="$(managed_file_state "$VP_SYSCTL_CONFIG")"
+  repair_live_cc="$NETWORK_OPT_LIVE_CC"
+  repair_live_qdisc="$NETWORK_OPT_LIVE_QDISC"
+  repair_target_cc="$NETWORK_OPT_EXPECTED_CC"
+  repair_target_qdisc="$NETWORK_OPT_EXPECTED_QDISC"
+  printf '网络运行时漂移修复预览：\n'
+  printf '  拥塞控制：%s -> %s\n' "$repair_live_cc" "$repair_target_cc"
+  printf '  队列规则：%s -> %s\n' "$repair_live_qdisc" "$repair_target_qdisc"
+  printf '  文件操作：不修改回滚记录，不修改持久化配置\n'
+  printf '  影响范围：重新应用曾通过前后测速门槛的主机全局 TCP 参数\n'
+  printf '  说明：这不会重新测速；如网络环境已改变，可修复后再执行一键并发测试。\n'
+  if [ -n "${VP_NETWORK_REPAIR_CONFIRM:-}" ]; then
+    network_repair_confirm="$VP_NETWORK_REPAIR_CONFIRM"
+  else
+    printf '输入 REPAIR 确认恢复已验证目标：'
+    read -r network_repair_confirm || true
+  fi
+  [ "$network_repair_confirm" = REPAIR ] || {
+    warn "已取消网络漂移修复，实时参数和持久化文件未修改。"
+    return 2
+  }
+
+  [ "$(managed_file_state "$VP_NETWORK_SNAPSHOT")" = "$repair_snapshot_state" ] || { error "网络回滚记录在确认期间发生变化，已中止。"; return 1; }
+  [ "$(managed_file_state "$VP_SYSCTL_CONFIG")" = "$repair_config_state" ] || { error "持久化网络配置在确认期间发生变化，已中止。"; return 1; }
+  [ "$(network_sysctl_value net.ipv4.tcp_congestion_control || true)" = "$repair_live_cc" ] || { error "拥塞控制参数在确认期间发生变化，已中止。"; return 1; }
+  [ "$(network_sysctl_value net.core.default_qdisc || true)" = "$repair_live_qdisc" ] || { error "队列规则在确认期间发生变化，已中止。"; return 1; }
+
+  if ! network_restore_values "$repair_target_cc" "$repair_target_qdisc"; then
+    error "无法完整恢复已验证网络目标，已尝试补偿为修复前参数。"
+    return 1
+  fi
+  if [ "$(network_sysctl_value net.ipv4.tcp_congestion_control || true)" != "$repair_target_cc" ] || \
+     [ "$(network_sysctl_value net.core.default_qdisc || true)" != "$repair_target_qdisc" ]; then
+    network_restore_values "$repair_live_cc" "$repair_live_qdisc" >/dev/null 2>&1 || true
+    error "修复后实时参数复核失败，已尝试恢复修复前状态。"
+    return 1
+  fi
+  [ "$(managed_file_state "$VP_NETWORK_SNAPSHOT")" = "$repair_snapshot_state" ] || {
+    network_restore_values "$repair_live_cc" "$repair_live_qdisc" >/dev/null 2>&1 || true
+    error "修复期间网络回滚记录发生变化，已恢复修复前实时参数。"
+    return 1
+  }
+  [ "$(managed_file_state "$VP_SYSCTL_CONFIG")" = "$repair_config_state" ] || {
+    network_restore_values "$repair_live_cc" "$repair_live_qdisc" >/dev/null 2>&1 || true
+    error "修复期间持久化网络配置发生变化，已恢复修复前实时参数。"
+    return 1
+  }
+  stability_event recovered network "verified runtime drift repaired"
+  ok "已恢复并复核网络参数：$repair_target_cc / $repair_target_qdisc；持久化文件未修改。"
 }
 
 network_rollback() {
@@ -4917,7 +5000,7 @@ advanced_menu() {
 }
 
 interactive_network() {
-  printf '1. 一键测试全部节点（并发）\n2. 查看当前网络状态\n3. 预览候选网络优化\n4. 基线测试后应用并复测\n5. 回滚已应用网络优化\n6. 应用资源与 DNS 自适应并验证\n0. 返回\n请选择：'
+  printf '1. 一键测试全部节点（并发）\n2. 查看当前网络状态\n3. 预览候选网络优化\n4. 基线测试后应用并复测\n5. 修复已验证参数的运行时漂移\n6. 回滚已应用网络优化\n7. 应用资源与 DNS 自适应并验证\n0. 返回\n请选择：'
   read -r action || true
   case "$action" in
     1)
@@ -4932,8 +5015,9 @@ interactive_network() {
       printf '并发连接数（默认 4）：'; read -r concurrency || true
       network_optimize_verified "$target" "${concurrency:-4}"
       ;;
-    5) network_rollback ;;
-    6) optimize_and_verify ;;
+    5) network_repair_drift ;;
+    6) network_rollback ;;
+    7) optimize_and_verify ;;
     0) return 0 ;;
     *) warn "无效选择。" ;;
   esac
@@ -4994,6 +5078,7 @@ case "${1:-}" in
   test-all|benchmark) shift; test_all_nodes "$@" ;;
   network|network-status) show_network_status ;;
   network-optimize) shift; network_optimize_verified "$@" ;;
+  network-repair) shift; network_repair_drift "$@" ;;
   network-rollback) shift; network_rollback "$@" ;;
   rotate|rotate-credential) shift; rotate_credential "$@" ;;
   rotations|rotation-status) show_rotations ;;
@@ -5026,7 +5111,7 @@ case "${1:-}" in
   _test-select-release-record) shift; test_select_release_asset_record "$@" ;;
   _test-json-top-level) shift; test_json_top_level_string "$@" ;;
   help|-h|--help)
-    printf '用法：vp [status|version-status|doctor|health|repair|report|self-heal|monitor-install|stability|network|network-optimize|network-rollback|test-all|optimize|maintain|update|rollback|init|core-install|reality-add|tunnel-install|argo-add|nodes|subscription|edit|delete|link|test-node|rotate|rotations|rotate-finalize|backup|backups|backup-prune|restore|migrate-mh|uninstall|version]\n'
+    printf '用法：vp [status|version-status|doctor|health|repair|report|self-heal|monitor-install|stability|network|network-optimize|network-repair|network-rollback|test-all|optimize|maintain|update|rollback|init|core-install|reality-add|tunnel-install|argo-add|nodes|subscription|edit|delete|link|test-node|rotate|rotations|rotate-finalize|backup|backups|backup-prune|restore|migrate-mh|uninstall|version]\n'
     ;;
   '') menu ;;
   *) error "未知命令：$1"; exit 2 ;;
