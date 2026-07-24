@@ -23,6 +23,15 @@ jobs:
           expected="$(awk 'NR==1{print tolower($1)}' vp.sh.sha256)"
           actual="$(sha256sum vp.sh | awk '{print tolower($1)}')"
           test "$expected" = "$actual"
+      - name: Enforce real-host isolation policy
+        shell: bash
+        run: |
+          set -eu
+          test ! -e tests/system_argo_test.sh
+          test ! -e tests/system_pressure_test.sh
+          grep -Fq 'ACCEPT_HOST="134.209.180.134"' tests/isolated_acceptance.sh
+          grep -Fq 'ACCEPT_HOST="134.209.180.134"' tests/memory_profiles.sh
+          ! grep -R 'VP_ACCEPT_HOST' tests
       - name: Run portable smoke test
         shell: bash
         run: |

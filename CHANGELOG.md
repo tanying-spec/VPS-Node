@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.0-dev.29
+
+- Reclassified test evidence so historical host results are not presented as proof for the current version; added a requirement-by-requirement completion audit and explicit remaining release gates.
+- Removed two legacy system tests that performed formal `/usr/local/bin/vp` installation and stopped existing services, violating the mandatory isolation boundary.
+- Real-core memory and acceptance tests now enforce the fixed authorized public IP `134.209.180.134` without an environment-variable bypass.
+
 ## 0.2.0-dev.28
 
 - Self-heal now rebuilds missing, invalid or drifted Mihomo configuration from validated authoritative node/rotation state and uses the existing verified restart/rollback path.

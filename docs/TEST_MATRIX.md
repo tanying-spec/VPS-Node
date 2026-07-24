@@ -1,20 +1,29 @@
-# 测试矩阵
+# 测试矩阵与证据等级
 
-所有实机测试只在 `134.209.180.134` 进行；测试期间使用隔离目录和独立服务名，完成后恢复原服务。
+所有需要真实 Mihomo、OpenRC、网络出口或资源压力的实机测试只能在 `134.209.180.134` 运行。当前版本的实机验收尚未执行；SSH 公钥授权仍缺失。
 
-| 类别 | 证据 |
-| --- | --- |
-| Shell 语法、安装与初始化 | `tests/smoke.sh`，指定测试机通过 |
-| 事务提交、失败回滚、SIGKILL 恢复 | `tests/smoke.sh`，通过 |
-| Reality / VLESS-WS 端到端 | 独立 Mihomo 客户端 HTTPS 204，通过 |
-| Cloudflare Tunnel 公网入口 | `tests/system_argo_test.sh`，公网测速约 16 MiB/s，通过 |
-| Tunnel 进程恢复 | `tests/system_argo_test.sh`，边缘连接恢复为 2，通过 |
-| 并发压力 | `tests/system_pressure_test.sh`，4×10 MiB，峰值约 103 MiB，通过 |
-| 内存适配 | `tests/memory_profiles.sh`，64–2048 MiB，通过 |
-| DNS 自适应 | 公共 DNS 实测可用时选择 `1.1.1.1/8.8.8.8`；模拟不可达时回退系统 DNS，通过 |
-| 凭据轮换 | 新旧同时有效，正式切换后旧凭据 HTTP 000，通过 |
-| 备份迁移 | SHA-256、恢复和配置验证，通过 |
-| 更新与回滚 | 精确提交、坏 SHA 拒绝、版本回滚，通过 |
-| 完整卸载 | 文件、服务、进程和 runlevel 残留为 0，通过 |
+## 当前版本已有证据
 
-ShellCheck 在 128 MiB cgroup 中作为额外工具运行时曾被自身 OOM 杀死；这不是项目服务测试，且工具已移除。核心脚本通过 `sh -n` 和上述运行矩阵验证。
+| 类别 | 当前证据 | 结论 |
+| --- | --- | --- |
+| Shell 语法、安装与初始化 | GitHub Actions：`tests/smoke.sh`、`tests/install_smoke.sh` | 已通过 |
+| 配置事务、失败回滚、SIGKILL 恢复 | `tests/smoke.sh` 故障注入 | 已通过 |
+| 数据库约束、配置漂移、自愈互斥 | `tests/smoke.sh` | 已通过 |
+| DNS、内存/CPU 档位、端口冲突 | 模拟 cgroup、DNS 和监听端口 | 已通过模拟验证 |
+| 备份、恢复、恶意归档拒绝 | 真实 tar 往返与攻击样本 | 已通过 |
+| 更新、回滚、SHA-256 篡改拒绝 | 本地候选源与故障注入 | 已通过 |
+| 可恢复卸载及文件残留 | 隔离目录自动测试 | 已通过 |
+| Reality 真实认证与并发 | `tests/isolated_acceptance.sh` | 待唯一测试机执行 |
+| Alpine/OpenRC 服务生命周期 | `tests/isolated_acceptance.sh` | 待唯一测试机执行 |
+| 正式 Mihomo/cloudflared 前后不变 | 状态及配置/init 哈希对比 | 待唯一测试机执行 |
+| 64–2048 MiB 真实 Mihomo 档位 | `tests/memory_profiles.sh`（不可绕过主机锁） | 待唯一测试机执行 |
+| Cloudflare Tunnel 独立公网入口 | 需要独立测试 Tunnel 凭据和域名 | 尚缺当前版本证据 |
+| IPv6 Reality 外部可达性 | 需要测试机公网 IPv6 与外部复核 | 尚缺当前版本证据 |
+
+## 历史结果的处理
+
+早期开发阶段曾记录 Reality/VLESS-WS、Cloudflare Tunnel、4×10 MiB 压力和约 16 MiB/s Tunnel 吞吐结果。这些结果可以作为设计参考，但不是 `0.2.0-dev.29` 当前代码的验收证据，因此不用于宣称当前版本已通过。
+
+旧的 `system_argo_test.sh` 和 `system_pressure_test.sh` 会正式安装管理脚本并停止已有服务，不符合“隔离且正式服务前后不变”的硬约束，已删除。后续实机证据只能由锁定主机的隔离验收入口产生。
+
+ShellCheck 在极低内存 cgroup 中作为额外工具运行时曾被工具自身 OOM 杀死；当前 CI 使用 `sh -n`、校验和及可移植烟雾测试，不把该历史事件计为项目服务故障。

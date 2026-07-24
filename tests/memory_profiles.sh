@@ -4,8 +4,12 @@ set -eu
 
 ROOT="$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)"
 MIHOMO_BIN="${VP_TEST_MIHOMO_BIN:?请通过 VP_TEST_MIHOMO_BIN 指定测试内核}"
+ACCEPT_HOST="134.209.180.134"
 TMP="$(mktemp -d /tmp/vps-node-memory.XXXXXX)"
 trap 'rm -rf "$TMP"' EXIT HUP INT TERM
+
+observed_host="$(curl -4 -fsS --max-time 8 https://api.ipify.org 2>/dev/null || true)"
+[ "$observed_host" = "$ACCEPT_HOST" ] || { printf 'refusing real-core memory test on an unauthorized host\n' >&2; exit 1; }
 
 previous_budget=0
 for limit_mib in 64 96 128 192 256 512 1024 2048; do
@@ -27,4 +31,3 @@ for limit_mib in 64 96 128 192 256 512 1024 2048; do
 done
 
 printf 'memory profiles: ok\n'
-

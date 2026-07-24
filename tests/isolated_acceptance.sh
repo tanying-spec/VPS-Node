@@ -4,7 +4,7 @@ set -eu
 
 ROOT="$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)"
 MIHOMO_BIN="${VP_TEST_MIHOMO_BIN:?请通过 VP_TEST_MIHOMO_BIN 指定真实 Mihomo 内核}"
-ACCEPT_HOST="${VP_ACCEPT_HOST:-134.209.180.134}"
+ACCEPT_HOST="134.209.180.134"
 RUN_ID="$$"
 BASE="/tmp/vps-node-acceptance-$RUN_ID"
 CORE_SERVICE="vps-node-acceptance-core-$RUN_ID"
