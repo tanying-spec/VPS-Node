@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.0-dev.66
+
+- Starting a credential rotation now binds the old UUID and in-progress-rotation check to exact node and rotation database states.
+- Finalizing a named or expired rotation similarly binds its preview and confirmation to both databases before transaction creation.
+- Concurrent node, credential or grace-record changes are preserved; stale UUID replacement and stale `FINALIZE` approval are rejected.
+- Regression tests cover both rotation stages and prove original credentials, grace records, state and concurrent nodes remain intact without transaction residue.
+
 ## 0.2.0-dev.65
 
 - Node editing now binds the source record calculation to the exact node and credential-rotation database states read at command start.

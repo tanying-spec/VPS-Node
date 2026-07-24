@@ -2,7 +2,7 @@
 
 set -u
 
-VP_VERSION="0.2.0-dev.65"
+VP_VERSION="0.2.0-dev.66"
 VP_CONFIG_DIR="${VP_CONFIG_DIR:-/etc/vps-node}"
 VP_DATA_DIR="${VP_DATA_DIR:-/var/lib/vps-node}"
 VP_LOG_DIR="${VP_LOG_DIR:-/var/log/vps-node}"
@@ -1662,6 +1662,8 @@ rotate_credential() {
   [ "$grace_hours" -ge 1 ] && [ "$grace_hours" -le 168 ] || { error "宽限期范围为 1-168 小时。"; return 1; }
   record="$(awk -F'|' -v n="$target" '$2==n{print;exit}' "$VP_NODES_DB" 2>/dev/null)"
   [ -n "$record" ] || { error "未找到节点。"; return 1; }
+  approved_rotate_nodes_state="$(managed_file_state "$VP_NODES_DB")"
+  approved_rotate_rotations_state="$(managed_file_state "$VP_ROTATIONS_DB")"
   IFS='|' read -r proto name port old_uuid rest <<EOF
 $record
 EOF
@@ -1673,6 +1675,11 @@ EOF
   fi
   new_uuid="$(new_uuid)"
   expires=$((now + grace_hours * 3600))
+  if [ "${VP_ALLOW_TEST_HOOKS:-0}" = 1 ] && [ "${VP_TEST_ROTATE_CREDENTIAL_RACE:-0}" = 1 ]; then
+    printf '%s\n' 'argo|concurrent-rotate-node|29994|55555555-5555-4555-8555-555555555555|/concurrent-rotate|concurrent-rotate.example.com' >> "$VP_NODES_DB"
+  fi
+  [ "$(managed_file_state "$VP_NODES_DB")" = "$approved_rotate_nodes_state" ] || { error "节点数据库在凭据轮换准备期间发生变化，已中止且未覆盖并发修改。"; return 1; }
+  [ "$(managed_file_state "$VP_ROTATIONS_DB")" = "$approved_rotate_rotations_state" ] || { error "凭据轮换数据库在新凭据生成期间发生变化，已中止本次轮换。"; return 1; }
   begin_state_transaction credential-rotate || return 1
   candidate_root="$VP_TX_ACTIVE/candidate"
   awk -F'|' -v OFS='|' -v n="$target" -v value="$new_uuid" '$2==n{$4=value}{print}' "$candidate_root/nodes.db" > "$candidate_root/nodes.db.tmp"
@@ -1716,6 +1723,8 @@ finalize_rotation() {
   need_root || return 1
   target="${1:-}"
   [ -n "$target" ] || { error "请指定节点名称，或使用 --expired。"; return 1; }
+  approved_finalize_nodes_state="$(managed_file_state "$VP_NODES_DB")"
+  approved_finalize_rotations_state="$(managed_file_state "$VP_ROTATIONS_DB")"
   now="$(date +%s)"
   if [ "$target" = "--expired" ]; then
     match_count="$(awk -F'|' -v now="$now" '$5+0<=now{n++}END{print n+0}' "$VP_ROTATIONS_DB" 2>/dev/null)"
@@ -1743,6 +1752,11 @@ finalize_rotation() {
     fi
     [ "$finalize_confirm" = FINALIZE ] || { warn "已取消最终切换，旧凭据仍按原宽限记录保留。"; return 2; }
   fi
+  if [ "${VP_ALLOW_TEST_HOOKS:-0}" = 1 ] && [ "${VP_TEST_ROTATION_FINALIZE_RACE:-0}" = 1 ]; then
+    printf '%s\n' 'argo|concurrent-finalize-node|29995|44444444-4444-4444-8444-444444444444|/concurrent-finalize|concurrent-finalize.example.com' >> "$VP_NODES_DB"
+  fi
+  [ "$(managed_file_state "$VP_NODES_DB")" = "$approved_finalize_nodes_state" ] || { error "节点数据库在最终切换确认期间发生变化，已中止且保留原宽限记录。"; return 1; }
+  [ "$(managed_file_state "$VP_ROTATIONS_DB")" = "$approved_finalize_rotations_state" ] || { error "凭据轮换记录在最终切换确认期间发生变化，已中止操作。"; return 1; }
   begin_state_transaction credential-finalize || return 1
   candidate_root="$VP_TX_ACTIVE/candidate"
   if [ "$target" = "--expired" ]; then

@@ -932,6 +932,51 @@ grep -q '^argo|concurrent-edit-node|' "$edit_race_root/etc/nodes.db"
 [ "$(sha256sum "$edit_race_root/etc/credential-rotations.db" | awk '{print $1}')" = "$edit_race_rotations_hash" ]
 [ ! -e "$edit_race_root/etc/transactions/active" ]
 
+rotate_race_root="$TMP/rotate-race"
+VP_CONFIG_DIR="$rotate_race_root/etc" VP_DATA_DIR="$rotate_race_root/lib" \
+VP_LOG_DIR="$rotate_race_root/log" VP_LIB_DIR="$rotate_race_root/usr" \
+VP_SKIP_SERVICE=1 sh "$ROOT/vp.sh" init >/dev/null
+rotate_race_record='argo|rotate-target|29996|33333333-3333-4333-8333-333333333333|/rotate|rotate.example.com'
+printf '%s\n' "$rotate_race_record" > "$rotate_race_root/etc/nodes.db"
+rotate_race_state_hash="$(sha256sum "$rotate_race_root/etc/state.env" | awk '{print $1}')"
+if VP_CONFIG_DIR="$rotate_race_root/etc" VP_DATA_DIR="$rotate_race_root/lib" \
+  VP_LOG_DIR="$rotate_race_root/log" VP_LIB_DIR="$rotate_race_root/usr" VP_SKIP_SERVICE=1 \
+  VP_ALLOW_TEST_HOOKS=1 VP_TEST_ROTATE_CREDENTIAL_RACE=1 \
+  sh "$ROOT/vp.sh" rotate rotate-target 24 >/dev/null 2>&1; then
+  printf 'credential rotation accepted a concurrent node database change\n' >&2
+  exit 1
+fi
+grep -Fqx "$rotate_race_record" "$rotate_race_root/etc/nodes.db"
+grep -q '^argo|concurrent-rotate-node|' "$rotate_race_root/etc/nodes.db"
+[ ! -s "$rotate_race_root/etc/credential-rotations.db" ]
+[ "$(sha256sum "$rotate_race_root/etc/state.env" | awk '{print $1}')" = "$rotate_race_state_hash" ]
+[ ! -e "$rotate_race_root/etc/transactions/active" ]
+
+finalize_race_root="$TMP/finalize-race"
+VP_CONFIG_DIR="$finalize_race_root/etc" VP_DATA_DIR="$finalize_race_root/lib" \
+VP_LOG_DIR="$finalize_race_root/log" VP_LIB_DIR="$finalize_race_root/usr" \
+VP_SKIP_SERVICE=1 sh "$ROOT/vp.sh" init >/dev/null
+finalize_old_uuid='11111111-1111-4111-8111-111111111111'
+finalize_new_uuid='22222222-2222-4222-8222-222222222222'
+printf '%s\n' "argo|finalize-target|29997|$finalize_new_uuid|/finalize|finalize.example.com" > "$finalize_race_root/etc/nodes.db"
+finalize_now="$(date +%s)"
+printf '%s\n' "finalize-target|argo|$finalize_old_uuid|$finalize_new_uuid|$((finalize_now + 3600))|$finalize_now" \
+  > "$finalize_race_root/etc/credential-rotations.db"
+finalize_rotation_hash="$(sha256sum "$finalize_race_root/etc/credential-rotations.db" | awk '{print $1}')"
+finalize_state_hash="$(sha256sum "$finalize_race_root/etc/state.env" | awk '{print $1}')"
+if VP_CONFIG_DIR="$finalize_race_root/etc" VP_DATA_DIR="$finalize_race_root/lib" \
+  VP_LOG_DIR="$finalize_race_root/log" VP_LIB_DIR="$finalize_race_root/usr" VP_SKIP_SERVICE=1 \
+  VP_ROTATION_FINALIZE_CONFIRM=FINALIZE VP_ALLOW_TEST_HOOKS=1 VP_TEST_ROTATION_FINALIZE_RACE=1 \
+  sh "$ROOT/vp.sh" rotate-finalize finalize-target >/dev/null 2>&1; then
+  printf 'credential finalization accepted a concurrent node database change\n' >&2
+  exit 1
+fi
+grep -q '^argo|finalize-target|' "$finalize_race_root/etc/nodes.db"
+grep -q '^argo|concurrent-finalize-node|' "$finalize_race_root/etc/nodes.db"
+[ "$(sha256sum "$finalize_race_root/etc/credential-rotations.db" | awk '{print $1}')" = "$finalize_rotation_hash" ]
+[ "$(sha256sum "$finalize_race_root/etc/state.env" | awk '{print $1}')" = "$finalize_state_hash" ]
+[ ! -e "$finalize_race_root/etc/transactions/active" ]
+
 uninstall_fail_root="$TMP/uninstall-stop-failure"
 mkdir -p "$uninstall_fail_root"
 : > "$uninstall_fail_root/vp"
