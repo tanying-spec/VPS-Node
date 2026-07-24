@@ -624,11 +624,23 @@ grep -q '^CC=bbr$' "$sysctl_state"
 grep -q '^QDISC=fq$' "$sysctl_state"
 [ -s "$network_config" ]
 [ -s "$network_snapshot" ]
+network_config_hash_before_cancel="$(sha256sum "$network_config" | awk '{print $1}')"
+network_snapshot_hash_before_cancel="$(sha256sum "$network_snapshot" | awk '{print $1}')"
+cancelled_network_rollback="$(VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log" \
+  VP_LIB_DIR="$TMP/dns-usr" VP_SYSCTL_BIN="$fake_sysctl" VP_FAKE_SYSCTL_STATE="$sysctl_state" \
+  VP_SYSCTL_CONFIG="$network_config" VP_NETWORK_SNAPSHOT="$network_snapshot" \
+  VP_NETWORK_ROLLBACK_CONFIRM=CANCEL sh "$ROOT/vp.sh" network-rollback 2>&1 || true)"
+printf '%s\n' "$cancelled_network_rollback" | grep -q '已取消网络回滚'
+grep -q '^CC=bbr$' "$sysctl_state"
+grep -q '^QDISC=fq$' "$sysctl_state"
+[ "$(sha256sum "$network_config" | awk '{print $1}')" = "$network_config_hash_before_cancel" ]
+[ "$(sha256sum "$network_snapshot" | awk '{print $1}')" = "$network_snapshot_hash_before_cancel" ]
 sysctl_fail_once="$TMP/fake-sysctl-failed-once"
 if VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log" \
   VP_LIB_DIR="$TMP/dns-usr" VP_SYSCTL_BIN="$fake_sysctl" VP_FAKE_SYSCTL_STATE="$sysctl_state" \
   VP_FAKE_SYSCTL_FAIL_ONCE_KEY=net.core.default_qdisc VP_FAKE_SYSCTL_FAIL_ONCE_FILE="$sysctl_fail_once" \
   VP_SYSCTL_CONFIG="$network_config" VP_NETWORK_SNAPSHOT="$network_snapshot" \
+  VP_NETWORK_ROLLBACK_CONFIRM=ROLLBACK \
   sh "$ROOT/vp.sh" network-rollback >/dev/null 2>&1; then
   printf 'partially failed network rollback unexpectedly succeeded\n' >&2
   exit 1
@@ -641,6 +653,7 @@ rm -f "$sysctl_fail_once"
 VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log" \
 VP_LIB_DIR="$TMP/dns-usr" VP_SYSCTL_BIN="$fake_sysctl" VP_FAKE_SYSCTL_STATE="$sysctl_state" \
 VP_SYSCTL_CONFIG="$network_config" VP_NETWORK_SNAPSHOT="$network_snapshot" \
+VP_NETWORK_ROLLBACK_CONFIRM=ROLLBACK \
 sh "$ROOT/vp.sh" network-rollback >/dev/null
 grep -q '^CC=cubic$' "$sysctl_state"
 grep -q '^QDISC=pfifo_fast$' "$sysctl_state"

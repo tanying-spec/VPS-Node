@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.0-dev.79
+
+- Manual `vp network-rollback` now previews current/restored congestion control and qdisc values plus the host-global and persistence-file impact before requiring `ROLLBACK`.
+- Approval is bound to exact rollback-snapshot and sysctl-config file states as well as both live kernel values.
+- Any change during confirmation aborts before sysctl writes; cancellation leaves live parameters and persistence files byte-identical.
+- Internal uninstall rollback retains the explicit non-interactive `--quiet` path, and regression tests cover cancellation plus existing compensation failures.
+
 ## 0.2.0-dev.78
 
 - Node deletion now previews name, protocol, listener port, associated credential-rotation count and the service-restart impact before `DELETE` confirmation.

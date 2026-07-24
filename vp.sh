@@ -2,7 +2,7 @@
 
 set -u
 
-VP_VERSION="0.2.0-dev.78"
+VP_VERSION="0.2.0-dev.79"
 VP_CONFIG_DIR="${VP_CONFIG_DIR:-/etc/vps-node}"
 VP_DATA_DIR="${VP_DATA_DIR:-/var/lib/vps-node}"
 VP_LOG_DIR="${VP_LOG_DIR:-/var/log/vps-node}"
@@ -2401,6 +2401,23 @@ network_rollback() {
   before_cc="$(awk -F= '$1=="BEFORE_CC"{print $2;exit}' "$VP_NETWORK_SNAPSHOT")"
   before_qdisc="$(awk -F= '$1=="BEFORE_QDISC"{print $2;exit}' "$VP_NETWORK_SNAPSHOT")"
   case "$before_cc$before_qdisc" in *[!A-Za-z0-9_-]*) error "网络回滚记录格式无效。"; return 1 ;; esac
+  approved_network_snapshot_state="$(managed_file_state "$VP_NETWORK_SNAPSHOT")"
+  approved_network_config_state="$(managed_file_state "$VP_SYSCTL_CONFIG")"
+  rollback_current_cc="$(network_sysctl_value net.ipv4.tcp_congestion_control || true)"
+  rollback_current_qdisc="$(network_sysctl_value net.core.default_qdisc || true)"
+  [ -n "$rollback_current_cc" ] && [ -n "$rollback_current_qdisc" ] || { error "无法读取当前网络参数。"; return 1; }
+  if [ "$quiet" -ne 1 ]; then
+    printf '网络优化回滚预览：\n'
+    printf '  拥塞控制：%s -> %s\n' "$rollback_current_cc" "$before_cc"
+    printf '  队列规则：%s -> %s\n' "$rollback_current_qdisc" "$before_qdisc"
+    printf '  影响范围：修改主机全局 TCP 参数，并移除 VPS-Node 的持久化网络配置\n'
+    if [ -n "${VP_NETWORK_ROLLBACK_CONFIRM:-}" ]; then network_rollback_confirm="$VP_NETWORK_ROLLBACK_CONFIRM"; else printf '输入 ROLLBACK 确认恢复：'; read -r network_rollback_confirm || true; fi
+    [ "$network_rollback_confirm" = ROLLBACK ] || { warn "已取消网络回滚，当前参数和持久化文件未修改。"; return 2; }
+  fi
+  [ "$(managed_file_state "$VP_NETWORK_SNAPSHOT")" = "$approved_network_snapshot_state" ] || { error "网络回滚记录在确认期间发生变化，已中止。"; return 1; }
+  [ "$(managed_file_state "$VP_SYSCTL_CONFIG")" = "$approved_network_config_state" ] || { error "持久化网络配置在确认期间发生变化，已中止。"; return 1; }
+  [ "$(network_sysctl_value net.ipv4.tcp_congestion_control || true)" = "$rollback_current_cc" ] || { error "拥塞控制参数在确认期间发生变化，已中止。"; return 1; }
+  [ "$(network_sysctl_value net.core.default_qdisc || true)" = "$rollback_current_qdisc" ] || { error "队列规则在确认期间发生变化，已中止。"; return 1; }
   network_restore_values "$before_cc" "$before_qdisc" || { error "无法恢复原网络参数。"; return 1; }
   rm -f "$VP_SYSCTL_CONFIG" "$VP_NETWORK_SNAPSHOT"
   stability_event recovered network "saved network tuning rolled back"
