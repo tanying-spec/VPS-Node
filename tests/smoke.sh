@@ -354,6 +354,40 @@ if VP_CONFIG_DIR="$TMP/malicious-restore/etc" VP_DATA_DIR="$TMP/malicious-restor
 fi
 [ ! -e "$TMP/outside-target" ]
 
+invalid_state="$TMP/invalid-state-package"
+mkdir -p "$invalid_state/config" "$invalid_state/data"
+printf 'FORMAT_VERSION=1\n' > "$invalid_state/manifest.env"
+printf 'SCHEMA_VERSION=1\nACTIVE_CORE=none\n' > "$invalid_state/config/state.env"
+cat > "$invalid_state/config/nodes.db" <<'INVALID_NODES'
+argo|duplicate-a|24443|11111111-1111-4111-8111-111111111111|/a|a.example.com
+argo|duplicate-b|24443|22222222-2222-4222-8222-222222222222|/b|b.example.com
+INVALID_NODES
+: > "$invalid_state/config/credential-rotations.db"
+tar -czf "$TMP/invalid-state.tar.gz" -C "$invalid_state" manifest.env config data
+state_hash_before="$(sha256sum "$TMP/dns-etc/state.env" | awk '{print $1}')"
+if VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log" \
+  VP_LIB_DIR="$TMP/dns-usr" VP_CORE_BIN="$TMP/dns-usr/bin/mihomo" VP_SKIP_SERVICE=1 \
+  sh "$ROOT/vp.sh" restore "$TMP/invalid-state.tar.gz" >/dev/null 2>&1; then
+  printf 'duplicate listener backup unexpectedly accepted\n' >&2
+  exit 1
+fi
+[ "$(sha256sum "$TMP/dns-etc/state.env" | awk '{print $1}')" = "$state_hash_before" ]
+
+rotation_state="$TMP/invalid-rotation-package"
+mkdir -p "$rotation_state/config" "$rotation_state/data"
+printf 'FORMAT_VERSION=1\n' > "$rotation_state/manifest.env"
+printf 'SCHEMA_VERSION=1\nACTIVE_CORE=none\n' > "$rotation_state/config/state.env"
+printf '%s\n' 'argo|rotation-node|24444|33333333-3333-4333-8333-333333333333|/ws|rotation.example.com' > "$rotation_state/config/nodes.db"
+printf '%s\n' 'rotation-node|argo|44444444-4444-4444-8444-444444444444|55555555-5555-4555-8555-555555555555|200|100' > "$rotation_state/config/credential-rotations.db"
+tar -czf "$TMP/invalid-rotation.tar.gz" -C "$rotation_state" manifest.env config data
+if VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log" \
+  VP_LIB_DIR="$TMP/dns-usr" VP_CORE_BIN="$TMP/dns-usr/bin/mihomo" VP_SKIP_SERVICE=1 \
+  sh "$ROOT/vp.sh" restore "$TMP/invalid-rotation.tar.gz" >/dev/null 2>&1; then
+  printf 'orphan rotation backup unexpectedly accepted\n' >&2
+  exit 1
+fi
+[ "$(sha256sum "$TMP/dns-etc/state.env" | awk '{print $1}')" = "$state_hash_before" ]
+
 VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log" \
 VP_LIB_DIR="$TMP/dns-usr" VP_CORE_BIN="$TMP/dns-usr/bin/mihomo" \
 VP_CORE_BACKUP_BIN="$TMP/dns-usr/bin/mihomo.previous" VP_SKIP_SERVICE=1 \

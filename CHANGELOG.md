@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.0-dev.20
+
+- Centralized candidate-state validation now enforces supported protocols, exact field counts, UUID/port/key/path/host constraints and unique node names/listen ports.
+- Credential rotations must reference an existing node of the same protocol, contain valid old/current UUIDs, match the node current UUID and use a valid time window.
+- Restore and migration inherit these checks; tests prove duplicate listeners and inconsistent rotation records are rejected without changing live state.
+
 ## 0.2.0-dev.19
 
 - Installer and self-update now create a permission-restricted SHA-256 sidecar for the previous management script.

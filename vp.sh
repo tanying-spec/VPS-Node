@@ -2,7 +2,7 @@
 
 set -u
 
-VP_VERSION="0.2.0-dev.19"
+VP_VERSION="0.2.0-dev.20"
 VP_CONFIG_DIR="${VP_CONFIG_DIR:-/etc/vps-node}"
 VP_DATA_DIR="${VP_DATA_DIR:-/var/lib/vps-node}"
 VP_LOG_DIR="${VP_LOG_DIR:-/var/log/vps-node}"
@@ -194,6 +194,57 @@ begin_state_transaction() {
   transaction_candidate || { rm -rf "$VP_TX_ACTIVE"; return 1; }
 }
 
+validate_nodes_database() {
+  nodes_to_validate="$1"
+  awk -F'|' '
+    function valid_uuid(value, parts) {
+      if (value ~ /[^0-9A-Fa-f-]/ || split(value, parts, "-") != 5) return 0
+      return length(parts[1]) == 8 && length(parts[2]) == 4 && length(parts[3]) == 4 &&
+             length(parts[4]) == 4 && length(parts[5]) == 12
+    }
+    function invalid_common(name, port, uuid) {
+      return name == "" || name ~ /[[:space:]\047\042]/ || port !~ /^[0-9]+$/ ||
+             port + 0 < 1 || port + 0 > 65535 || !valid_uuid(uuid)
+    }
+    NF == 0 { next }
+    {
+      if (invalid_common($2, $3, $4) || seen_name[$2]++ || seen_port[$3]++) bad=1
+      if ($1 == "reality") {
+        if (NF != 10 || $5 == "" || $5 ~ /[[:space:]]/ || $6 == "" || $6 ~ /[[:space:]]/ ||
+            $7 == "" || $7 ~ /[^A-Za-z0-9_-]/ || $8 == "" || $8 ~ /[^A-Za-z0-9_-]/ ||
+            $9 == "" || $9 ~ /[^0-9A-Fa-f]/ || length($9) > 16 || length($9) % 2 != 0 ||
+            ($10 != "ipv4" && $10 != "ipv6")) bad=1
+      } else if ($1 == "argo") {
+        if (NF != 6 || $5 !~ /^\// || $5 ~ /[[:space:]\047\042]/ ||
+            $6 !~ /^[A-Za-z0-9.-]+$/ || $6 !~ /\./) bad=1
+      } else {
+        bad=1
+      }
+    }
+    END { exit bad ? 1 : 0 }
+  ' "$nodes_to_validate"
+}
+
+validate_rotations_database() {
+  nodes_to_validate="$1"
+  rotations_to_validate="$2"
+  awk -F'|' '
+    function valid_uuid(value, parts) {
+      if (value ~ /[^0-9A-Fa-f-]/ || split(value, parts, "-") != 5) return 0
+      return length(parts[1]) == 8 && length(parts[2]) == 4 && length(parts[3]) == 4 &&
+             length(parts[4]) == 4 && length(parts[5]) == 12
+    }
+    FILENAME == ARGV[1] { if (NF) { node_proto[$2]=$1; node_uuid[$2]=$4 }; next }
+    NF == 0 { next }
+    {
+      if (NF != 6 || !($1 in node_proto) || $2 != node_proto[$1] || seen[$1]++ ||
+          !valid_uuid($3) || !valid_uuid($4) || $4 != node_uuid[$1] ||
+          $5 !~ /^[0-9]+$/ || $6 !~ /^[0-9]+$/ || $5 + 0 <= $6 + 0) bad=1
+    }
+    END { exit bad ? 1 : 0 }
+  ' "$nodes_to_validate" "$rotations_to_validate"
+}
+
 validate_state_candidate() {
   candidate_root="$VP_TX_ACTIVE/candidate"
   [ -f "$candidate_root/state.env" ] || { error "候选状态文件不存在。"; return 1; }
@@ -203,12 +254,12 @@ validate_state_candidate() {
     error "候选状态文件格式错误。"
     return 1
   fi
-  if awk -F'|' 'NF && NF < 5 { bad=1 } END { exit bad ? 0 : 1 }' "$candidate_root/nodes.db" 2>/dev/null; then
-    error "候选节点数据库存在不完整记录。"
+  if ! validate_nodes_database "$candidate_root/nodes.db"; then
+    error "候选节点数据库存在非法协议、字段、端口、UUID、密钥或重复记录。"
     return 1
   fi
-  if awk -F'|' 'NF && NF != 6 { bad=1 } END { exit bad ? 0 : 1 }' "$candidate_root/credential-rotations.db" 2>/dev/null; then
-    error "候选凭据轮换数据库格式错误。"
+  if ! validate_rotations_database "$candidate_root/nodes.db" "$candidate_root/credential-rotations.db"; then
+    error "候选凭据轮换数据库格式错误或与当前节点不一致。"
     return 1
   fi
   printf 'validated\n' > "$VP_TX_ACTIVE/stage"
