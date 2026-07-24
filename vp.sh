@@ -1463,19 +1463,140 @@ uninstall_project() {
   ok "VPS-Node 已卸载。"
 }
 
+pause_screen() {
+  printf '按回车继续...'
+  read -r _ || true
+}
+
+ensure_core_interactive() {
+  [ -x "$VP_CORE_BIN" ] && return 0
+  warn "尚未安装代理核心。"
+  printf '现在安装 Mihomo？[Y/n]：'
+  read -r answer || true
+  case "$answer" in n|N|no|NO) return 1 ;; esac
+  core_install
+}
+
+interactive_reality_add() {
+  ensure_core_interactive || return 1
+  printf '节点名称（默认 reality-1）：'
+  read -r name || true
+  [ -n "$name" ] || name=reality-1
+  printf '监听端口（留空自动选择）：'
+  read -r port || true
+  printf 'Reality SNI（默认 www.amd.com）：'
+  read -r sni || true
+  [ -n "$sni" ] || sni=www.amd.com
+  reality_add "$name" "$port" "$sni"
+  printf '是否显示新节点链接？[y/N]：'
+  read -r answer || true
+  case "$answer" in y|Y|yes|YES) show_node_link "$name" ;; esac
+}
+
+interactive_argo_setup() {
+  ensure_core_interactive || return 1
+  if [ ! -x "$VP_TUNNEL_BIN" ] || [ ! -s "$VP_TUNNEL_TOKEN_FILE" ]; then
+    tunnel_install || return 1
+  fi
+  printf '备用节点名称（默认 argo-1）：'
+  read -r name || true
+  [ -n "$name" ] || name=argo-1
+  printf 'Cloudflare 公网域名：'
+  read -r host || true
+  [ -n "$host" ] || { error "域名不能为空。"; return 1; }
+  printf '本地端口（留空自动选择）：'
+  read -r port || true
+  printf 'WebSocket 路径（留空自动生成）：'
+  read -r path || true
+  argo_add "$name" "$port" "$host" "$path"
+}
+
+interactive_node_action() {
+  show_nodes
+  [ -s "$VP_NODES_DB" ] || return 0
+  printf '请输入节点名称：'
+  read -r target || true
+  [ -n "$target" ] || return 0
+  printf '1. 显示链接\n2. 端到端测试\n3. 轮换凭据\n4. 完成凭据切换\n0. 返回\n请选择：'
+  read -r action || true
+  case "$action" in
+    1) show_node_link "$target" ;;
+    2) test_node_end_to_end "$target" ;;
+    3)
+      printf '新旧凭据并存小时数（默认 24）：'
+      read -r hours || true
+      rotate_credential "$target" "${hours:-24}"
+      ;;
+    4) finalize_rotation "$target" ;;
+    0) return 0 ;;
+    *) warn "无效选择。" ;;
+  esac
+}
+
+interactive_health() {
+  layered_health_check && return 0
+  printf '发现错误，是否执行安全修复？[Y/n]：'
+  read -r answer || true
+  case "$answer" in n|N|no|NO) return 1 ;; esac
+  safe_repair && layered_health_check
+}
+
+interactive_backup() {
+  printf '1. 创建备份\n2. 恢复备份\n0. 返回\n请选择：'
+  read -r action || true
+  case "$action" in
+    1) create_backup "$VP_BACKUP_DIR" ;;
+    2) printf '请输入备份文件完整路径：'; read -r archive || true; restore_backup "$archive" ;;
+    0) return 0 ;;
+    *) warn "无效选择。" ;;
+  esac
+}
+
+interactive_update() {
+  printf '1. 检查并更新管理脚本\n2. 回滚上一个管理脚本\n0. 返回\n请选择：'
+  read -r action || true
+  case "$action" in 1) update_cli ;; 2) rollback_cli ;; 0) return 0 ;; *) warn "无效选择。" ;; esac
+}
+
+advanced_menu() {
+  printf '1. 基础环境检查\n2. 初始化状态目录\n3. 安装/更新 Mihomo 内核\n4. 安装/更新 Cloudflare Tunnel\n5. 查看凭据轮换状态\n0. 返回\n请选择：'
+  read -r action || true
+  case "$action" in
+    1) doctor ;;
+    2) init_layout ;;
+    3) core_install ;;
+    4) tunnel_install ;;
+    5) show_rotations ;;
+    0) return 0 ;;
+    *) warn "无效选择。" ;;
+  esac
+}
+
 menu() {
   while true; do
     show_status
-    printf '1. 刷新状态\n'
-    printf '2. 基础健康检查\n'
-    printf '3. 初始化状态目录\n'
+    printf '1. 创建 Reality 主节点\n'
+    printf '2. 配置 Cloudflare 备用节点\n'
+    printf '3. 查看与管理节点\n'
+    printf '4. 健康检查与安全修复\n'
+    printf '5. 一键安全维护\n'
+    printf '6. 备份与迁移\n'
+    printf '7. 更新与回滚\n'
+    printf '8. 高级设置\n'
+    printf '9. 刷新状态\n'
     printf '0. 退出\n'
     printf '请选择：'
     read -r choice || return 0
     case "$choice" in
-      1) ;;
-      2) doctor; printf '按回车继续...'; read -r _ || true ;;
-      3) init_layout; printf '按回车继续...'; read -r _ || true ;;
+      1) interactive_reality_add; pause_screen ;;
+      2) interactive_argo_setup; pause_screen ;;
+      3) interactive_node_action; pause_screen ;;
+      4) interactive_health; pause_screen ;;
+      5) maintenance_mode; pause_screen ;;
+      6) interactive_backup; pause_screen ;;
+      7) interactive_update; pause_screen ;;
+      8) advanced_menu; pause_screen ;;
+      9) ;;
       0) return 0 ;;
       *) warn "无效选择。" ;;
     esac
