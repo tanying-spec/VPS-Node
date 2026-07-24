@@ -53,4 +53,20 @@ sh "$ROOT/vp.sh" init >/dev/null
 grep -q '^TEST_VALUE=committed$' "$TMP/etc/state.env"
 [ ! -e "$TMP/etc/transactions/active" ]
 
+if [ -n "${VP_TEST_MIHOMO_BIN:-}" ]; then
+  VP_CONFIG_DIR="$TMP/core-etc" VP_DATA_DIR="$TMP/core-lib" VP_LOG_DIR="$TMP/core-log" \
+  VP_LIB_DIR="$TMP/core-usr-lib" VP_CORE_BIN="$TMP/core-usr-lib/bin/mihomo" \
+  VP_CORE_BACKUP_BIN="$TMP/core-usr-lib/bin/mihomo.previous" VP_CORE_SOURCE_BIN="$VP_TEST_MIHOMO_BIN" \
+  VP_SKIP_SERVICE=1 sh "$ROOT/vp.sh" core-install >/dev/null
+  VP_CONFIG_DIR="$TMP/core-etc" VP_DATA_DIR="$TMP/core-lib" VP_LOG_DIR="$TMP/core-log" \
+  VP_LIB_DIR="$TMP/core-usr-lib" VP_CORE_BIN="$TMP/core-usr-lib/bin/mihomo" \
+  VP_CORE_BACKUP_BIN="$TMP/core-usr-lib/bin/mihomo.previous" VP_SKIP_SERVICE=1 \
+  sh "$ROOT/vp.sh" reality-add test-reality 25432 www.amd.com >/dev/null
+  grep -q '^reality|test-reality|25432|' "$TMP/core-etc/nodes.db"
+  "$TMP/core-usr-lib/bin/mihomo" -t -d "$TMP/core-etc" -f "$TMP/core-etc/generated/mihomo.yaml" >/dev/null
+  VP_CONFIG_DIR="$TMP/core-etc" VP_DATA_DIR="$TMP/core-lib" VP_LOG_DIR="$TMP/core-log" \
+  VP_LIB_DIR="$TMP/core-usr-lib" VP_CORE_BIN="$TMP/core-usr-lib/bin/mihomo" \
+  sh "$ROOT/vp.sh" link test-reality | grep -q '^vless://'
+fi
+
 printf 'smoke: ok\n'

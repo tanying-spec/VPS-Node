@@ -13,6 +13,14 @@ VP_SECRETS_DIR="$VP_CONFIG_DIR/secrets"
 VP_GENERATED_DIR="$VP_CONFIG_DIR/generated"
 VP_TX_DIR="$VP_CONFIG_DIR/transactions"
 VP_TX_ACTIVE="$VP_TX_DIR/active"
+VP_CORE_BIN="${VP_CORE_BIN:-$VP_LIB_DIR/bin/mihomo}"
+VP_CORE_BACKUP_BIN="${VP_CORE_BACKUP_BIN:-$VP_LIB_DIR/bin/mihomo.previous}"
+VP_CORE_CONFIG="$VP_GENERATED_DIR/mihomo.yaml"
+VP_CORE_SERVICE="${VP_CORE_SERVICE:-vps-node-core}"
+VP_CORE_ENV="$VP_CONFIG_DIR/core.env"
+VP_MIXED_PORT="${VP_MIXED_PORT:-17890}"
+VP_CONTROLLER_PORT="${VP_CONTROLLER_PORT:-19090}"
+VP_MIHOMO_API="${VP_MIHOMO_API:-https://api.github.com/repos/MetaCubeX/mihomo/releases/latest}"
 
 is_tty() { [ -t 1 ]; }
 color() { is_tty && printf '\033[%sm' "$1" || true; }
@@ -262,6 +270,340 @@ service_state() {
   fi
 }
 
+service_manager() {
+  if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
+    printf 'systemd'
+  elif command -v rc-service >/dev/null 2>&1; then
+    printf 'openrc'
+  else
+    printf 'none'
+  fi
+}
+
+service_action() {
+  action="$1"
+  name="$2"
+  case "$(service_manager)" in
+    systemd) systemctl "$action" "$name" ;;
+    openrc) rc-service "$name" "$action" ;;
+    *) error "当前系统不支持 systemd 或 OpenRC。"; return 1 ;;
+  esac
+}
+
+core_process_running() {
+  if command -v pgrep >/dev/null 2>&1; then
+    pgrep -f "$VP_CORE_BIN.*$VP_CORE_CONFIG" >/dev/null 2>&1
+  else
+    ps 2>/dev/null | grep -F "$VP_CORE_BIN" | grep -F "$VP_CORE_CONFIG" | grep -v grep >/dev/null 2>&1
+  fi
+}
+
+core_service_restart() {
+  [ "${VP_SKIP_SERVICE:-0}" = "1" ] && return 0
+  service_action restart "$VP_CORE_SERVICE" >/dev/null 2>&1 || return 1
+  attempts=0
+  while [ "$attempts" -lt 10 ]; do
+    core_process_running && return 0
+    sleep 1
+    attempts=$((attempts + 1))
+  done
+  return 1
+}
+
+detect_arch() {
+  case "$(uname -m 2>/dev/null)" in
+    x86_64|amd64) printf 'amd64' ;;
+    aarch64|arm64) printf 'arm64' ;;
+    armv7l|armv7) printf 'armv7' ;;
+    riscv64) printf 'riscv64' ;;
+    *) error "不支持当前 CPU 架构：$(uname -m 2>/dev/null)"; return 1 ;;
+  esac
+}
+
+mihomo_download_url() {
+  arch="$(detect_arch)" || return 1
+  release_json="$(curl -fsSL --max-time 30 "$VP_MIHOMO_API")" || { error "无法访问 Mihomo Release API。"; return 1; }
+  urls="$(printf '%s\n' "$release_json" | sed -n 's/.*"browser_download_url"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
+  url="$(printf '%s\n' "$urls" | grep -Ei "mihomo-linux-${arch}.*compatible.*\.gz$" | head -n 1 || true)"
+  [ -n "$url" ] || url="$(printf '%s\n' "$urls" | grep -Ei "mihomo-linux-${arch}.*\.gz$" | head -n 1 || true)"
+  [ -n "$url" ] || { error "Release 中没有 linux-$arch 内核。"; return 1; }
+  printf '%s' "$url"
+}
+
+install_core_binary() {
+  need_root || return 1
+  mkdir -p "$(dirname "$VP_CORE_BIN")"
+  binary_tmp="$(mktemp /tmp/vp-mihomo-bin.XXXXXX)" || return 1
+  archive_tmp="$(mktemp /tmp/vp-mihomo.XXXXXX)" || { rm -f "$binary_tmp"; return 1; }
+  if [ -n "${VP_CORE_SOURCE_BIN:-}" ]; then
+    cp "$VP_CORE_SOURCE_BIN" "$binary_tmp" || { rm -f "$binary_tmp" "$archive_tmp"; return 1; }
+  else
+    command -v curl >/dev/null 2>&1 || { error "缺少 curl。"; rm -f "$binary_tmp" "$archive_tmp"; return 1; }
+    command -v gzip >/dev/null 2>&1 || { error "缺少 gzip。"; rm -f "$binary_tmp" "$archive_tmp"; return 1; }
+    download_url="$(mihomo_download_url)" || { rm -f "$binary_tmp" "$archive_tmp"; return 1; }
+    info "正在下载 Mihomo 内核。"
+    curl -fL --max-time 180 "$download_url" -o "$archive_tmp" || { error "Mihomo 下载失败。"; rm -f "$binary_tmp" "$archive_tmp"; return 1; }
+    gzip -dc "$archive_tmp" > "$binary_tmp" || { error "Mihomo 解压失败。"; rm -f "$binary_tmp" "$archive_tmp"; return 1; }
+  fi
+  rm -f "$archive_tmp"
+  chmod 755 "$binary_tmp"
+  "$binary_tmp" -v >/dev/null 2>&1 || { error "下载的内核无法运行。"; rm -f "$binary_tmp"; return 1; }
+  [ -x "$VP_CORE_BIN" ] && cp "$VP_CORE_BIN" "$VP_CORE_BACKUP_BIN"
+  mv "$binary_tmp" "$VP_CORE_BIN"
+  chmod 755 "$VP_CORE_BIN"
+}
+
+write_core_runtime_env() {
+  memory_snapshot
+  limit_mib="$(bytes_to_mib "$MEM_LIMIT_BYTES" | awk -F. '{print $1}')"
+  case "$limit_mib" in ''|*[!0-9]*) limit_mib=0 ;; esac
+  if [ "$limit_mib" -gt 0 ] && [ "$limit_mib" -le 160 ]; then
+    gomemlimit=64MiB; gogc=60; gomaxprocs=1; profile=compact
+  elif [ "$limit_mib" -gt 0 ] && [ "$limit_mib" -le 320 ]; then
+    gomemlimit=128MiB; gogc=80; gomaxprocs=2; profile=balanced
+  elif [ "$limit_mib" -gt 0 ] && [ "$limit_mib" -le 640 ]; then
+    gomemlimit=256MiB; gogc=100; gomaxprocs=2; profile=standard
+  else
+    gomemlimit=512MiB; gogc=100; gomaxprocs=4; profile=performance
+  fi
+  {
+    printf 'VP_MEMORY_PROFILE=%s\n' "$profile"
+    printf 'GOMEMLIMIT=%s\n' "$gomemlimit"
+    printf 'GOGC=%s\n' "$gogc"
+    printf 'GOMAXPROCS=%s\n' "$gomaxprocs"
+  } > "$VP_CORE_ENV"
+  chmod 600 "$VP_CORE_ENV"
+}
+
+yaml_quote() {
+  printf '%s' "$1" | sed "s/'/''/g"
+}
+
+render_mihomo_config() {
+  nodes_file="$1"
+  output_file="$2"
+  mkdir -p "$(dirname "$output_file")"
+  {
+    printf 'mixed-port: %s\n' "$VP_MIXED_PORT"
+    printf "external-controller: '127.0.0.1:%s'\n" "$VP_CONTROLLER_PORT"
+    printf 'allow-lan: false\nmode: rule\nlog-level: warning\nipv6: false\n'
+    printf 'listeners:\n'
+    while IFS='|' read -r proto name port uuid sni dest private_key public_key short_id; do
+      [ -n "$proto" ] || continue
+      case "$proto" in
+        reality)
+          printf "  - name: '%s'\n" "$(yaml_quote "$name")"
+          printf '    type: vless\n    port: %s\n    listen: 0.0.0.0\n' "$port"
+          printf "    users:\n      - username: '%s'\n        uuid: '%s'\n" "$(yaml_quote "$name")" "$(yaml_quote "$uuid")"
+          printf '    tls: true\n    reality-config:\n'
+          printf "      dest: '%s'\n      private-key: '%s'\n" "$(yaml_quote "$dest")" "$(yaml_quote "$private_key")"
+          printf "      short-id:\n        - '%s'\n      server-names:\n        - '%s'\n" "$(yaml_quote "$short_id")" "$(yaml_quote "$sni")"
+          ;;
+      esac
+    done < "$nodes_file"
+    printf 'proxies: []\nproxy-groups:\n  - name: Proxy\n    type: select\n    proxies:\n      - DIRECT\nrules:\n  - MATCH,DIRECT\n'
+  } > "$output_file"
+  chmod 600 "$output_file"
+}
+
+install_core_service() {
+  [ "${VP_SKIP_SERVICE:-0}" = "1" ] && return 0
+  GOMEMLIMIT="$(awk -F= '$1=="GOMEMLIMIT"{print $2;exit}' "$VP_CORE_ENV")"
+  GOGC="$(awk -F= '$1=="GOGC"{print $2;exit}' "$VP_CORE_ENV")"
+  GOMAXPROCS="$(awk -F= '$1=="GOMAXPROCS"{print $2;exit}' "$VP_CORE_ENV")"
+  manager="$(service_manager)"
+  case "$manager" in
+    systemd)
+      cat > "/etc/systemd/system/${VP_CORE_SERVICE}.service" <<EOF
+[Unit]
+Description=VPS-Node proxy core
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=$VP_CORE_ENV
+ExecStart=$VP_CORE_BIN -d $VP_CONFIG_DIR -f $VP_CORE_CONFIG
+Restart=on-failure
+RestartSec=2s
+LimitNOFILE=1048576
+
+[Install]
+WantedBy=multi-user.target
+EOF
+      systemctl daemon-reload
+      systemctl enable "$VP_CORE_SERVICE" >/dev/null
+      ;;
+    openrc)
+      cat > "/etc/init.d/$VP_CORE_SERVICE" <<EOF
+#!/sbin/openrc-run
+description="VPS-Node proxy core"
+command="$VP_CORE_BIN"
+command_args="-d $VP_CONFIG_DIR -f $VP_CORE_CONFIG"
+supervisor="supervise-daemon"
+output_log="$VP_LOG_DIR/core.log"
+error_log="$VP_LOG_DIR/core.err"
+respawn_delay=2
+respawn_max=0
+rc_ulimit="-n 1048576"
+export GOMEMLIMIT="$GOMEMLIMIT"
+export GOGC="$GOGC"
+export GOMAXPROCS="$GOMAXPROCS"
+depend() { need net; }
+EOF
+      chmod 755 "/etc/init.d/$VP_CORE_SERVICE"
+      rc-update add "$VP_CORE_SERVICE" default >/dev/null
+      ;;
+    *) error "无法安装服务：系统不支持 systemd 或 OpenRC。"; return 1 ;;
+  esac
+}
+
+rollback_core_binary() {
+  had_binary="$1"
+  if [ "$had_binary" = "1" ] && [ -x "$VP_CORE_BACKUP_BIN" ]; then
+    cp "$VP_CORE_BACKUP_BIN" "$VP_CORE_BIN"
+    chmod 755 "$VP_CORE_BIN"
+  elif [ "$had_binary" = "0" ]; then
+    rm -f "$VP_CORE_BIN"
+  fi
+}
+
+core_install() {
+  need_root || return 1
+  init_layout >/dev/null || return 1
+  core_had_binary=0
+  [ -x "$VP_CORE_BIN" ] && core_had_binary=1
+  install_core_binary || return 1
+  write_core_runtime_env || { rollback_core_binary "$core_had_binary"; return 1; }
+  begin_state_transaction core-install || { rollback_core_binary "$core_had_binary"; return 1; }
+  candidate_root="$VP_TX_ACTIVE/candidate"
+  sed '/^ACTIVE_CORE=/d' "$candidate_root/state.env" > "$candidate_root/state.env.tmp"
+  printf 'ACTIVE_CORE=mihomo\n' >> "$candidate_root/state.env.tmp"
+  mv "$candidate_root/state.env.tmp" "$candidate_root/state.env"
+  render_mihomo_config "$candidate_root/nodes.db" "$candidate_root/generated/mihomo.yaml"
+  if ! validate_state_candidate || ! "$VP_CORE_BIN" -t -d "$VP_CONFIG_DIR" -f "$candidate_root/generated/mihomo.yaml" >/dev/null 2>&1; then
+    abort_state_transaction
+    rollback_core_binary "$core_had_binary"
+    error "Mihomo 候选配置验证失败。"
+    return 1
+  fi
+  activate_state_candidate || { abort_state_transaction; rollback_core_binary "$core_had_binary"; return 1; }
+  install_core_service || { abort_state_transaction; rollback_core_binary "$core_had_binary"; return 1; }
+  if ! core_service_restart; then
+    abort_state_transaction
+    rollback_core_binary "$core_had_binary"
+    core_service_restart >/dev/null 2>&1 || true
+    error "内核服务启动失败，已恢复旧状态。"
+    return 1
+  fi
+  commit_state_transaction
+  ok "Mihomo 内核已安装。"
+}
+
+random_hex() {
+  bytes="${1:-8}"
+  od -An -N "$bytes" -tx1 /dev/urandom 2>/dev/null | tr -d ' \n'
+}
+
+new_uuid() {
+  [ -r /proc/sys/kernel/random/uuid ] && { cat /proc/sys/kernel/random/uuid; return; }
+  hex="$(random_hex 16)"
+  printf '%s-%s-%s-%s-%s\n' "$(printf '%s' "$hex" | cut -c1-8)" "$(printf '%s' "$hex" | cut -c9-12)" "$(printf '%s' "$hex" | cut -c13-16)" "$(printf '%s' "$hex" | cut -c17-20)" "$(printf '%s' "$hex" | cut -c21-32)"
+}
+
+reality_keypair() {
+  command -v openssl >/dev/null 2>&1 || { error "缺少 openssl。"; return 1; }
+  key_tmp="$(mktemp /tmp/vp-reality-key.XXXXXX)" || return 1
+  openssl genpkey -algorithm X25519 -out "$key_tmp" >/dev/null 2>&1 || { rm -f "$key_tmp"; return 1; }
+  private="$(openssl pkey -in "$key_tmp" -outform DER 2>/dev/null | tail -c 32 | base64 | tr '+/' '-_' | tr -d '=\n')"
+  public="$(openssl pkey -in "$key_tmp" -pubout -outform DER 2>/dev/null | tail -c 32 | base64 | tr '+/' '-_' | tr -d '=\n')"
+  rm -f "$key_tmp"
+  [ -n "$private" ] && [ -n "$public" ] || return 1
+  printf '%s|%s' "$private" "$public"
+}
+
+port_in_use() {
+  port="$1"
+  if command -v ss >/dev/null 2>&1; then
+    ss -H -lntu 2>/dev/null | awk -v p=":$port" '$5 ~ p "$" {found=1} END{exit !found}'
+  else
+    return 1
+  fi
+}
+
+choose_port() {
+  candidate="${1:-}"
+  if [ -n "$candidate" ]; then
+    case "$candidate" in *[!0-9]*|'') return 1 ;; esac
+    [ "$candidate" -ge 1024 ] && [ "$candidate" -le 65535 ] && ! port_in_use "$candidate" && { printf '%s' "$candidate"; return; }
+    return 1
+  fi
+  attempts=0
+  while [ "$attempts" -lt 100 ]; do
+    candidate=$((20000 + 0x$(random_hex 2) % 40000))
+    ! port_in_use "$candidate" && { printf '%s' "$candidate"; return; }
+    attempts=$((attempts + 1))
+  done
+  return 1
+}
+
+reality_add() {
+  need_root || return 1
+  [ -x "$VP_CORE_BIN" ] || { error "请先安装代理核心。"; return 1; }
+  name="${1:-reality-1}"
+  requested_port="${2:-}"
+  sni="${3:-www.amd.com}"
+  case "$name$sni" in *'|'*|*' '*|*\"*|*\'*) error "名称或 SNI 包含非法字符。"; return 1 ;; esac
+  port="$(choose_port "$requested_port")" || { error "端口不可用。"; return 1; }
+  uuid="$(new_uuid)"
+  pair="$(reality_keypair)" || { error "Reality 密钥生成失败。"; return 1; }
+  private="${pair%%|*}"
+  public="${pair#*|}"
+  short_id="$(random_hex 8)"
+  begin_state_transaction reality-add || return 1
+  candidate_root="$VP_TX_ACTIVE/candidate"
+  if awk -F'|' -v n="$name" '$2==n{found=1} END{exit found?0:1}' "$candidate_root/nodes.db"; then
+    abort_state_transaction; error "节点名称已存在。"; return 1
+  fi
+  printf 'reality|%s|%s|%s|%s|%s:443|%s|%s|%s\n' "$name" "$port" "$uuid" "$sni" "$sni" "$private" "$public" "$short_id" >> "$candidate_root/nodes.db"
+  render_mihomo_config "$candidate_root/nodes.db" "$candidate_root/generated/mihomo.yaml"
+  if ! validate_state_candidate || ! "$VP_CORE_BIN" -t -d "$VP_CONFIG_DIR" -f "$candidate_root/generated/mihomo.yaml" >/dev/null 2>&1; then
+    abort_state_transaction; error "Reality 候选配置验证失败。"; return 1
+  fi
+  activate_state_candidate || { abort_state_transaction; return 1; }
+  if ! core_service_restart; then
+    abort_state_transaction; core_service_restart >/dev/null 2>&1 || true
+    error "新节点启动失败，已恢复原配置。"; return 1
+  fi
+  commit_state_transaction
+  ok "Reality 节点已创建：$name（端口 $port）。"
+}
+
+public_ip() {
+  curl -4 -fsS --max-time 5 https://api.ipify.org 2>/dev/null || printf 'YOUR_SERVER_IP'
+}
+
+show_nodes() {
+  [ -s "$VP_NODES_DB" ] || { warn "当前没有节点。"; return 0; }
+  awk -F'|' '{printf "%d. %s  协议=%s  端口=%s\n", NR,$2,$1,$3}' "$VP_NODES_DB"
+}
+
+show_node_link() {
+  target="${1:-}"
+  [ -n "$target" ] || { error "请指定节点名称。"; return 1; }
+  record="$(awk -F'|' -v n="$target" '$2==n{print;exit}' "$VP_NODES_DB" 2>/dev/null)"
+  [ -n "$record" ] || { error "未找到节点。"; return 1; }
+  IFS='|' read -r proto name port uuid sni dest private public short_id <<EOF
+$record
+EOF
+  case "$proto" in
+    reality)
+      printf 'vless://%s@%s:%s?encryption=none&security=reality&sni=%s&fp=chrome&pbk=%s&sid=%s&type=tcp#%s\n' "$uuid" "$(public_ip)" "$port" "$sni" "$public" "$short_id" "$name"
+      ;;
+    *) error "暂不支持该协议的分享链接。"; return 1 ;;
+  esac
+}
+
 node_count() {
   if [ -r "$VP_NODES_DB" ]; then
     awk 'NF { n++ } END { print n + 0 }' "$VP_NODES_DB" 2>/dev/null
@@ -274,7 +616,7 @@ show_status() {
   memory_snapshot
   printf '\nVPS-Node %s\n' "$VP_VERSION"
   printf '%s\n' '----------------------------------------'
-  printf '代理核心：%s\n' "$(service_state vps-node-core)"
+  printf '代理核心：%s\n' "$(service_state "$VP_CORE_SERVICE")"
   printf 'Cloudflare Tunnel：%s\n' "$(service_state vps-node-tunnel)"
   printf '节点数量：%s\n' "$(node_count)"
   printf '\n内存（%s）：\n' "$MEM_SOURCE"
@@ -369,13 +711,17 @@ menu() {
 
 case "${1:-}" in
   init) init_layout ;;
+  core-install|install-core) core_install ;;
+  reality-add|add-reality) shift; reality_add "$@" ;;
+  nodes|list) show_nodes ;;
+  link) shift; show_node_link "$@" ;;
   status) show_status ;;
   doctor|health|check) doctor ;;
   version|--version|-V) printf '%s\n' "$VP_VERSION" ;;
   uninstall) uninstall_project ;;
   debug-tx) shift; debug_transaction "$@" ;;
   help|-h|--help)
-    printf '用法：vp [status|doctor|init|uninstall|version]\n'
+    printf '用法：vp [status|doctor|init|core-install|reality-add|nodes|link|uninstall|version]\n'
     ;;
   '') menu ;;
   *) error "未知命令：$1"; exit 2 ;;
