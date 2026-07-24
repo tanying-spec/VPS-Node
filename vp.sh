@@ -2,7 +2,7 @@
 
 set -u
 
-VP_VERSION="0.2.0-dev.75"
+VP_VERSION="0.2.0-dev.76"
 VP_CONFIG_DIR="${VP_CONFIG_DIR:-/etc/vps-node}"
 VP_DATA_DIR="${VP_DATA_DIR:-/var/lib/vps-node}"
 VP_LOG_DIR="${VP_LOG_DIR:-/var/log/vps-node}"
@@ -1814,6 +1814,31 @@ EOF
       ;;
     *) error "不支持修改的节点协议：$proto。"; return 1 ;;
   esac
+  printf '节点修改预览：\n'
+  printf '  协议：%s\n' "$proto"
+  printf '  名称：%s -> %s\n' "$old_name" "$new_name"
+  printf '  端口：%s -> %s\n' "$old_port" "$new_port"
+  case "$proto" in
+    reality)
+      printf '  SNI：%s -> %s\n' "$f5" "$endpoint"
+      printf '  地址族：%s -> %s\n' "${f10:-ipv4}" "$address_family"
+      ;;
+    argo)
+      printf '  公网主机名：%s -> %s\n' "$f6" "$endpoint"
+      printf '  WebSocket 路径：%s -> %s\n' "$f5" "$new_path"
+      ;;
+  esac
+  printf '  影响范围：重新生成配置并重启 Mihomo；UUID 和 Reality 密钥保持不变\n'
+  if [ -n "${VP_EDIT_CONFIRM:-}" ]; then
+    edit_confirm="$VP_EDIT_CONFIRM"
+  else
+    printf '输入 EDIT 确认应用以上节点修改：'
+    read -r edit_confirm || true
+  fi
+  if [ "$edit_confirm" != EDIT ]; then
+    warn "已取消节点修改，节点、轮换记录和生成配置未修改。"
+    return 2
+  fi
   if [ "${VP_ALLOW_TEST_HOOKS:-0}" = 1 ] && [ "${VP_TEST_EDIT_NODE_RACE:-0}" = 1 ]; then
     printf '%s\n' 'argo|concurrent-edit-node|29993|77777777-7777-4777-8777-777777777777|/concurrent-edit|concurrent-edit.example.com' >> "$VP_NODES_DB"
   fi

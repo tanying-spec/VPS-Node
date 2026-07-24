@@ -9,6 +9,7 @@ CURRENT_VERSION="$(sh "$ROOT/vp.sh" version)"
 export VP_CORE_INSTALL_CONFIRM=INSTALL
 export VP_TUNNEL_INSTALL_CONFIRM=INSTALL
 export VP_ROTATION_START_CONFIRM=ROTATE
+export VP_EDIT_CONFIRM=EDIT
 
 cancel_install_root="$TMP/cancel-install"
 cancelled_core_install="$(VP_CONFIG_DIR="$cancel_install_root/etc" VP_DATA_DIR="$cancel_install_root/lib" \
@@ -1087,6 +1088,17 @@ edit_race_record='argo|edit-target|29992|66666666-6666-4666-8666-666666666666|/o
 printf '%s\n' "$edit_race_record" > "$edit_race_root/etc/nodes.db"
 edit_race_state_hash="$(sha256sum "$edit_race_root/etc/state.env" | awk '{print $1}')"
 edit_race_rotations_hash="$(sha256sum "$edit_race_root/etc/credential-rotations.db" | awk '{print $1}')"
+edit_race_nodes_hash="$(sha256sum "$edit_race_root/etc/nodes.db" | awk '{print $1}')"
+edit_race_config_hash="$(sha256sum "$edit_race_root/etc/generated/mihomo.yaml" | awk '{print $1}')"
+cancelled_edit="$(VP_CONFIG_DIR="$edit_race_root/etc" VP_DATA_DIR="$edit_race_root/lib" \
+  VP_LOG_DIR="$edit_race_root/log" VP_LIB_DIR="$edit_race_root/usr" VP_SKIP_SERVICE=1 \
+  VP_EDIT_CONFIRM=CANCEL sh "$ROOT/vp.sh" edit edit-target edited-target 29992 changed.example.com /changed 2>&1 || true)"
+printf '%s\n' "$cancelled_edit" | grep -q '已取消节点修改'
+[ "$(sha256sum "$edit_race_root/etc/nodes.db" | awk '{print $1}')" = "$edit_race_nodes_hash" ]
+[ "$(sha256sum "$edit_race_root/etc/credential-rotations.db" | awk '{print $1}')" = "$edit_race_rotations_hash" ]
+[ "$(sha256sum "$edit_race_root/etc/generated/mihomo.yaml" | awk '{print $1}')" = "$edit_race_config_hash" ]
+[ "$(sha256sum "$edit_race_root/etc/state.env" | awk '{print $1}')" = "$edit_race_state_hash" ]
+[ ! -e "$edit_race_root/etc/transactions/active" ]
 if VP_CONFIG_DIR="$edit_race_root/etc" VP_DATA_DIR="$edit_race_root/lib" \
   VP_LOG_DIR="$edit_race_root/log" VP_LIB_DIR="$edit_race_root/usr" VP_SKIP_SERVICE=1 \
   VP_ALLOW_TEST_HOOKS=1 VP_TEST_EDIT_NODE_RACE=1 \

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.0-dev.76
+
+- `vp edit` now previews protocol, old/new name and port plus Reality SNI/address family or Tunnel hostname/WebSocket path before requiring `EDIT`.
+- The preview is deliberately credential-free and states that UUID and Reality keys remain unchanged.
+- Command-level confirmation protects both direct CLI and numbered-menu use; cancellation occurs before race hooks or transaction creation.
+- Regression tests prove cancellation leaves node, rotation, generated configuration and state files byte-identical with no transaction residue.
+
 ## 0.2.0-dev.75
 
 - Starting credential rotation now previews the node, protocol, grace period, dual-credential impact and exact finalization command before requiring `ROTATE`.
