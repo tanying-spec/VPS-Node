@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.0-dev.54
+
+- Self-heal locks now bind the PID to the Linux process start time instead of trusting a reusable PID alone.
+- A live unrelated process that reused a stale PID no longer blocks periodic self-heal indefinitely; status reports the mismatched lock as stale and the next check reclaims it.
+- Lock release verifies both owner fields so an older process cannot remove a successor's lock.
+- Fresh incomplete locks are not immediately stolen during the small directory/identity creation window, while legacy PID-only locks remain conservatively compatible.
+
 ## 0.2.0-dev.53
 
 - Redacted diagnostics and their SHA-256 sidecars are now staged in the destination directory and committed only after report generation and hashing succeed.

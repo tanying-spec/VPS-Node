@@ -2,7 +2,7 @@
 
 set -u
 
-VP_VERSION="0.2.0-dev.53"
+VP_VERSION="0.2.0-dev.54"
 VP_CONFIG_DIR="${VP_CONFIG_DIR:-/etc/vps-node}"
 VP_DATA_DIR="${VP_DATA_DIR:-/var/lib/vps-node}"
 VP_LOG_DIR="${VP_LOG_DIR:-/var/log/vps-node}"
@@ -2741,25 +2741,70 @@ stability_event() {
   fi
 }
 
+pid_start_time() {
+  inspected_pid="${1:-}"
+  case "$inspected_pid" in ''|*[!0-9]*) return 1 ;; esac
+  [ -r "/proc/$inspected_pid/stat" ] || return 1
+  process_stat="$(cat "/proc/$inspected_pid/stat" 2>/dev/null)" || return 1
+  process_stat="${process_stat##*) }"
+  set -- $process_stat
+  [ "$#" -ge 20 ] || return 1
+  shift 19
+  case "${1:-}" in ''|*[!0-9]*) return 1 ;; esac
+  printf '%s\n' "$1"
+}
+
+self_heal_lock_active() {
+  [ -d "$VP_SELF_HEAL_LOCK" ] || return 1
+  active_lock_pid="$(cat "$VP_SELF_HEAL_LOCK/pid" 2>/dev/null || true)"
+  active_lock_start="$(cat "$VP_SELF_HEAL_LOCK/start" 2>/dev/null || true)"
+  pid_is_alive "$active_lock_pid" || return 1
+  [ -z "$active_lock_start" ] && return 0
+  active_live_start="$(pid_start_time "$active_lock_pid" 2>/dev/null || true)"
+  [ -n "$active_live_start" ] && [ "$active_lock_start" = "$active_live_start" ]
+}
+
 acquire_self_heal_lock() {
   mkdir -p "$(dirname "$VP_SELF_HEAL_LOCK")" || return 1
   if mkdir "$VP_SELF_HEAL_LOCK" 2>/dev/null; then
     printf '%s\n' "$$" > "$VP_SELF_HEAL_LOCK/pid"
+    current_start="$(pid_start_time "$$" 2>/dev/null || true)"
+    [ -n "$current_start" ] && printf '%s\n' "$current_start" > "$VP_SELF_HEAL_LOCK/start"
     return 0
   fi
   lock_pid="$(cat "$VP_SELF_HEAL_LOCK/pid" 2>/dev/null || true)"
-  if pid_is_alive "$lock_pid"; then
-    return 1
+  lock_start="$(cat "$VP_SELF_HEAL_LOCK/start" 2>/dev/null || true)"
+  if [ -z "$lock_pid" ]; then
+    # A concurrent owner may have created the directory but not written its
+    # identity yet. Do not steal a fresh incomplete lock.
+    if find "$VP_SELF_HEAL_LOCK" -maxdepth 0 -mmin +5 -print 2>/dev/null | grep -q .; then
+      rm -rf "$VP_SELF_HEAL_LOCK"
+    else
+      return 1
+    fi
+  elif pid_is_alive "$lock_pid"; then
+    live_start="$(pid_start_time "$lock_pid" 2>/dev/null || true)"
+    if [ -z "$lock_start" ] || { [ -n "$live_start" ] && [ "$lock_start" = "$live_start" ]; }; then
+      return 1
+    fi
+    rm -rf "$VP_SELF_HEAL_LOCK"
+  else
+    rm -rf "$VP_SELF_HEAL_LOCK"
   fi
-  rm -rf "$VP_SELF_HEAL_LOCK"
   mkdir "$VP_SELF_HEAL_LOCK" 2>/dev/null || return 1
   printf '%s\n' "$$" > "$VP_SELF_HEAL_LOCK/pid"
+  current_start="$(pid_start_time "$$" 2>/dev/null || true)"
+  [ -n "$current_start" ] && printf '%s\n' "$current_start" > "$VP_SELF_HEAL_LOCK/start"
 }
 
 release_self_heal_lock() {
   [ -d "$VP_SELF_HEAL_LOCK" ] || return 0
   lock_pid="$(cat "$VP_SELF_HEAL_LOCK/pid" 2>/dev/null || true)"
-  [ "$lock_pid" = "$$" ] && rm -rf "$VP_SELF_HEAL_LOCK"
+  lock_start="$(cat "$VP_SELF_HEAL_LOCK/start" 2>/dev/null || true)"
+  current_start="$(pid_start_time "$$" 2>/dev/null || true)"
+  if [ "$lock_pid" = "$$" ] && { [ -z "$lock_start" ] || [ "$lock_start" = "$current_start" ]; }; then
+    rm -rf "$VP_SELF_HEAL_LOCK"
+  fi
   return 0
 }
 
@@ -2888,7 +2933,7 @@ EOF
 
 show_stability() {
   printf '后台自愈运行器：%s\n' "$([ -x "$VP_WATCHDOG_RUNNER" ] && printf '已安装' || printf '未安装')"
-  if [ -d "$VP_SELF_HEAL_LOCK" ] && pid_is_alive "$(cat "$VP_SELF_HEAL_LOCK/pid" 2>/dev/null || true)"; then
+  if self_heal_lock_active; then
     printf '当前检查：运行中\n'
   elif [ -d "$VP_SELF_HEAL_LOCK" ]; then
     printf '当前检查：发现过期锁，下次检查会自动回收\n'

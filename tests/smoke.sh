@@ -759,6 +759,15 @@ VP_LIB_DIR="$TMP/dns-usr" VP_CORE_BIN="$TMP/dns-usr/bin/mihomo" VP_SKIP_SERVICE=
 sh "$ROOT/vp.sh" self-heal --quiet
 [ "$(wc -l < "$TMP/dns-log/stability.log")" = "$stability_lines_before" ]
 [ -d "$TMP/dns-lib/self-heal.lock" ]
+printf '0\n' > "$TMP/dns-lib/self-heal.lock/start"
+reused_pid_status="$(VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log" \
+  VP_LIB_DIR="$TMP/dns-usr" sh "$ROOT/vp.sh" stability)"
+printf '%s\n' "$reused_pid_status" | grep -q '发现过期锁'
+VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log" \
+VP_LIB_DIR="$TMP/dns-usr" VP_CORE_BIN="$TMP/dns-usr/bin/mihomo" VP_SKIP_SERVICE=1 \
+sh "$ROOT/vp.sh" self-heal --quiet
+[ ! -e "$TMP/dns-lib/self-heal.lock" ]
+mkdir -p "$TMP/dns-lib/self-heal.lock"
 printf '99999999\n' > "$TMP/dns-lib/self-heal.lock/pid"
 VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log" \
 VP_LIB_DIR="$TMP/dns-usr" VP_CORE_BIN="$TMP/dns-usr/bin/mihomo" VP_SKIP_SERVICE=1 \
