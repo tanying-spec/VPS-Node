@@ -8,6 +8,7 @@ VP_DATA_DIR="${VP_DATA_DIR:-/var/lib/vps-node}"
 VP_LOG_DIR="${VP_LOG_DIR:-/var/log/vps-node}"
 VP_LIB_DIR="${VP_LIB_DIR:-/usr/local/lib/vps-node}"
 VP_NODES_DB="$VP_CONFIG_DIR/nodes.db"
+VP_ROTATIONS_DB="$VP_CONFIG_DIR/credential-rotations.db"
 VP_STATE_FILE="$VP_CONFIG_DIR/state.env"
 VP_SECRETS_DIR="$VP_CONFIG_DIR/secrets"
 VP_GENERATED_DIR="$VP_CONFIG_DIR/generated"
@@ -48,9 +49,10 @@ init_layout() {
   mkdir -p "$VP_CONFIG_DIR" "$VP_DATA_DIR" "$VP_LOG_DIR" "$VP_LIB_DIR" \
     "$VP_SECRETS_DIR" "$VP_GENERATED_DIR" "$VP_TX_DIR"
   [ -f "$VP_NODES_DB" ] || : > "$VP_NODES_DB"
+  [ -f "$VP_ROTATIONS_DB" ] || : > "$VP_ROTATIONS_DB"
   [ -f "$VP_STATE_FILE" ] || printf 'SCHEMA_VERSION=1\nACTIVE_CORE=none\n' > "$VP_STATE_FILE"
   chmod 700 "$VP_CONFIG_DIR" "$VP_SECRETS_DIR" "$VP_TX_DIR"
-  chmod 600 "$VP_NODES_DB" "$VP_STATE_FILE"
+  chmod 600 "$VP_NODES_DB" "$VP_ROTATIONS_DB" "$VP_STATE_FILE"
   recover_state_transaction || return 1
   ok "VPS-Node 状态目录已初始化。"
 }
@@ -76,7 +78,7 @@ copy_path_if_present() {
 }
 
 transaction_managed_paths() {
-  printf '%s\n' "$VP_NODES_DB" "$VP_STATE_FILE" "$VP_GENERATED_DIR"
+  printf '%s\n' "$VP_NODES_DB" "$VP_ROTATIONS_DB" "$VP_STATE_FILE" "$VP_GENERATED_DIR"
 }
 
 transaction_snapshot() {
@@ -93,9 +95,10 @@ transaction_candidate() {
   candidate_root="$VP_TX_ACTIVE/candidate"
   mkdir -p "$candidate_root"
   [ -f "$VP_NODES_DB" ] && cp -p "$VP_NODES_DB" "$candidate_root/nodes.db" || : > "$candidate_root/nodes.db"
+  [ -f "$VP_ROTATIONS_DB" ] && cp -p "$VP_ROTATIONS_DB" "$candidate_root/credential-rotations.db" || : > "$candidate_root/credential-rotations.db"
   [ -f "$VP_STATE_FILE" ] && cp -p "$VP_STATE_FILE" "$candidate_root/state.env" || printf 'SCHEMA_VERSION=1\nACTIVE_CORE=none\n' > "$candidate_root/state.env"
   [ -d "$VP_GENERATED_DIR" ] && cp -R -p "$VP_GENERATED_DIR" "$candidate_root/generated" || mkdir -p "$candidate_root/generated"
-  chmod 600 "$candidate_root/nodes.db" "$candidate_root/state.env"
+  chmod 600 "$candidate_root/nodes.db" "$candidate_root/credential-rotations.db" "$candidate_root/state.env"
 }
 
 transaction_restore() {
@@ -154,12 +157,17 @@ validate_state_candidate() {
   candidate_root="$VP_TX_ACTIVE/candidate"
   [ -f "$candidate_root/state.env" ] || { error "候选状态文件不存在。"; return 1; }
   [ -f "$candidate_root/nodes.db" ] || { error "候选节点数据库不存在。"; return 1; }
+  [ -f "$candidate_root/credential-rotations.db" ] || { error "候选轮换数据库不存在。"; return 1; }
   if grep -Ev '^[A-Z][A-Z0-9_]*=[A-Za-z0-9._:/+-]*$|^$' "$candidate_root/state.env" >/dev/null 2>&1; then
     error "候选状态文件格式错误。"
     return 1
   fi
   if awk -F'|' 'NF && NF < 5 { bad=1 } END { exit bad ? 0 : 1 }' "$candidate_root/nodes.db" 2>/dev/null; then
     error "候选节点数据库存在不完整记录。"
+    return 1
+  fi
+  if awk -F'|' 'NF && NF != 6 { bad=1 } END { exit bad ? 0 : 1 }' "$candidate_root/credential-rotations.db" 2>/dev/null; then
+    error "候选凭据轮换数据库格式错误。"
     return 1
   fi
   printf 'validated\n' > "$VP_TX_ACTIVE/stage"
@@ -170,11 +178,14 @@ activate_state_candidate() {
   validate_state_candidate || return 1
   state_tmp="$VP_CONFIG_DIR/.state.env.$$"
   nodes_tmp="$VP_CONFIG_DIR/.nodes.db.$$"
+  rotations_tmp="$VP_CONFIG_DIR/.credential-rotations.db.$$"
   cp "$candidate_root/state.env" "$state_tmp" || return 1
   cp "$candidate_root/nodes.db" "$nodes_tmp" || { rm -f "$state_tmp"; return 1; }
-  chmod 600 "$state_tmp" "$nodes_tmp"
+  cp "$candidate_root/credential-rotations.db" "$rotations_tmp" || { rm -f "$state_tmp" "$nodes_tmp"; return 1; }
+  chmod 600 "$state_tmp" "$nodes_tmp" "$rotations_tmp"
   mv "$state_tmp" "$VP_STATE_FILE"
   mv "$nodes_tmp" "$VP_NODES_DB"
+  mv "$rotations_tmp" "$VP_ROTATIONS_DB"
   rm -rf "$VP_GENERATED_DIR"
   cp -R -p "$candidate_root/generated" "$VP_GENERATED_DIR"
   printf 'activated\n' > "$VP_TX_ACTIVE/stage"
@@ -390,6 +401,8 @@ yaml_quote() {
 render_mihomo_config() {
   nodes_file="$1"
   output_file="$2"
+  rotations_file="${3:-$VP_ROTATIONS_DB}"
+  render_now="$(date +%s 2>/dev/null || printf 0)"
   mkdir -p "$(dirname "$output_file")"
   {
     printf 'mixed-port: %s\n' "$VP_MIXED_PORT"
@@ -398,11 +411,13 @@ render_mihomo_config() {
     printf 'listeners:\n'
     while IFS='|' read -r proto name port uuid sni dest private_key public_key short_id; do
       [ -n "$proto" ] || continue
+      old_uuid="$(awk -F'|' -v n="$name" -v now="$render_now" '$1==n && $5+0>now {print $3; exit}' "$rotations_file" 2>/dev/null)"
       case "$proto" in
         reality)
           printf "  - name: '%s'\n" "$(yaml_quote "$name")"
           printf '    type: vless\n    port: %s\n    listen: 0.0.0.0\n' "$port"
           printf "    users:\n      - username: '%s'\n        uuid: '%s'\n" "$(yaml_quote "$name")" "$(yaml_quote "$uuid")"
+          [ -n "$old_uuid" ] && printf "      - username: '%s-old'\n        uuid: '%s'\n" "$(yaml_quote "$name")" "$(yaml_quote "$old_uuid")"
           printf '    tls: true\n    reality-config:\n'
           printf "      dest: '%s'\n      private-key: '%s'\n" "$(yaml_quote "$dest")" "$(yaml_quote "$private_key")"
           printf "      short-id:\n        - '%s'\n      server-names:\n        - '%s'\n" "$(yaml_quote "$short_id")" "$(yaml_quote "$sni")"
@@ -411,6 +426,7 @@ render_mihomo_config() {
           printf "  - name: '%s'\n" "$(yaml_quote "$name")"
           printf '    type: vless\n    port: %s\n    listen: 127.0.0.1\n    allow-insecure: true\n' "$port"
           printf "    users:\n      - username: '%s'\n        uuid: '%s'\n" "$(yaml_quote "$name")" "$(yaml_quote "$uuid")"
+          [ -n "$old_uuid" ] && printf "      - username: '%s-old'\n        uuid: '%s'\n" "$(yaml_quote "$name")" "$(yaml_quote "$old_uuid")"
           printf "    ws-path: '%s'\n" "$(yaml_quote "$sni")"
           ;;
       esac
@@ -550,7 +566,7 @@ argo_add() {
     abort_state_transaction; error "节点名称已存在。"; return 1
   fi
   printf 'argo|%s|%s|%s|%s|%s\n' "$name" "$port" "$uuid" "$path" "$host" >> "$candidate_root/nodes.db"
-  render_mihomo_config "$candidate_root/nodes.db" "$candidate_root/generated/mihomo.yaml"
+  render_mihomo_config "$candidate_root/nodes.db" "$candidate_root/generated/mihomo.yaml" "$candidate_root/credential-rotations.db"
   if ! validate_state_candidate || ! "$VP_CORE_BIN" -t -d "$VP_CONFIG_DIR" -f "$candidate_root/generated/mihomo.yaml" >/dev/null 2>&1; then
     abort_state_transaction; error "Argo 候选配置验证失败。"; return 1
   fi
@@ -638,7 +654,7 @@ core_install() {
   sed '/^ACTIVE_CORE=/d' "$candidate_root/state.env" > "$candidate_root/state.env.tmp"
   printf 'ACTIVE_CORE=mihomo\n' >> "$candidate_root/state.env.tmp"
   mv "$candidate_root/state.env.tmp" "$candidate_root/state.env"
-  render_mihomo_config "$candidate_root/nodes.db" "$candidate_root/generated/mihomo.yaml"
+  render_mihomo_config "$candidate_root/nodes.db" "$candidate_root/generated/mihomo.yaml" "$candidate_root/credential-rotations.db"
   if ! validate_state_candidate || ! "$VP_CORE_BIN" -t -d "$VP_CONFIG_DIR" -f "$candidate_root/generated/mihomo.yaml" >/dev/null 2>&1; then
     abort_state_transaction
     rollback_core_binary "$core_had_binary"
@@ -724,7 +740,7 @@ reality_add() {
     abort_state_transaction; error "节点名称已存在。"; return 1
   fi
   printf 'reality|%s|%s|%s|%s|%s:443|%s|%s|%s\n' "$name" "$port" "$uuid" "$sni" "$sni" "$private" "$public" "$short_id" >> "$candidate_root/nodes.db"
-  render_mihomo_config "$candidate_root/nodes.db" "$candidate_root/generated/mihomo.yaml"
+  render_mihomo_config "$candidate_root/nodes.db" "$candidate_root/generated/mihomo.yaml" "$candidate_root/credential-rotations.db"
   if ! validate_state_candidate || ! "$VP_CORE_BIN" -t -d "$VP_CONFIG_DIR" -f "$candidate_root/generated/mihomo.yaml" >/dev/null 2>&1; then
     abort_state_transaction; error "Reality 候选配置验证失败。"; return 1
   fi
@@ -744,6 +760,99 @@ public_ip() {
 show_nodes() {
   [ -s "$VP_NODES_DB" ] || { warn "当前没有节点。"; return 0; }
   awk -F'|' '{printf "%d. %s  协议=%s  端口=%s\n", NR,$2,$1,$3}' "$VP_NODES_DB"
+}
+
+rotate_credential() {
+  need_root || return 1
+  target="${1:-}"
+  grace_hours="${2:-24}"
+  [ -n "$target" ] || { error "请指定节点名称。"; return 1; }
+  case "$grace_hours" in ''|*[!0-9]*) error "宽限期必须是小时数。"; return 1 ;; esac
+  [ "$grace_hours" -ge 1 ] && [ "$grace_hours" -le 168 ] || { error "宽限期范围为 1-168 小时。"; return 1; }
+  record="$(awk -F'|' -v n="$target" '$2==n{print;exit}' "$VP_NODES_DB" 2>/dev/null)"
+  [ -n "$record" ] || { error "未找到节点。"; return 1; }
+  IFS='|' read -r proto name port old_uuid rest <<EOF
+$record
+EOF
+  case "$proto" in reality|argo) ;; *) error "该协议暂不支持凭据轮换。"; return 1 ;; esac
+  now="$(date +%s)"
+  if awk -F'|' -v n="$target" -v now="$now" '$1==n && $5+0>now{found=1} END{exit found?0:1}' "$VP_ROTATIONS_DB" 2>/dev/null; then
+    error "该节点已有进行中的轮换，请先验证并正式切换。"
+    return 1
+  fi
+  new_uuid="$(new_uuid)"
+  expires=$((now + grace_hours * 3600))
+  begin_state_transaction credential-rotate || return 1
+  candidate_root="$VP_TX_ACTIVE/candidate"
+  awk -F'|' -v OFS='|' -v n="$target" -v value="$new_uuid" '$2==n{$4=value}{print}' "$candidate_root/nodes.db" > "$candidate_root/nodes.db.tmp"
+  mv "$candidate_root/nodes.db.tmp" "$candidate_root/nodes.db"
+  awk -F'|' -v n="$target" -v now="$now" '!($1==n || $5+0<=now)' "$candidate_root/credential-rotations.db" > "$candidate_root/credential-rotations.db.tmp"
+  mv "$candidate_root/credential-rotations.db.tmp" "$candidate_root/credential-rotations.db"
+  printf '%s|%s|%s|%s|%s|%s\n' "$target" "$proto" "$old_uuid" "$new_uuid" "$expires" "$now" >> "$candidate_root/credential-rotations.db"
+  chmod 600 "$candidate_root/nodes.db" "$candidate_root/credential-rotations.db"
+  render_mihomo_config "$candidate_root/nodes.db" "$candidate_root/generated/mihomo.yaml" "$candidate_root/credential-rotations.db"
+  if ! validate_state_candidate || ! "$VP_CORE_BIN" -t -d "$VP_CONFIG_DIR" -f "$candidate_root/generated/mihomo.yaml" >/dev/null 2>&1; then
+    abort_state_transaction; error "轮换候选配置验证失败。"; return 1
+  fi
+  activate_state_candidate || { abort_state_transaction; return 1; }
+  if ! core_service_restart; then
+    abort_state_transaction; core_service_restart >/dev/null 2>&1 || true
+    error "轮换配置启动失败，已恢复旧凭据。"
+    return 1
+  fi
+  commit_state_transaction
+  ok "节点 $target 已进入凭据轮换期，新旧凭据将同时有效 $grace_hours 小时。"
+  warn "请执行 vp link $target 获取新链接，并用 vp test-node $target 验证；确认后执行 vp rotate-finalize $target。"
+}
+
+show_rotations() {
+  now="$(date +%s)"
+  count=0
+  while IFS='|' read -r name proto old_uuid new_uuid expires created; do
+    [ -n "$name" ] || continue
+    remaining=$((expires - now))
+    if [ "$remaining" -gt 0 ]; then
+      printf '%s  协议=%s  剩余=%s分钟\n' "$name" "$proto" "$((remaining / 60))"
+    else
+      printf '%s  协议=%s  状态=已到期待清理\n' "$name" "$proto"
+    fi
+    count=$((count + 1))
+  done < "$VP_ROTATIONS_DB" 2>/dev/null
+  [ "$count" -gt 0 ] || warn "当前没有凭据轮换记录。"
+}
+
+finalize_rotation() {
+  need_root || return 1
+  target="${1:-}"
+  [ -n "$target" ] || { error "请指定节点名称，或使用 --expired。"; return 1; }
+  now="$(date +%s)"
+  if [ "$target" = "--expired" ]; then
+    match_count="$(awk -F'|' -v now="$now" '$5+0<=now{n++}END{print n+0}' "$VP_ROTATIONS_DB" 2>/dev/null)"
+  else
+    match_count="$(awk -F'|' -v n="$target" '$1==n{c++}END{print c+0}' "$VP_ROTATIONS_DB" 2>/dev/null)"
+  fi
+  [ "$match_count" -gt 0 ] || { warn "没有需要完成的轮换。"; return 0; }
+  begin_state_transaction credential-finalize || return 1
+  candidate_root="$VP_TX_ACTIVE/candidate"
+  if [ "$target" = "--expired" ]; then
+    awk -F'|' -v now="$now" '$5+0>now' "$candidate_root/credential-rotations.db" > "$candidate_root/credential-rotations.db.tmp"
+  else
+    awk -F'|' -v n="$target" '$1!=n' "$candidate_root/credential-rotations.db" > "$candidate_root/credential-rotations.db.tmp"
+  fi
+  mv "$candidate_root/credential-rotations.db.tmp" "$candidate_root/credential-rotations.db"
+  chmod 600 "$candidate_root/credential-rotations.db"
+  render_mihomo_config "$candidate_root/nodes.db" "$candidate_root/generated/mihomo.yaml" "$candidate_root/credential-rotations.db"
+  if ! validate_state_candidate || ! "$VP_CORE_BIN" -t -d "$VP_CONFIG_DIR" -f "$candidate_root/generated/mihomo.yaml" >/dev/null 2>&1; then
+    abort_state_transaction; error "正式切换候选配置验证失败。"; return 1
+  fi
+  activate_state_candidate || { abort_state_transaction; return 1; }
+  if ! core_service_restart; then
+    abort_state_transaction; core_service_restart >/dev/null 2>&1 || true
+    error "正式切换失败，已恢复宽限期配置。"
+    return 1
+  fi
+  commit_state_transaction
+  ok "已完成 $match_count 项凭据轮换，旧凭据不再有效。"
 }
 
 show_node_link() {
@@ -914,6 +1023,11 @@ restore_backup() {
   [ -d "$VP_DATA_DIR" ] && cp -R -p "$VP_DATA_DIR/." "$extra/data"
   [ -f "$VP_CORE_ENV" ] && cp -p "$VP_CORE_ENV" "$extra/core.env"
   cp -p "$package/config/nodes.db" "$VP_TX_ACTIVE/candidate/nodes.db"
+  if [ -f "$package/config/credential-rotations.db" ]; then
+    cp -p "$package/config/credential-rotations.db" "$VP_TX_ACTIVE/candidate/credential-rotations.db"
+  else
+    : > "$VP_TX_ACTIVE/candidate/credential-rotations.db"
+  fi
   cp -p "$package/config/state.env" "$VP_TX_ACTIVE/candidate/state.env"
   rm -rf "$VP_TX_ACTIVE/candidate/generated"
   [ -d "$package/config/generated" ] && cp -R -p "$package/config/generated" "$VP_TX_ACTIVE/candidate/generated" || mkdir -p "$VP_TX_ACTIVE/candidate/generated"
@@ -959,6 +1073,16 @@ node_count() {
   fi
 }
 
+rotation_count() {
+  mode="${1:-active}"
+  [ -r "$VP_ROTATIONS_DB" ] || { printf '0'; return; }
+  now="$(date +%s)"
+  case "$mode" in
+    expired) awk -F'|' -v now="$now" '$5+0<=now{n++}END{print n+0}' "$VP_ROTATIONS_DB" ;;
+    *) awk -F'|' -v now="$now" '$5+0>now{n++}END{print n+0}' "$VP_ROTATIONS_DB" ;;
+  esac
+}
+
 show_status() {
   memory_snapshot
   printf '\nVPS-Node %s\n' "$VP_VERSION"
@@ -966,6 +1090,7 @@ show_status() {
   printf '代理核心：%s\n' "$(service_state "$VP_CORE_SERVICE")"
   printf 'Cloudflare Tunnel：%s\n' "$(service_state vps-node-tunnel)"
   printf '节点数量：%s\n' "$(node_count)"
+  printf '进行中凭据轮换：%s\n' "$(rotation_count active)"
   printf '\n内存（%s）：\n' "$MEM_SOURCE"
   printf '  实际工作内存：%s MiB\n' "$(bytes_to_mib "$MEM_WORKING_BYTES")"
   printf '  可回收文件缓存：%s MiB\n' "$(bytes_to_mib "$MEM_FILE_BYTES")"
@@ -1067,7 +1192,7 @@ layered_health_check() {
   fi
 
   permission_bad=0
-  for protected in "$VP_NODES_DB" "$VP_STATE_FILE" "$VP_CORE_ENV" "$VP_TUNNEL_TOKEN_FILE"; do
+  for protected in "$VP_NODES_DB" "$VP_ROTATIONS_DB" "$VP_STATE_FILE" "$VP_CORE_ENV" "$VP_TUNNEL_TOKEN_FILE"; do
     [ -e "$protected" ] || continue
     [ "$(file_mode "$protected")" = "600" ] || permission_bad=$((permission_bad + 1))
   done
@@ -1076,6 +1201,10 @@ layered_health_check() {
   else
     health_error "权限层：$permission_bad 个文件权限不安全。"
   fi
+  active_rotations="$(rotation_count active)"
+  expired_rotations="$(rotation_count expired)"
+  [ "$active_rotations" -gt 0 ] && health_warn "凭据层：$active_rotations 个节点处于新旧凭据宽限期。"
+  [ "$expired_rotations" -gt 0 ] && health_warn "凭据层：$expired_rotations 个到期旧凭据等待清理。"
 
   if [ -x "$VP_CORE_BIN" ]; then
     if [ -f "$VP_CORE_CONFIG" ] && "$VP_CORE_BIN" -t -d "$VP_CONFIG_DIR" -f "$VP_CORE_CONFIG" >/dev/null 2>&1; then
@@ -1164,7 +1293,7 @@ safe_repair() {
     recover_state_transaction || return 1
     repaired=$((repaired + 1))
   fi
-  for protected in "$VP_NODES_DB" "$VP_STATE_FILE" "$VP_CORE_ENV" "$VP_TUNNEL_TOKEN_FILE"; do
+  for protected in "$VP_NODES_DB" "$VP_ROTATIONS_DB" "$VP_STATE_FILE" "$VP_CORE_ENV" "$VP_TUNNEL_TOKEN_FILE"; do
     [ -e "$protected" ] || continue
     if [ "$(file_mode "$protected")" != "600" ]; then
       chmod 600 "$protected"
@@ -1237,6 +1366,9 @@ case "${1:-}" in
   nodes|list) show_nodes ;;
   link) shift; show_node_link "$@" ;;
   test-node|test) shift; test_node_end_to_end "$@" ;;
+  rotate|rotate-credential) shift; rotate_credential "$@" ;;
+  rotations|rotation-status) show_rotations ;;
+  rotate-finalize|rotation-finalize) shift; finalize_rotation "$@" ;;
   backup) shift; create_backup "$@" ;;
   restore) shift; restore_backup "$@" ;;
   status) show_status ;;
@@ -1247,7 +1379,7 @@ case "${1:-}" in
   uninstall) uninstall_project ;;
   debug-tx) shift; debug_transaction "$@" ;;
   help|-h|--help)
-    printf '用法：vp [status|doctor|health|repair|init|core-install|reality-add|tunnel-install|argo-add|nodes|link|test-node|backup|restore|uninstall|version]\n'
+    printf '用法：vp [status|doctor|health|repair|init|core-install|reality-add|tunnel-install|argo-add|nodes|link|test-node|rotate|rotations|rotate-finalize|backup|restore|uninstall|version]\n'
     ;;
   '') menu ;;
   *) error "未知命令：$1"; exit 2 ;;
