@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.0-dev.83
+
+- Persistent network configuration now requires the exact VPS-Node ownership marker, exactly one congestion-control field, exactly one qdisc field and no unknown content.
+- Verified optimization refuses external, malformed and orphan persistence before benchmarking or changing live sysctl values; rollback likewise refuses to delete configuration it cannot prove it owns.
+- Snapshot/config file states and both live parameters are bound across the baseline benchmark, and persistence states remain bound across the candidate retest.
+- A concurrent file change aborts with the original live parameters intact and without creating a rollback snapshot or overwriting the competing file.
+- Hosts already running BBR/fq outside VPS-Node are reported as externally managed; no fake rollback point or duplicate persistence is created.
+- Regression tests cover external-file preservation, mid-benchmark mutation, missing/duplicate fields, absent ownership markers, rollback refusal and externally enabled BBR/fq.
+
 ## 0.2.0-dev.82
 
 - Added `vp network-repair` for the only automatically provable anomaly: valid persistence whose live congestion control or qdisc has drifted.

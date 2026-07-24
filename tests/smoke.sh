@@ -560,6 +560,10 @@ cat > "$adaptive_curl" <<'ADAPTIVE_CURL'
 case "$*" in
   *generate_204*) printf '204|0.010000|0.020000|0.030000' ;;
   *__down*)
+    if [ -n "${VP_FAKE_MUTATE_NETWORK_CONFIG:-}" ] && [ -n "${VP_FAKE_MUTATE_ONCE_FILE:-}" ] && [ ! -e "$VP_FAKE_MUTATE_ONCE_FILE" ]; then
+      printf '# external network task\nnet.ipv4.tcp_congestion_control=cubic\n' > "$VP_FAKE_MUTATE_NETWORK_CONFIG"
+      : > "$VP_FAKE_MUTATE_ONCE_FILE"
+    fi
     [ "$CC" = bbr ] && speed="${VP_FAKE_BBR_SPEED:-2097152}" || speed=1048576
     printf '200|1024|%s|0.040000|0.100000' "$speed"
     ;;
@@ -586,6 +590,41 @@ VP_TEST_SERVER=127.0.0.1 VP_SKIP_SERVICE=1 \
 sh "$ROOT/vp.sh" network-optimize --dry-run >/dev/null
 grep -q '^CC=cubic$' "$sysctl_state"
 [ ! -e "$network_config" ]
+printf '# external network task\nnet.ipv4.tcp_congestion_control=cubic\n' > "$network_config"
+external_network_config_hash="$(sha256sum "$network_config" | awk '{print $1}')"
+if VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log" \
+  VP_LIB_DIR="$TMP/dns-usr" VP_CORE_BIN="$TMP/dns-usr/bin/mihomo" \
+  VP_CORE_BACKUP_BIN="$TMP/dns-usr/bin/mihomo.previous" VP_CURL_BIN="$adaptive_curl" \
+  VP_SYSCTL_BIN="$fake_sysctl" VP_FAKE_SYSCTL_STATE="$sysctl_state" \
+  VP_SYSCTL_CONFIG="$network_config" VP_NETWORK_SNAPSHOT="$network_snapshot" \
+  VP_NETWORK_CONFIRM=APPLY VP_TEST_SERVER=127.0.0.1 VP_SKIP_SERVICE=1 \
+  sh "$ROOT/vp.sh" network-optimize renamed-node 2 >/dev/null 2>&1; then
+  printf 'external sysctl configuration was unexpectedly overwritten\n' >&2
+  exit 1
+fi
+[ "$(sha256sum "$network_config" | awk '{print $1}')" = "$external_network_config_hash" ]
+grep -q '^CC=cubic$' "$sysctl_state"
+grep -q '^QDISC=pfifo_fast$' "$sysctl_state"
+[ ! -e "$network_snapshot" ]
+rm -f "$network_config"
+
+network_mutation_once="$TMP/network-mutated-during-baseline"
+if VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log" \
+  VP_LIB_DIR="$TMP/dns-usr" VP_CORE_BIN="$TMP/dns-usr/bin/mihomo" \
+  VP_CORE_BACKUP_BIN="$TMP/dns-usr/bin/mihomo.previous" VP_CURL_BIN="$adaptive_curl" \
+  VP_SYSCTL_BIN="$fake_sysctl" VP_FAKE_SYSCTL_STATE="$sysctl_state" \
+  VP_FAKE_MUTATE_NETWORK_CONFIG="$network_config" VP_FAKE_MUTATE_ONCE_FILE="$network_mutation_once" \
+  VP_SYSCTL_CONFIG="$network_config" VP_NETWORK_SNAPSHOT="$network_snapshot" \
+  VP_NETWORK_CONFIRM=APPLY VP_TEST_SERVER=127.0.0.1 VP_SKIP_SERVICE=1 \
+  sh "$ROOT/vp.sh" network-optimize renamed-node 2 >/dev/null 2>&1; then
+  printf 'network persistence change during baseline unexpectedly succeeded\n' >&2
+  exit 1
+fi
+grep -q '^# external network task$' "$network_config"
+grep -q '^CC=cubic$' "$sysctl_state"
+grep -q '^QDISC=pfifo_fast$' "$sysctl_state"
+[ ! -e "$network_snapshot" ]
+rm -f "$network_config" "$network_mutation_once"
 for network_fail_phase in after-snapshot before-config-commit; do
   if VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log" \
     VP_LIB_DIR="$TMP/dns-usr" VP_CORE_BIN="$TMP/dns-usr/bin/mihomo" \
@@ -680,6 +719,8 @@ grep -q '^QDISC=fq$' "$sysctl_state"
 [ "$(sha256sum "$network_config" | awk '{print $1}')" = "$repair_config_hash" ]
 [ "$(sha256sum "$network_snapshot" | awk '{print $1}')" = "$repair_snapshot_hash" ]
 
+printf '# external network task\nnet.ipv4.tcp_congestion_control=bbr\nnet.core.default_qdisc=fq\n' > "$network_config"
+printf '%s\n' "$(run_network_status)" | grep -q 'VPS-Node 已验证优化：持久化记录异常'
 printf '# Managed by VPS-Node after verified before/after benchmark\nnet.ipv4.tcp_congestion_control=bbr\n' > "$network_config"
 printf '%s\n' "$(run_network_status)" | grep -q 'VPS-Node 已验证优化：持久化记录异常'
 if VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log" \
@@ -689,6 +730,21 @@ if VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-
   printf 'invalid persistence was unexpectedly auto-repaired\n' >&2
   exit 1
 fi
+invalid_network_config_hash="$(sha256sum "$network_config" | awk '{print $1}')"
+invalid_network_snapshot_hash="$(sha256sum "$network_snapshot" | awk '{print $1}')"
+if VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log" \
+  VP_LIB_DIR="$TMP/dns-usr" VP_SYSCTL_BIN="$fake_sysctl" VP_FAKE_SYSCTL_STATE="$sysctl_state" \
+  VP_SYSCTL_CONFIG="$network_config" VP_NETWORK_SNAPSHOT="$network_snapshot" \
+  VP_NETWORK_ROLLBACK_CONFIRM=ROLLBACK sh "$ROOT/vp.sh" network-rollback >/dev/null 2>&1; then
+  printf 'invalid owned persistence was unexpectedly removed by rollback\n' >&2
+  exit 1
+fi
+[ "$(sha256sum "$network_config" | awk '{print $1}')" = "$invalid_network_config_hash" ]
+[ "$(sha256sum "$network_snapshot" | awk '{print $1}')" = "$invalid_network_snapshot_hash" ]
+grep -q '^CC=bbr$' "$sysctl_state"
+grep -q '^QDISC=fq$' "$sysctl_state"
+printf '# Managed by VPS-Node after verified before/after benchmark\nnet.ipv4.tcp_congestion_control=bbr\nnet.ipv4.tcp_congestion_control=bbr\nnet.core.default_qdisc=fq\n' > "$network_config"
+printf '%s\n' "$(run_network_status)" | grep -q 'VPS-Node 已验证优化：持久化记录异常'
 printf '# Managed by VPS-Node after verified before/after benchmark\nnet.ipv4.tcp_congestion_control=bbr\nnet.core.default_qdisc=fq\n' > "$network_config"
 rm -f "$network_config"
 printf '%s\n' "$(run_network_status)" | grep -q 'VPS-Node 已验证优化：仅有回滚记录'
@@ -746,6 +802,18 @@ grep -q '^CC=cubic$' "$sysctl_state"
 grep -q '^QDISC=pfifo_fast$' "$sysctl_state"
 [ ! -e "$network_config" ]
 [ ! -e "$network_snapshot" ]
+printf 'CC=bbr\nQDISC=fq\n' > "$sysctl_state"
+external_bbr_output="$(VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log" \
+  VP_LIB_DIR="$TMP/dns-usr" VP_CORE_BIN="$TMP/dns-usr/bin/mihomo" \
+  VP_CORE_BACKUP_BIN="$TMP/dns-usr/bin/mihomo.previous" VP_CURL_BIN="$adaptive_curl" \
+  VP_SYSCTL_BIN="$fake_sysctl" VP_FAKE_SYSCTL_STATE="$sysctl_state" \
+  VP_SYSCTL_CONFIG="$network_config" VP_NETWORK_SNAPSHOT="$network_snapshot" \
+  VP_NETWORK_CONFIRM=APPLY VP_TEST_SERVER=127.0.0.1 VP_SKIP_SERVICE=1 \
+  sh "$ROOT/vp.sh" network-optimize renamed-node 2)"
+printf '%s\n' "$external_bbr_output" | grep -q '不是由 VPS-Node 验证和管理'
+[ ! -e "$network_config" ]
+[ ! -e "$network_snapshot" ]
+printf 'CC=cubic\nQDISC=pfifo_fast\n' > "$sysctl_state"
 if VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log" \
   VP_LIB_DIR="$TMP/dns-usr" VP_CORE_BIN="$TMP/dns-usr/bin/mihomo" \
   VP_CORE_BACKUP_BIN="$TMP/dns-usr/bin/mihomo.previous" VP_CURL_BIN="$adaptive_curl" \

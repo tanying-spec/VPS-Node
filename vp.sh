@@ -2,7 +2,7 @@
 
 set -u
 
-VP_VERSION="0.2.0-dev.82"
+VP_VERSION="0.2.0-dev.83"
 VP_CONFIG_DIR="${VP_CONFIG_DIR:-/etc/vps-node}"
 VP_DATA_DIR="${VP_DATA_DIR:-/var/lib/vps-node}"
 VP_LOG_DIR="${VP_LOG_DIR:-/var/log/vps-node}"
@@ -2336,6 +2336,45 @@ EOF
   rm -f "$results"
 }
 
+parse_network_snapshot_file() {
+  parsed_network_snapshot_path="$1"
+  [ -f "$parsed_network_snapshot_path" ] && [ ! -L "$parsed_network_snapshot_path" ] && [ -r "$parsed_network_snapshot_path" ] || return 1
+  parsed_network_snapshot_values="$(awk -F= '
+    /^[[:space:]]*$/ { next }
+    $1=="BEFORE_CC" && NF==2 { cc_count++; cc=$2; next }
+    $1=="BEFORE_QDISC" && NF==2 { qdisc_count++; qdisc=$2; next }
+    { invalid=1 }
+    END {
+      if (invalid || cc_count != 1 || qdisc_count != 1 ||
+          cc !~ /^[A-Za-z0-9_-]+$/ || qdisc !~ /^[A-Za-z0-9_-]+$/) exit 1
+      printf "%s|%s", cc, qdisc
+    }
+  ' "$parsed_network_snapshot_path" 2>/dev/null)" || return 1
+  [ -n "$parsed_network_snapshot_values" ] || return 1
+  PARSED_NETWORK_BEFORE_CC="${parsed_network_snapshot_values%%|*}"
+  PARSED_NETWORK_BEFORE_QDISC="${parsed_network_snapshot_values#*|}"
+}
+
+parse_network_config_file() {
+  parsed_network_config_path="$1"
+  [ -f "$parsed_network_config_path" ] && [ ! -L "$parsed_network_config_path" ] && [ -r "$parsed_network_config_path" ] || return 1
+  parsed_network_config_values="$(awk -F= '
+    /^[[:space:]]*$/ { next }
+    $0=="# Managed by VPS-Node after verified before/after benchmark" { marker_count++; next }
+    $1=="net.ipv4.tcp_congestion_control" && NF==2 { cc_count++; cc=$2; next }
+    $1=="net.core.default_qdisc" && NF==2 { qdisc_count++; qdisc=$2; next }
+    { invalid=1 }
+    END {
+      if (invalid || marker_count != 1 || cc_count != 1 || qdisc_count != 1 ||
+          cc !~ /^[A-Za-z0-9_-]+$/ || qdisc !~ /^[A-Za-z0-9_-]+$/) exit 1
+      printf "%s|%s", cc, qdisc
+    }
+  ' "$parsed_network_config_path" 2>/dev/null)" || return 1
+  [ -n "$parsed_network_config_values" ] || return 1
+  PARSED_NETWORK_TARGET_CC="${parsed_network_config_values%%|*}"
+  PARSED_NETWORK_TARGET_QDISC="${parsed_network_config_values#*|}"
+}
+
 inspect_network_optimization() {
   NETWORK_OPT_STATE=none
   NETWORK_OPT_EXPECTED_CC=unknown
@@ -2358,52 +2397,12 @@ inspect_network_optimization() {
     return 0
   fi
 
-  if [ ! -f "$VP_NETWORK_SNAPSHOT" ] || [ -L "$VP_NETWORK_SNAPSHOT" ] || [ ! -r "$VP_NETWORK_SNAPSHOT" ] || \
-     [ ! -f "$VP_SYSCTL_CONFIG" ] || [ -L "$VP_SYSCTL_CONFIG" ] || [ ! -r "$VP_SYSCTL_CONFIG" ]; then
+  if ! parse_network_snapshot_file "$VP_NETWORK_SNAPSHOT" || ! parse_network_config_file "$VP_SYSCTL_CONFIG"; then
     NETWORK_OPT_STATE=persistence-invalid
     return 0
   fi
-
-  network_snapshot_values="$(awk -F= '
-    /^[[:space:]]*$/ { next }
-    $1=="BEFORE_CC" && NF==2 { cc_count++; cc=$2; next }
-    $1=="BEFORE_QDISC" && NF==2 { qdisc_count++; qdisc=$2; next }
-    { invalid=1 }
-    END {
-      if (invalid || cc_count != 1 || qdisc_count != 1 ||
-          cc !~ /^[A-Za-z0-9_-]+$/ || qdisc !~ /^[A-Za-z0-9_-]+$/) exit 1
-      printf "%s|%s", cc, qdisc
-    }
-  ' "$VP_NETWORK_SNAPSHOT" 2>/dev/null)" || {
-    NETWORK_OPT_STATE=persistence-invalid
-    return 0
-  }
-  [ -n "$network_snapshot_values" ] || {
-    NETWORK_OPT_STATE=persistence-invalid
-    return 0
-  }
-
-  network_config_values="$(awk -F= '
-    /^[[:space:]]*$/ || /^[[:space:]]*#/ { next }
-    $1=="net.ipv4.tcp_congestion_control" && NF==2 { cc_count++; cc=$2; next }
-    $1=="net.core.default_qdisc" && NF==2 { qdisc_count++; qdisc=$2; next }
-    { invalid=1 }
-    END {
-      if (invalid || cc_count != 1 || qdisc_count != 1 ||
-          cc !~ /^[A-Za-z0-9_-]+$/ || qdisc !~ /^[A-Za-z0-9_-]+$/) exit 1
-      printf "%s|%s", cc, qdisc
-    }
-  ' "$VP_SYSCTL_CONFIG" 2>/dev/null)" || {
-    NETWORK_OPT_STATE=persistence-invalid
-    return 0
-  }
-  [ -n "$network_config_values" ] || {
-    NETWORK_OPT_STATE=persistence-invalid
-    return 0
-  }
-
-  NETWORK_OPT_EXPECTED_CC="${network_config_values%%|*}"
-  NETWORK_OPT_EXPECTED_QDISC="${network_config_values#*|}"
+  NETWORK_OPT_EXPECTED_CC="$PARSED_NETWORK_TARGET_CC"
+  NETWORK_OPT_EXPECTED_QDISC="$PARSED_NETWORK_TARGET_QDISC"
   if [ "$NETWORK_OPT_LIVE_CC" != "$NETWORK_OPT_EXPECTED_CC" ] || \
      [ "$NETWORK_OPT_LIVE_QDISC" != "$NETWORK_OPT_EXPECTED_QDISC" ]; then
     NETWORK_OPT_STATE=runtime-drift
@@ -2585,14 +2584,17 @@ network_rollback() {
   need_root || return 1
   quiet=0
   [ "${1:-}" = "--quiet" ] && quiet=1
-  if [ ! -r "$VP_NETWORK_SNAPSHOT" ]; then
-    [ ! -e "$VP_SYSCTL_CONFIG" ] || { error "发现网络配置但缺少回滚记录，拒绝自动删除。"; return 1; }
+  if [ ! -e "$VP_NETWORK_SNAPSHOT" ] && [ ! -L "$VP_NETWORK_SNAPSHOT" ]; then
+    { [ ! -e "$VP_SYSCTL_CONFIG" ] && [ ! -L "$VP_SYSCTL_CONFIG" ]; } || { error "发现网络配置但缺少回滚记录，拒绝自动删除。"; return 1; }
     [ "$quiet" -eq 1 ] || warn "没有可回滚的网络优化记录。"
     return 0
   fi
-  before_cc="$(awk -F= '$1=="BEFORE_CC"{print $2;exit}' "$VP_NETWORK_SNAPSHOT")"
-  before_qdisc="$(awk -F= '$1=="BEFORE_QDISC"{print $2;exit}' "$VP_NETWORK_SNAPSHOT")"
-  case "$before_cc$before_qdisc" in *[!A-Za-z0-9_-]*) error "网络回滚记录格式无效。"; return 1 ;; esac
+  parse_network_snapshot_file "$VP_NETWORK_SNAPSHOT" || { error "网络回滚记录不是 VPS-Node 可安全使用的严格格式。"; return 1; }
+  before_cc="$PARSED_NETWORK_BEFORE_CC"
+  before_qdisc="$PARSED_NETWORK_BEFORE_QDISC"
+  if [ -e "$VP_SYSCTL_CONFIG" ] || [ -L "$VP_SYSCTL_CONFIG" ]; then
+    parse_network_config_file "$VP_SYSCTL_CONFIG" || { error "持久化网络配置缺少 VPS-Node 所有权标记或格式异常，拒绝删除。"; return 1; }
+  fi
   approved_network_snapshot_state="$(managed_file_state "$VP_NETWORK_SNAPSHOT")"
   approved_network_config_state="$(managed_file_state "$VP_SYSCTL_CONFIG")"
   rollback_current_cc="$(network_sysctl_value net.ipv4.tcp_congestion_control || true)"
@@ -2697,10 +2699,41 @@ network_optimize_verified() {
     return 0
   fi
   [ "$current_cc" != unknown ] && [ "$current_qdisc" != unknown ] || { error "无法读取当前网络参数。"; return 1; }
+  inspect_network_optimization
+  case "$NETWORK_OPT_STATE" in
+    persistence-invalid)
+      error "现有网络持久化文件缺少 VPS-Node 所有权标记或格式异常，拒绝测速和覆盖。"
+      return 1
+      ;;
+    orphan-snapshot)
+      error "发现孤立网络回滚记录，拒绝在来源未确认前创建新持久化配置。"
+      return 1
+      ;;
+    orphan-config)
+      error "发现缺少安全回滚点的持久化配置，拒绝测速和覆盖。"
+      return 1
+      ;;
+  esac
   if [ "$current_cc" = "$candidate_cc" ] && [ "$current_qdisc" = "$candidate_qdisc" ]; then
-    ok "候选网络参数已经生效，无需重复应用。"
-    return 0
+    case "$NETWORK_OPT_STATE" in
+      active)
+        ok "VPS-Node 已验证网络参数正在生效，无需重复应用。"
+        return 0
+        ;;
+      none)
+        warn "系统已启用 $candidate_cc / $candidate_qdisc，但不是由 VPS-Node 验证和管理；不会伪造回滚点或重复写入配置。"
+        return 0
+        ;;
+      runtime-drift)
+        error "实时参数与候选值相同，但和现有持久化目标冲突；请先执行 vp network 查看并处理冲突。"
+        return 1
+        ;;
+    esac
   fi
+  approved_network_opt_snapshot_state="$(managed_file_state "$VP_NETWORK_SNAPSHOT")"
+  approved_network_opt_config_state="$(managed_file_state "$VP_SYSCTL_CONFIG")"
+  approved_network_opt_live_cc="$current_cc"
+  approved_network_opt_live_qdisc="$current_qdisc"
   if [ -z "$target" ]; then
     target="$(awk -F'|' '$1=="reality"{print $2;exit} END{if(!NR)exit}' "$VP_NODES_DB" 2>/dev/null)"
     [ -n "$target" ] || target="$(awk -F'|' 'NF{print $2;exit}' "$VP_NODES_DB" 2>/dev/null)"
@@ -2723,6 +2756,10 @@ network_optimize_verified() {
     return 1
   fi
   [ -s "$before_result" ] || { rm -rf "$benchmark_dir"; error "基线测速没有有效结果，未修改网络参数。"; return 1; }
+  [ "$(managed_file_state "$VP_NETWORK_SNAPSHOT")" = "$approved_network_opt_snapshot_state" ] || { rm -rf "$benchmark_dir"; error "基线测速期间网络回滚记录发生变化，未修改参数。"; return 1; }
+  [ "$(managed_file_state "$VP_SYSCTL_CONFIG")" = "$approved_network_opt_config_state" ] || { rm -rf "$benchmark_dir"; error "基线测速期间持久化网络配置发生变化，未修改参数。"; return 1; }
+  [ "$(network_sysctl_value net.ipv4.tcp_congestion_control || true)" = "$approved_network_opt_live_cc" ] || { rm -rf "$benchmark_dir"; error "基线测速期间拥塞控制参数发生变化，未应用候选值。"; return 1; }
+  [ "$(network_sysctl_value net.core.default_qdisc || true)" = "$approved_network_opt_live_qdisc" ] || { rm -rf "$benchmark_dir"; error "基线测速期间队列规则发生变化，未应用候选值。"; return 1; }
   printf '\n[2/3] 临时应用候选参数\n'
   if ! "$VP_SYSCTL_BIN" -w "net.ipv4.tcp_congestion_control=$candidate_cc" >/dev/null 2>&1 || \
      ! "$VP_SYSCTL_BIN" -w "net.core.default_qdisc=$candidate_qdisc" >/dev/null 2>&1; then
@@ -2748,29 +2785,28 @@ network_optimize_verified() {
     error "复测未通过性能门槛，已自动恢复原网络参数。"
     return 1
   fi
-  if [ -e "$VP_NETWORK_SNAPSHOT" ]; then
-    if [ ! -f "$VP_NETWORK_SNAPSHOT" ] || [ ! -r "$VP_NETWORK_SNAPSHOT" ]; then
-      network_restore_values "$current_cc" "$current_qdisc" >/dev/null 2>&1 || true
-      rm -rf "$benchmark_dir"
-      error "现有网络回滚点不是可读普通文件，已恢复原参数并拒绝覆盖。"
-      return 1
-    fi
-    saved_before_cc="$(awk -F= '$1=="BEFORE_CC"{print $2;exit}' "$VP_NETWORK_SNAPSHOT")"
-    saved_before_qdisc="$(awk -F= '$1=="BEFORE_QDISC"{print $2;exit}' "$VP_NETWORK_SNAPSHOT")"
-    case "$saved_before_cc$saved_before_qdisc" in
-      ''|*[!A-Za-z0-9_-]*)
-        network_restore_values "$current_cc" "$current_qdisc" >/dev/null 2>&1 || true
-        rm -rf "$benchmark_dir"
-        error "现有网络回滚点格式无效，已恢复原参数并拒绝覆盖。"
-        return 1
-        ;;
-    esac
-  fi
-  if [ -e "$VP_SYSCTL_CONFIG" ] && [ ! -f "$VP_SYSCTL_CONFIG" ]; then
+  if [ "$(managed_file_state "$VP_NETWORK_SNAPSHOT")" != "$approved_network_opt_snapshot_state" ] || \
+     [ "$(managed_file_state "$VP_SYSCTL_CONFIG")" != "$approved_network_opt_config_state" ]; then
     network_restore_values "$current_cc" "$current_qdisc" >/dev/null 2>&1 || true
     rm -rf "$benchmark_dir"
-    error "现有网络配置不是普通文件，已恢复原参数并拒绝覆盖。"
+    error "复测期间网络持久化文件发生变化，已恢复原参数并拒绝覆盖。"
     return 1
+  fi
+  if [ -e "$VP_NETWORK_SNAPSHOT" ]; then
+    if ! parse_network_snapshot_file "$VP_NETWORK_SNAPSHOT"; then
+      network_restore_values "$current_cc" "$current_qdisc" >/dev/null 2>&1 || true
+      rm -rf "$benchmark_dir"
+      error "现有网络回滚点格式异常，已恢复原参数并拒绝覆盖。"
+      return 1
+    fi
+  fi
+  if [ -e "$VP_SYSCTL_CONFIG" ] || [ -L "$VP_SYSCTL_CONFIG" ]; then
+    if ! parse_network_config_file "$VP_SYSCTL_CONFIG"; then
+      network_restore_values "$current_cc" "$current_qdisc" >/dev/null 2>&1 || true
+      rm -rf "$benchmark_dir"
+      error "现有网络配置缺少 VPS-Node 所有权标记或格式异常，已恢复原参数并拒绝覆盖。"
+      return 1
+    fi
   fi
   if ! mkdir -p "$(dirname "$VP_SYSCTL_CONFIG")" "$(dirname "$VP_NETWORK_SNAPSHOT")"; then
     network_restore_values "$current_cc" "$current_qdisc" >/dev/null 2>&1 || true
