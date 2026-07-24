@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.0-dev.56
+
+- Mihomo-lite-argo migration now accepts only a readable regular source database and rejects symlinks or special files.
+- The source SHA-256 is captured before parsing and rechecked after `MIGRATE` confirmation; any change aborts before backup or transaction creation.
+- Imported listener ports are rechecked after confirmation to close the preview/approval timing window.
+- Regression tests prove symlink rejection and that a source mutation during confirmation produces no node change and no migration backup side effect.
+
 ## 0.2.0-dev.55
 
 - Dashboard next actions now show the complete main-menu and submenu route instead of implying that entering a top-level menu performs the action directly.

@@ -337,6 +337,29 @@ migration_preview="$(VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_
   VP_LIB_DIR="$TMP/dns-usr" VP_CORE_BIN="$TMP/dns-usr/bin/mihomo" VP_SKIP_SERVICE=1 \
   sh "$ROOT/vp.sh" migrate-mh "$legacy_db" --dry-run)"
 printf '%s\n' "$migration_preview" | grep -q '可无损导入 2，协议不支持 1，字段/模式不可无损转换 1'
+ln -s "$legacy_db" "$TMP/legacy-nodes-link.db"
+if VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log" \
+  VP_LIB_DIR="$TMP/dns-usr" VP_CORE_BIN="$TMP/dns-usr/bin/mihomo" VP_SKIP_SERVICE=1 \
+  sh "$ROOT/vp.sh" migrate-mh "$TMP/legacy-nodes-link.db" --dry-run >/dev/null 2>&1; then
+  printf 'symlink migration source unexpectedly accepted\n' >&2
+  exit 1
+fi
+migration_race_db="$TMP/legacy-nodes-race.db"
+cp "$legacy_db" "$migration_race_db"
+migration_nodes_before="$(sha256sum "$TMP/dns-etc/nodes.db" | awk '{print $1}')"
+migration_backups_before="$(find "$TMP/dns-lib/backups" -type f 2>/dev/null | wc -l | tr -d ' ')"
+(sleep 1; printf '\n# changed during confirmation\n' >> "$migration_race_db") &
+migration_mutator_pid=$!
+if (sleep 2; printf 'MIGRATE\n') | \
+  VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log" \
+  VP_LIB_DIR="$TMP/dns-usr" VP_CORE_BIN="$TMP/dns-usr/bin/mihomo" VP_SKIP_SERVICE=1 \
+  sh "$ROOT/vp.sh" migrate-mh "$migration_race_db" --apply >/dev/null 2>&1; then
+  printf 'migration source change during confirmation unexpectedly accepted\n' >&2
+  exit 1
+fi
+wait "$migration_mutator_pid"
+[ "$(sha256sum "$TMP/dns-etc/nodes.db" | awk '{print $1}')" = "$migration_nodes_before" ]
+[ "$(find "$TMP/dns-lib/backups" -type f 2>/dev/null | wc -l | tr -d ' ')" = "$migration_backups_before" ]
 VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log" \
 VP_LIB_DIR="$TMP/dns-usr" VP_CORE_BIN="$TMP/dns-usr/bin/mihomo" \
 VP_CORE_BACKUP_BIN="$TMP/dns-usr/bin/mihomo.previous" VP_MIGRATE_CONFIRM=MIGRATE VP_SKIP_SERVICE=1 \

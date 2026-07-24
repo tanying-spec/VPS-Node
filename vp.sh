@@ -2,7 +2,7 @@
 
 set -u
 
-VP_VERSION="0.2.0-dev.55"
+VP_VERSION="0.2.0-dev.56"
 VP_CONFIG_DIR="${VP_CONFIG_DIR:-/etc/vps-node}"
 VP_DATA_DIR="${VP_DATA_DIR:-/var/lib/vps-node}"
 VP_LOG_DIR="${VP_LOG_DIR:-/var/log/vps-node}"
@@ -2593,7 +2593,10 @@ migrate_from_mihomo_lite() {
   case "$source_db" in /*) ;; *) error "旧项目数据库必须使用绝对路径。"; return 2 ;; esac
   case "$mode" in --dry-run|--apply) ;; *) error "迁移模式只能是 --dry-run 或 --apply。"; return 2 ;; esac
   [ -r "$source_db" ] || { error "无法读取旧项目节点数据库：$source_db"; return 1; }
+  [ -f "$source_db" ] && [ ! -L "$source_db" ] || { error "旧项目节点数据库必须是普通文件，不能使用符号链接或特殊文件。"; return 1; }
   [ "$source_db" != "$VP_NODES_DB" ] || { error "源数据库不能是当前 VPS-Node 数据库。"; return 1; }
+  source_hash_before="$(sha256_file "$source_db" 2>/dev/null | tr 'A-F' 'a-f')"
+  [ -n "$source_hash_before" ] || { error "无法为旧项目节点数据库生成 SHA-256。"; return 1; }
   import_tmp="$(mktemp /tmp/vp-migrate-mh.XXXXXX)" || return 1
   : > "$import_tmp"
   supported=0
@@ -2657,6 +2660,18 @@ migrate_from_mihomo_lite() {
     read -r answer || true
     [ "$answer" = MIGRATE ] || { rm -f "$import_tmp"; warn "已取消。"; return 2; }
   fi
+  source_hash_after="$(sha256_file "$source_db" 2>/dev/null | tr 'A-F' 'a-f')"
+  if [ -z "$source_hash_after" ] || [ "$source_hash_before" != "$source_hash_after" ]; then
+    rm -f "$import_tmp"
+    error "确认期间旧项目节点数据库发生变化，已中止迁移；请重新预览并确认。"
+    return 1
+  fi
+  runtime_conflict=0
+  while IFS='|' read -r import_proto import_name import_port import_rest; do
+    [ -n "$import_proto" ] || continue
+    port_in_use "$import_port" && runtime_conflict=$((runtime_conflict + 1))
+  done < "$import_tmp"
+  [ "$runtime_conflict" -eq 0 ] || { rm -f "$import_tmp"; error "确认后发现待导入端口已被占用，未执行迁移。"; return 1; }
   create_backup "$VP_BACKUP_DIR" >/dev/null || { rm -f "$import_tmp"; error "迁移前备份失败。"; return 1; }
   begin_state_transaction migrate-mihomo-lite || { rm -f "$import_tmp"; return 1; }
   candidate_root="$VP_TX_ACTIVE/candidate"
