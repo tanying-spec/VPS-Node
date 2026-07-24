@@ -147,7 +147,7 @@ network_output="$(VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG
   VP_SYSCTL_CONFIG="$network_config" VP_NETWORK_SNAPSHOT="$network_snapshot" \
   VP_NETWORK_CONFIRM=APPLY VP_TEST_SERVER=127.0.0.1 VP_SKIP_SERVICE=1 \
   sh "$ROOT/vp.sh" network-optimize renamed-node 2)"
-printf '%s\n' "$network_output" | grep -q '1.00 -> 2.00 MiB/s'
+printf '%s\n' "$network_output" | grep -q '2.00 -> 4.00 MiB/s'
 grep -q '^CC=bbr$' "$sysctl_state"
 grep -q '^QDISC=fq$' "$sysctl_state"
 [ -s "$network_config" ]
