@@ -16,7 +16,7 @@ powershell -ExecutionPolicy Bypass -File .\tests\run_authorized_host.ps1 -Prefli
 
 预检会验证固定公网 IP、root/Alpine、工具、Mihomo、正式状态可读取、临时空间和测试下载端点；默认还检查 cgroup v2 memory 条件。附带四项独立 Tunnel 参数时会额外检查 Token 与正式 Token 不同、域名未被正式节点使用、源站端口空闲、cloudflared 可用和边缘域名可达。输出不会包含实际 Token、域名、路径、节点凭据或二进制路径。
 
-该入口固定连接 `root@134.209.180.134:18750`，强制 `BatchMode=yes`、关闭密码和键盘交互认证，仅使用专用公钥。它只上传 `vp.sh`、校验文件和三个验收脚本到随机 `/tmp`，不会把整个工作区、Token 或其他本地文件上传。成功后证据保存在本地 `evidence/<run-id>`（已从 Git 忽略），远端临时源码无论成功失败都会尝试清理。
+该入口固定连接 `root@134.209.180.134:18750`，强制 `BatchMode=yes`、关闭密码和键盘交互认证，仅使用专用公钥。它只上传 `vp.sh`、校验文件和四个验收脚本到随机 `/tmp`，不会把整个工作区、Token 或其他本地文件上传。成功后证据保存在本地 `evidence/<run-id>`（已从 Git 忽略），远端临时源码无论成功失败都会尝试清理。
 
 如测试机尚未授权专用公钥，请在测试机控制台执行一次（不会更改 SSH 端口或认证策略）：
 
@@ -36,7 +36,7 @@ powershell -ExecutionPolicy Bypass -File .\tests\run_authorized_host.ps1 -SkipMe
 若要同时跳过内存和 CPU 资源档位，只运行功能验收：
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\tests\run_authorized_host.ps1 -SkipMemoryProfiles -SkipCpuProfiles
+powershell -ExecutionPolicy Bypass -File .\tests\run_authorized_host.ps1 -SkipMemoryProfiles -SkipCpuProfiles -SkipDnsProfiles
 ```
 
 如需由同一个固定入口同时执行完全独立的 Cloudflare Tunnel 公网验收，可使用：
@@ -60,6 +60,8 @@ powershell -ExecutionPolicy Bypass -File .\tests\run_authorized_host.ps1 -SelfTe
 默认入口随后会执行十五档真实内存验收，而不是只计算参数。测试机必须提供可委派的 cgroup v2 memory controller；档位为 64、96、97、128、160、161、192、256、320、321、512、640、641、1024、2048 MiB，覆盖全部策略切换边界前后。每档都会施加独立硬上限，启动真实 Mihomo，验证代理出口并完成四路并发、每路 1 MiB 的精确字节传输，记录峰值及 OOM 后清理。若环境无法提供真正的 cgroup 内存约束，验收会明确失败，不会降级成模拟结果。
 
 默认入口也会执行真实 CPU quota 验收。0.5、0.999、1 核在任何测试机必测；只有测试机确实具备至少 2 或 4 个在线 CPU 时，才继续测试更高配额。配置生成过程本身和真实 Mihomo 都位于对应 CPU cgroup 中，避免从父环境读取到错误配额。每档在四路代理传输期间还会执行短时饱和负载；当配额低于宿主实际容量时必须观察到真实 throttling 事件。可用 `-SkipCpuProfiles` 单独跳过。
+
+默认入口还会执行真实 DNS 自适应验收。若 1.1.1.1/8.8.8.8 的实际查询和 TCP 53 正常，就必须继续使用公共 DNS；随后以不可达保留地址强制触发系统 DNS 回退。两个结果都会分别启动真实 Mihomo 完成域名代理访问，全程不修改 `/etc/resolv.conf`，证据不记录系统解析器地址。可用 `-SkipDnsProfiles` 单独跳过。
 
 脚本中的目标 IP 为常量，不能通过环境变量改成其他主机。旧的非隔离系统测试已经删除。
 

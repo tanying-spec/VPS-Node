@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.0-dev.46
+
+- Added real DNS adaptation acceptance with one scenario following the host's measured public-DNS result and one scenario forcing public failure through a reserved unreachable address.
+- Public resolvers are retained only after real query plus TCP 53 success; forced failure must select the existing system resolver without changing `/etc/resolv.conf`.
+- Each selected DNS profile is placed into an isolated real Mihomo configuration and must resolve a hostname during a successful proxy request.
+- Source-bound DNS evidence records only mode, result flags and resolver count, not resolver addresses; offline tests reject a re-signed result that omits system fallback.
+
 ## 0.2.0-dev.45
 
 - Every real CPU quota profile now runs a bounded multi-worker saturation load concurrently with the four-client Mihomo transfer.

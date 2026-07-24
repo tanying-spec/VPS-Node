@@ -10,6 +10,7 @@ param(
     [switch]$ValidateOnly,
     [switch]$PreflightOnly,
     [switch]$SkipCpuProfiles,
+    [switch]$SkipDnsProfiles,
     [switch]$SkipMemoryProfiles
 )
 
@@ -246,7 +247,35 @@ function Assert-CpuEvidence([string]$Directory) {
     }
 }
 
-function Assert-PreflightResult([string[]]$Output, [bool]$MemoryRequested, [bool]$CpuRequested, [bool]$TunnelRequested) {
+function Assert-DnsEvidence([string]$Directory) {
+    $summaryFile = Get-Item -LiteralPath (Join-Path $Directory 'dns-profiles-summary.txt') -ErrorAction Stop
+    $csvFile = Get-Item -LiteralPath (Join-Path $Directory 'dns-profiles.csv') -ErrorAction Stop
+    $summary = @{}
+    foreach ($line in Get-Content -LiteralPath $summaryFile.FullName) {
+        if ($line -notmatch '^([a-z0-9_]+)=(.*)$') { throw 'DNS evidence summary contains a malformed line.' }
+        if ($summary.ContainsKey($Matches[1])) { throw "DNS evidence contains a duplicate key: $($Matches[1])" }
+        $summary[$Matches[1]] = $Matches[2]
+    }
+    $versionMatch = Select-String -LiteralPath (Join-Path $RepoRoot 'vp.sh') -Pattern '^VP_VERSION="([^"]+)"$' | Select-Object -First 1
+    $expectedHash = (Get-FileHash -LiteralPath (Join-Path $RepoRoot 'vp.sh') -Algorithm SHA256).Hash.ToLowerInvariant()
+    if (-not $versionMatch -or $summary.vps_node_version -ne $versionMatch.Matches[0].Groups[1].Value -or $summary.tested_script_sha256 -ne $expectedHash) { throw 'DNS evidence does not match the current source.' }
+    if ($summary.authorized_host -ne $AuthorizedHost -or $summary.query_tool -notin @('nslookup', 'dig') -or
+        $summary.actual_default_mode -notin @('public', 'system') -or $summary.forced_public_failure_fallback -ne 'passed' -or
+        $summary.formal_services_and_sensitive_state_unchanged -ne 'yes') { throw 'DNS evidence summary is incomplete.' }
+    if ([int]$summary.scenario_count -ne 2 -or [int]$summary.real_core_startups -ne 2 -or [int]$summary.real_proxy_dns_checks -ne 2) { throw 'DNS evidence did not prove both real-core scenarios.' }
+    $rows = @(Import-Csv -LiteralPath $csvFile.FullName)
+    if ($rows.Count -ne 2 -or $rows[0].scenario -ne 'actual-default' -or $rows[1].scenario -ne 'forced-public-failure') { throw 'DNS evidence scenarios are incomplete.' }
+    $actual = $rows[0]
+    if ($actual.mode -ne $summary.actual_default_mode -or $actual.proxy_result -ne 'passed' -or [int]$actual.selected_count -lt 1) { throw 'Actual DNS profile did not complete a real proxy check.' }
+    if ($actual.mode -eq 'public') {
+        if ([int]$actual.public_ok -ne 1 -or $actual.tcp_check -ne 'passed') { throw 'Available public DNS was not retained.' }
+    } elseif ([int]$actual.public_ok -ne 0 -or [int]$actual.system_ok -ne 1) { throw 'Actual DNS fallback was not proven.' }
+    $fallback = $rows[1]
+    if ($fallback.mode -ne 'system' -or [int]$fallback.public_ok -ne 0 -or [int]$fallback.system_ok -ne 1 -or
+        [int]$fallback.selected_count -lt 1 -or $fallback.proxy_result -ne 'passed') { throw 'Forced public-DNS failure did not fall back to a working system resolver.' }
+}
+
+function Assert-PreflightResult([string[]]$Output, [bool]$MemoryRequested, [bool]$CpuRequested, [bool]$DnsRequested, [bool]$TunnelRequested) {
     $values = @{}
     foreach ($line in $Output) {
         if ($line -notmatch '^preflight_([a-z0-9_]+)=(.*)$') { continue }
@@ -265,6 +294,7 @@ function Assert-PreflightResult([string[]]$Output, [bool]$MemoryRequested, [bool
         formal_snapshot = 'yes'
         memory_mode = $(if ($MemoryRequested) { 'required' } else { 'skipped' })
         cpu_mode = $(if ($CpuRequested) { 'required' } else { 'skipped' })
+        dns_mode = $(if ($DnsRequested) { 'required' } else { 'skipped' })
         tunnel_mode = $(if ($TunnelRequested) { 'required' } else { 'skipped' })
     }
     if ($MemoryRequested) {
@@ -274,6 +304,11 @@ function Assert-PreflightResult([string[]]$Output, [bool]$MemoryRequested, [bool
     }
     if ($CpuRequested) {
         $required.cpu_controller = 'yes'
+    }
+    if ($DnsRequested) {
+        $required.dns_query_tool = 'yes'
+        $required.system_dns = 'yes'
+        $required.tcp_53_tool = 'yes'
     }
     if ($TunnelRequested) {
         $required.cloudflared = 'yes'
@@ -441,12 +476,16 @@ if ($SelfTestEvidence) {
             'preflight_cgroup_root_writable=yes',
             'preflight_cpu_mode=required',
             'preflight_cpu_controller=yes',
+            'preflight_dns_mode=required',
+            'preflight_dns_query_tool=yes',
+            'preflight_system_dns=yes',
+            'preflight_tcp_53_tool=yes',
             'preflight_tunnel_mode=skipped'
         )
-        Assert-PreflightResult $validPreflight $true $true $false | Out-Null
+        Assert-PreflightResult $validPreflight $true $true $true $false | Out-Null
         $badPreflight = $validPreflight -replace 'preflight_speed_endpoint=yes', 'preflight_speed_endpoint=no'
         $preflightRejected = $false
-        try { Assert-PreflightResult $badPreflight $true $true $false | Out-Null } catch { $preflightRejected = $true }
+        try { Assert-PreflightResult $badPreflight $true $true $true $false | Out-Null } catch { $preflightRejected = $true }
         if (-not $preflightRejected) { throw 'Evidence self-test failed to reject an unavailable transfer endpoint.' }
 
         $cpuSummary = Join-Path $selfTestDirectory 'cpu-profiles-summary.txt'
@@ -498,7 +537,41 @@ if ($SelfTestEvidence) {
         $cpuThrottleRejected = $false
         try { Assert-CpuEvidence $selfTestDirectory } catch { $cpuThrottleRejected = $true }
         if (-not $cpuThrottleRejected) { throw 'Evidence self-test failed to reject a quota without required throttling.' }
-        Write-Host 'Acceptance, memory, CPU and preflight verification self-test passed; no network connection was attempted.'
+        $dnsSummary = Join-Path $selfTestDirectory 'dns-profiles-summary.txt'
+        @(
+            "vps_node_version=$expectedVersion",
+            "tested_script_sha256=$expectedScriptHash",
+            "authorized_host=$AuthorizedHost",
+            'query_tool=nslookup',
+            'actual_default_mode=public',
+            'scenario_count=2',
+            'real_core_startups=2',
+            'real_proxy_dns_checks=2',
+            'forced_public_failure_fallback=passed',
+            'formal_services_and_sensitive_state_unchanged=yes'
+        ) | Set-Content -LiteralPath $dnsSummary -Encoding ascii
+        $dnsCsv = Join-Path $selfTestDirectory 'dns-profiles.csv'
+        $validDnsRows = @(
+            'scenario,mode,public_ok,system_ok,tcp_check,selected_count,proxy_result',
+            'actual-default,public,1,0,passed,2,passed',
+            'forced-public-failure,system,0,1,skipped,1,passed'
+        )
+        $validDnsRows | Set-Content -LiteralPath $dnsCsv -Encoding ascii
+        foreach ($dnsFile in @($dnsSummary, $dnsCsv)) {
+            $dnsHash = (Get-FileHash -LiteralPath $dnsFile -Algorithm SHA256).Hash.ToLowerInvariant()
+            $dnsName = [IO.Path]::GetFileName($dnsFile)
+            "$dnsHash  $dnsName" | Set-Content -LiteralPath "$dnsFile.sha256" -Encoding ascii
+        }
+        Assert-EvidenceChecksums $selfTestDirectory
+        Assert-DnsEvidence $selfTestDirectory
+        $validDnsRows -replace '^forced-public-failure,system,', 'forced-public-failure,public,' | Set-Content -LiteralPath $dnsCsv -Encoding ascii
+        $dnsHash = (Get-FileHash -LiteralPath $dnsCsv -Algorithm SHA256).Hash.ToLowerInvariant()
+        "$dnsHash  dns-profiles.csv" | Set-Content -LiteralPath "$dnsCsv.sha256" -Encoding ascii
+        Assert-EvidenceChecksums $selfTestDirectory
+        $dnsFallbackRejected = $false
+        try { Assert-DnsEvidence $selfTestDirectory } catch { $dnsFallbackRejected = $true }
+        if (-not $dnsFallbackRejected) { throw 'Evidence self-test failed to reject a missing system-DNS fallback.' }
+        Write-Host 'Acceptance, memory, CPU, DNS and preflight verification self-test passed; no network connection was attempted.'
         return
     }
     finally {
@@ -517,7 +590,7 @@ foreach ($commandName in @('ssh', 'scp', 'tar')) {
         throw "Required local command is missing: $commandName"
     }
 }
-foreach ($required in @('vp.sh', 'vp.sh.sha256', 'tests\isolated_acceptance.sh', 'tests\memory_profiles.sh', 'tests\cpu_profiles.sh')) {
+foreach ($required in @('vp.sh', 'vp.sh.sha256', 'tests\isolated_acceptance.sh', 'tests\memory_profiles.sh', 'tests\cpu_profiles.sh', 'tests\dns_profiles.sh')) {
     if (-not (Test-Path -LiteralPath (Join-Path $RepoRoot $required) -PathType Leaf)) {
         throw "Required local acceptance file is missing: $required"
     }
@@ -578,6 +651,13 @@ if [ "$PREFLIGHT_CPU" = 1 ]; then
   grep -qw cpu /sys/fs/cgroup/cgroup.controllers || fail cpu-controller-unavailable
   [ -w /sys/fs/cgroup ] || fail cgroup-root-not-writable
 fi
+if [ "$PREFLIGHT_DNS" = 1 ]; then
+  if command -v nslookup >/dev/null 2>&1; then nslookup github.com >/dev/null 2>&1 || fail system-dns-unavailable
+  elif command -v dig >/dev/null 2>&1; then dig +time=3 +tries=1 +short github.com A | grep -q . || fail system-dns-unavailable
+  else fail dns-query-tool-unavailable
+  fi
+  command -v nc >/dev/null 2>&1 || fail tcp-53-tool-unavailable
+fi
 if [ "$PREFLIGHT_TUNNEL" = 1 ]; then
   [ -r "$PREFLIGHT_TOKEN_FILE" ] || fail independent-token-unreadable
   if [ -r /etc/cloudflared/token ] && [ "$(sha256sum "$PREFLIGHT_TOKEN_FILE" | awk '{print $1}')" = "$(sha256sum /etc/cloudflared/token | awk '{print $1}')" ]; then
@@ -619,6 +699,11 @@ if [ "$PREFLIGHT_CPU" = 1 ]; then
 else
   printf 'preflight_cpu_mode=skipped\n'
 fi
+if [ "$PREFLIGHT_DNS" = 1 ]; then
+  printf 'preflight_dns_mode=required\npreflight_dns_query_tool=yes\npreflight_system_dns=yes\npreflight_tcp_53_tool=yes\n'
+else
+  printf 'preflight_dns_mode=skipped\n'
+fi
 if [ "$PREFLIGHT_TUNNEL" = 1 ]; then
   printf 'preflight_tunnel_mode=required\npreflight_cloudflared=yes\npreflight_independent_tunnel_inputs=yes\npreflight_tunnel_edge=reachable\n'
 else
@@ -627,15 +712,16 @@ fi
 '@
 $preflightCommand = "PREFLIGHT_MEMORY=$(if ($SkipMemoryProfiles) { '0' } else { '1' }); " +
     "PREFLIGHT_CPU=$(if ($SkipCpuProfiles) { '0' } else { '1' }); " +
+    "PREFLIGHT_DNS=$(if ($SkipDnsProfiles) { '0' } else { '1' }); " +
     "PREFLIGHT_TUNNEL=$(if ($TunnelInputCount -eq 4) { '1' } else { '0' }); " +
     "PREFLIGHT_TOKEN_FILE=$(Quote-Sh $TunnelTokenFile); " +
     "PREFLIGHT_HOST=$(Quote-Sh $TunnelHost); " +
     "PREFLIGHT_PATH=$(Quote-Sh $TunnelPath); " +
     "PREFLIGHT_PORT=$(Quote-Sh ([string]$TunnelOriginPort)); " +
-    "export PREFLIGHT_MEMORY PREFLIGHT_CPU PREFLIGHT_TUNNEL PREFLIGHT_TOKEN_FILE PREFLIGHT_HOST PREFLIGHT_PATH PREFLIGHT_PORT; " +
+    "export PREFLIGHT_MEMORY PREFLIGHT_CPU PREFLIGHT_DNS PREFLIGHT_TUNNEL PREFLIGHT_TOKEN_FILE PREFLIGHT_HOST PREFLIGHT_PATH PREFLIGHT_PORT; " +
     $preflightScript
 $preflight = Invoke-AuthorizedSsh $preflightCommand
-$PreflightLines = Assert-PreflightResult $preflight.Output (-not $SkipMemoryProfiles) (-not $SkipCpuProfiles) ($TunnelInputCount -eq 4)
+$PreflightLines = Assert-PreflightResult $preflight.Output (-not $SkipMemoryProfiles) (-not $SkipCpuProfiles) (-not $SkipDnsProfiles) ($TunnelInputCount -eq 4)
 $PreflightLines | ForEach-Object { Write-Host $_ }
 if ($PreflightOnly) {
     Write-Host 'Authorized-host preflight passed; no files were uploaded and no test was started.'
@@ -643,7 +729,7 @@ if ($PreflightOnly) {
 }
 
 try {
-    & tar -czf $LocalArchive -C $RepoRoot vp.sh vp.sh.sha256 tests/isolated_acceptance.sh tests/memory_profiles.sh tests/cpu_profiles.sh
+    & tar -czf $LocalArchive -C $RepoRoot vp.sh vp.sh.sha256 tests/isolated_acceptance.sh tests/memory_profiles.sh tests/cpu_profiles.sh tests/dns_profiles.sh
     if ($LASTEXITCODE -ne 0) { throw 'Failed to package the current acceptance source.' }
 
     Invoke-AuthorizedSsh "set -eu; umask 077; mkdir -p $(Quote-Sh $RemoteRoot)/source $(Quote-Sh $RemoteRoot)/evidence" | Out-Null
@@ -715,6 +801,13 @@ exit 1
             "sh tests/cpu_profiles.sh"
         Invoke-AuthorizedSsh $cpuCommand | Out-Null
     }
+    if (-not $SkipDnsProfiles) {
+        $dnsCommand = "set -eu; cd $(Quote-Sh "$RemoteRoot/source"); " +
+            "VP_TEST_MIHOMO_BIN=$(Quote-Sh $MihomoPath) " +
+            "VP_DNS_EVIDENCE_DIR=$(Quote-Sh "$RemoteRoot/evidence") " +
+            "sh tests/dns_profiles.sh"
+        Invoke-AuthorizedSsh $dnsCommand | Out-Null
+    }
 
     New-Item -ItemType Directory -Force -Path $EvidenceDirectory | Out-Null
     & scp @ScpOptions "$AuthorizedUser@$AuthorizedHost`:$RemoteRoot/evidence/*" "$EvidenceDirectory\"
@@ -724,10 +817,11 @@ exit 1
     $preflightHash = (Get-FileHash -LiteralPath $preflightEvidence -Algorithm SHA256).Hash.ToLowerInvariant()
     "$preflightHash  authorized-host-preflight.txt" | Set-Content -LiteralPath "$preflightEvidence.sha256" -Encoding ascii
     Assert-EvidenceChecksums $EvidenceDirectory
-    Assert-PreflightResult (Get-Content -LiteralPath $preflightEvidence) (-not $SkipMemoryProfiles) (-not $SkipCpuProfiles) ($TunnelInputCount -eq 4) | Out-Null
+    Assert-PreflightResult (Get-Content -LiteralPath $preflightEvidence) (-not $SkipMemoryProfiles) (-not $SkipCpuProfiles) (-not $SkipDnsProfiles) ($TunnelInputCount -eq 4) | Out-Null
     Assert-AcceptanceEvidence $EvidenceDirectory ($TunnelInputCount -eq 4)
     if (-not $SkipMemoryProfiles) { Assert-MemoryEvidence $EvidenceDirectory }
     if (-not $SkipCpuProfiles) { Assert-CpuEvidence $EvidenceDirectory }
+    if (-not $SkipDnsProfiles) { Assert-DnsEvidence $EvidenceDirectory }
     Write-Host "Acceptance complete; downloaded evidence passed SHA-256 verification: $EvidenceDirectory"
 }
 finally {
