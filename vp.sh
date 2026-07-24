@@ -2,7 +2,7 @@
 
 set -u
 
-VP_VERSION="0.2.0-dev.52"
+VP_VERSION="0.2.0-dev.53"
 VP_CONFIG_DIR="${VP_CONFIG_DIR:-/etc/vps-node}"
 VP_DATA_DIR="${VP_DATA_DIR:-/var/lib/vps-node}"
 VP_LOG_DIR="${VP_LOG_DIR:-/var/log/vps-node}"
@@ -2907,7 +2907,22 @@ diagnostic_report() {
   need_root || return 1
   destination="${1:-/root/vps-node-diagnostic-$(date '+%Y%m%d-%H%M%S').txt}"
   case "$destination" in /*) ;; *) error "诊断报告必须使用绝对路径。"; return 1 ;; esac
-  mkdir -p "$(dirname "$destination")" || return 1
+  report_directory="$(dirname "$destination")"
+  mkdir -p "$report_directory" || return 1
+  [ ! -e "$destination" ] && [ ! -L "$destination" ] && \
+    [ ! -e "$destination.sha256" ] && [ ! -L "$destination.sha256" ] || {
+    error "目标诊断报告或 SHA-256 已存在，拒绝覆盖：$destination"
+    return 1
+  }
+  report_stage="$(mktemp "$report_directory/.vps-node-diagnostic.XXXXXX")" || return 1
+  report_sidecar_stage="$(mktemp "$report_directory/.vps-node-diagnostic-sha.XXXXXX")" || { rm -f "$report_stage"; return 1; }
+  diagnostic_complete=0
+  cleanup_diagnostic() {
+    [ -n "$report_stage" ] && rm -f "$report_stage"
+    [ -n "$report_sidecar_stage" ] && rm -f "$report_sidecar_stage"
+    [ "$diagnostic_complete" -eq 1 ] || rm -f "$destination" "$destination.sha256"
+  }
+  trap cleanup_diagnostic EXIT HUP INT TERM
   memory_snapshot
   cpu_snapshot
   oom_snapshot
@@ -2956,12 +2971,30 @@ diagnostic_report() {
     done
     printf '\nrecent_stability_events:\n'
     [ -r "$VP_STABILITY_LOG" ] && tail -n 20 "$VP_STABILITY_LOG" || printf 'none\n'
-  } > "$destination" || { rm -f "$destination"; return 1; }
-  chmod 600 "$destination"
-  report_hash="$(sha256_file "$destination" 2>/dev/null || true)"
-  [ -n "$report_hash" ] || { rm -f "$destination"; error "无法校验诊断报告。"; return 1; }
-  printf '%s  %s\n' "$report_hash" "$(basename "$destination")" > "$destination.sha256"
-  chmod 600 "$destination.sha256"
+  } > "$report_stage" || { cleanup_diagnostic; trap - EXIT HUP INT TERM; return 1; }
+  chmod 600 "$report_stage" || { cleanup_diagnostic; trap - EXIT HUP INT TERM; return 1; }
+  report_hash="$(sha256_file "$report_stage" 2>/dev/null || true)"
+  [ -n "$report_hash" ] || { cleanup_diagnostic; trap - EXIT HUP INT TERM; error "无法校验诊断报告。"; return 1; }
+  printf '%s  %s\n' "$report_hash" "$(basename "$destination")" > "$report_sidecar_stage" || {
+    cleanup_diagnostic; trap - EXIT HUP INT TERM; return 1
+  }
+  chmod 600 "$report_sidecar_stage" || { cleanup_diagnostic; trap - EXIT HUP INT TERM; return 1; }
+  mv "$report_stage" "$destination" || { cleanup_diagnostic; trap - EXIT HUP INT TERM; return 1; }
+  report_stage=""
+  if [ "${VP_ALLOW_TEST_HOOKS:-0}" = 1 ] && [ "${VP_TEST_DIAGNOSTIC_FAIL_PHASE:-}" = after-report ]; then
+    cleanup_diagnostic; trap - EXIT HUP INT TERM
+    error "测试注入：诊断报告提交后中断，未保留无校验报告。"
+    return 1
+  fi
+  if ! mv "$report_sidecar_stage" "$destination.sha256"; then
+    cleanup_diagnostic; trap - EXIT HUP INT TERM
+    error "诊断报告 SHA-256 提交失败，未保留不完整证据。"
+    return 1
+  fi
+  report_sidecar_stage=""
+  diagnostic_complete=1
+  cleanup_diagnostic
+  trap - EXIT HUP INT TERM
   ok "脱敏诊断报告已创建：$destination"
 }
 

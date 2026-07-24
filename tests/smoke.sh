@@ -482,6 +482,27 @@ mkdir -p "$TMP/dns-etc/secrets"
 printf 'sensitive-test-token-should-not-leak\n' > "$TMP/dns-etc/secrets/cloudflared.token"
 chmod 600 "$TMP/dns-etc/secrets/cloudflared.token"
 diagnostic="$TMP/redacted-diagnostic.txt"
+interrupted_diagnostic="$TMP/interrupted-diagnostic.txt"
+if VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log" \
+  VP_LIB_DIR="$TMP/dns-usr" VP_CORE_BIN="$TMP/dns-usr/bin/mihomo" \
+  VP_CORE_BACKUP_BIN="$TMP/dns-usr/bin/mihomo.previous" VP_SKIP_SERVICE=1 \
+  VP_ALLOW_TEST_HOOKS=1 VP_TEST_DIAGNOSTIC_FAIL_PHASE=after-report \
+  sh "$ROOT/vp.sh" report "$interrupted_diagnostic" >/dev/null 2>&1; then
+  printf 'interrupted diagnostic report unexpectedly succeeded\n' >&2
+  exit 1
+fi
+[ ! -e "$interrupted_diagnostic" ]
+[ ! -e "$interrupted_diagnostic.sha256" ]
+protected_report_target="$TMP/protected-report-target"
+printf 'do-not-overwrite\n' > "$protected_report_target"
+ln -s "$protected_report_target" "$TMP/symlink-diagnostic.txt"
+if VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log" \
+  VP_LIB_DIR="$TMP/dns-usr" VP_CORE_BIN="$TMP/dns-usr/bin/mihomo" VP_SKIP_SERVICE=1 \
+  sh "$ROOT/vp.sh" report "$TMP/symlink-diagnostic.txt" >/dev/null 2>&1; then
+  printf 'symlink diagnostic destination unexpectedly accepted\n' >&2
+  exit 1
+fi
+grep -q '^do-not-overwrite$' "$protected_report_target"
 VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log" \
 VP_LIB_DIR="$TMP/dns-usr" VP_CORE_BIN="$TMP/dns-usr/bin/mihomo" \
 VP_CORE_BACKUP_BIN="$TMP/dns-usr/bin/mihomo.previous" VP_SKIP_SERVICE=1 \
@@ -496,6 +517,16 @@ grep -q 'credentials=<redacted>' "$diagnostic"
 ! grep -Fq 'new.example.com' "$diagnostic"
 node_uuid="$(awk -F'|' 'NR==1{print $4}' "$TMP/dns-etc/nodes.db")"
 ! grep -Fq "$node_uuid" "$diagnostic"
+diagnostic_hash_before="$(sha256sum "$diagnostic" | awk '{print $1}')"
+diagnostic_sidecar_hash_before="$(sha256sum "$diagnostic.sha256" | awk '{print $1}')"
+if VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log" \
+  VP_LIB_DIR="$TMP/dns-usr" VP_CORE_BIN="$TMP/dns-usr/bin/mihomo" VP_SKIP_SERVICE=1 \
+  sh "$ROOT/vp.sh" report "$diagnostic" >/dev/null 2>&1; then
+  printf 'existing diagnostic report unexpectedly overwritten\n' >&2
+  exit 1
+fi
+[ "$(sha256sum "$diagnostic" | awk '{print $1}')" = "$diagnostic_hash_before" ]
+[ "$(sha256sum "$diagnostic.sha256" | awk '{print $1}')" = "$diagnostic_sidecar_hash_before" ]
 
 tunnel_tx="$TMP/tunnel-transaction"
 mkdir -p "$tunnel_tx/usr/bin" "$tunnel_tx/etc/secrets"

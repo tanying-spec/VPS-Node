@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.0-dev.53
+
+- Redacted diagnostics and their SHA-256 sidecars are now staged in the destination directory and committed only after report generation and hashing succeed.
+- Existing reports, existing sidecars and symlink destinations are rejected instead of overwritten by a root process.
+- A failure after the report commit but before the sidecar commit removes the unverified report and all stage files.
+- Regression tests prove interrupted cleanup, symlink-target protection, existing-evidence preservation and the existing UUID/domain/Token redaction guarantees.
+
 ## 0.2.0-dev.52
 
 - Finalizing a named credential rotation now previews the permanent removal of the old credential and requires `FINALIZE` confirmation.

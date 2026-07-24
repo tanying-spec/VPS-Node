@@ -11,6 +11,7 @@ Windows 远程编排入口 `tests/run_authorized_host.ps1` 同样将主机和端
 | Shell 语法、安装与初始化 | GitHub Actions：`tests/smoke.sh`、`tests/install_smoke.sh` | 已通过 |
 | 配置事务、失败回滚、SIGKILL 恢复 | `tests/smoke.sh` 故障注入 | 已通过 |
 | 凭据最终切换 | 未确认零写入、宽限期提前失效保护、重启失败恢复双凭据、确认后旧凭据彻底移除 | 已通过 |
+| 脱敏诊断证据 | UUID/域名/Token 不泄露；已有报告与符号链接拒绝；报告提交后中断不会留下无 sidecar 文件 | 已通过 |
 | 数据库约束、配置漂移、自愈互斥 | `tests/smoke.sh` | 已通过 |
 | DNS、内存/CPU 档位、端口冲突 | 模拟 cgroup、DNS 和监听端口 | 已通过模拟验证 |
 | 备份、恢复、恶意归档拒绝 | 真实 tar 往返与攻击样本 | 已通过 |
@@ -31,7 +32,7 @@ Windows 远程编排入口 `tests/run_authorized_host.ps1` 同样将主机和端
 
 ## 历史结果的处理
 
-早期开发阶段曾记录 Reality/VLESS-WS、Cloudflare Tunnel、4×10 MiB 压力和约 16 MiB/s Tunnel 吞吐结果。这些结果可以作为设计参考，但不是 `0.2.0-dev.52` 当前代码的验收证据，因此不用于宣称当前版本已通过。
+早期开发阶段曾记录 Reality/VLESS-WS、Cloudflare Tunnel、4×10 MiB 压力和约 16 MiB/s Tunnel 吞吐结果。这些结果可以作为设计参考，但不是 `0.2.0-dev.53` 当前代码的验收证据，因此不用于宣称当前版本已通过。
 
 旧的 `system_argo_test.sh` 和 `system_pressure_test.sh` 会正式安装管理脚本并停止已有服务，不符合“隔离且正式服务前后不变”的硬约束，已删除。后续实机证据只能由锁定主机的隔离验收入口产生。
 
