@@ -61,13 +61,38 @@ case "${1:-}" in
 esac
 FAKE_CORE
 chmod 755 "$fake_core"
-VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log" \
+mkdir -p "$TMP/collision-bin"
+cat > "$TMP/collision-bin/ss" <<'FAKE_SS'
+#!/bin/sh
+printf 'tcp LISTEN 0 128 127.0.0.1:17890 0.0.0.0:*\n'
+FAKE_SS
+chmod 755 "$TMP/collision-bin/ss"
+PATH="$TMP/collision-bin:$PATH" VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log" \
 VP_LIB_DIR="$TMP/dns-usr" VP_CORE_BIN="$TMP/dns-usr/bin/mihomo" \
 VP_CORE_BACKUP_BIN="$TMP/dns-usr/bin/mihomo.previous" VP_CORE_SOURCE_BIN="$fake_core" \
 VP_DNS_PUBLIC_SERVERS=192.0.2.1 VP_SKIP_SERVICE=1 \
 sh "$ROOT/vp.sh" core-install >/dev/null
+selected_mixed_port="$(awk -F= '$1=="VP_MIXED_PORT"{print $2;exit}' "$TMP/dns-etc/state.env")"
+[ -n "$selected_mixed_port" ]
+[ "$selected_mixed_port" != 17890 ]
+grep -q "^mixed-port: $selected_mixed_port$" "$TMP/dns-etc/generated/mihomo.yaml"
+grep -q '^VP_CONTROLLER_PORT=19090$' "$TMP/dns-etc/state.env"
 grep -q '^VP_DNS_MODE=system$' "$TMP/dns-etc/core.env"
 ! grep -q '1\.1\.1\.1\|8\.8\.8\.8' "$TMP/dns-etc/generated/mihomo.yaml"
+core_env_hash_before="$(sha256sum "$TMP/dns-etc/core.env" | awk '{print $1}')"
+core_state_hash_before="$(sha256sum "$TMP/dns-etc/state.env" | awk '{print $1}')"
+core_binary_hash_before="$(sha256sum "$TMP/dns-usr/bin/mihomo" | awk '{print $1}')"
+if VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log" \
+  VP_LIB_DIR="$TMP/dns-usr" VP_CORE_BIN="$TMP/dns-usr/bin/mihomo" \
+  VP_CORE_BACKUP_BIN="$TMP/dns-usr/bin/mihomo.previous" VP_CORE_SOURCE_BIN="$fake_core" \
+  VP_MEMORY_LIMIT_BYTES_OVERRIDE=$((768 * 1048576)) VP_ALLOW_TEST_HOOKS=1 VP_TEST_CORE_RESTART_FAIL=1 \
+  sh "$ROOT/vp.sh" core-install >/dev/null 2>&1; then
+  printf 'core install unexpectedly succeeded despite forced restart failure\n' >&2
+  exit 1
+fi
+[ "$(sha256sum "$TMP/dns-etc/core.env" | awk '{print $1}')" = "$core_env_hash_before" ]
+[ "$(sha256sum "$TMP/dns-etc/state.env" | awk '{print $1}')" = "$core_state_hash_before" ]
+[ "$(sha256sum "$TMP/dns-usr/bin/mihomo" | awk '{print $1}')" = "$core_binary_hash_before" ]
 VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log" \
 VP_LIB_DIR="$TMP/dns-usr" VP_CORE_BIN="$TMP/dns-usr/bin/mihomo" \
 VP_CORE_BACKUP_BIN="$TMP/dns-usr/bin/mihomo.previous" VP_MEMORY_LIMIT_BYTES_OVERRIDE=$((512 * 1048576)) \

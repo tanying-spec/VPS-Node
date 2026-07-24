@@ -2,7 +2,7 @@
 
 set -u
 
-VP_VERSION="0.2.0-dev.24"
+VP_VERSION="0.2.0-dev.25"
 VP_CONFIG_DIR="${VP_CONFIG_DIR:-/etc/vps-node}"
 VP_DATA_DIR="${VP_DATA_DIR:-/var/lib/vps-node}"
 VP_LOG_DIR="${VP_LOG_DIR:-/var/log/vps-node}"
@@ -23,8 +23,12 @@ VP_DNS_TEST_HOST="${VP_DNS_TEST_HOST:-github.com}"
 VP_DNS_PUBLIC_SERVERS="${VP_DNS_PUBLIC_SERVERS:-1.1.1.1 8.8.8.8}"
 VP_DNS_QUERY_TOOL="${VP_DNS_QUERY_TOOL:-none}"
 VP_CORE_RUNNER="$VP_LIB_DIR/bin/mihomo-run"
-VP_MIXED_PORT="${VP_MIXED_PORT:-17890}"
-VP_CONTROLLER_PORT="${VP_CONTROLLER_PORT:-19090}"
+VP_MIXED_PORT_OVERRIDE="${VP_MIXED_PORT:-}"
+VP_CONTROLLER_PORT_OVERRIDE="${VP_CONTROLLER_PORT:-}"
+VP_MIXED_PORT_SAVED="$(awk -F= '$1=="VP_MIXED_PORT"{print $2;exit}' "$VP_STATE_FILE" 2>/dev/null || true)"
+VP_CONTROLLER_PORT_SAVED="$(awk -F= '$1=="VP_CONTROLLER_PORT"{print $2;exit}' "$VP_STATE_FILE" 2>/dev/null || true)"
+VP_MIXED_PORT="${VP_MIXED_PORT_OVERRIDE:-${VP_MIXED_PORT_SAVED:-17890}}"
+VP_CONTROLLER_PORT="${VP_CONTROLLER_PORT_OVERRIDE:-${VP_CONTROLLER_PORT_SAVED:-19090}}"
 VP_MIHOMO_API="${VP_MIHOMO_API:-https://api.github.com/repos/MetaCubeX/mihomo/releases/latest}"
 VP_TUNNEL_BIN="${VP_TUNNEL_BIN:-$VP_LIB_DIR/bin/cloudflared}"
 VP_TUNNEL_BACKUP_BIN="${VP_TUNNEL_BACKUP_BIN:-$VP_LIB_DIR/bin/cloudflared.previous}"
@@ -707,6 +711,8 @@ write_core_runtime_env() {
     printf 'VP_CPU_EFFECTIVE_COUNT=%s\n' "$CPU_EFFECTIVE_COUNT"
     printf 'VP_CPU_QUOTA_MILLI=%s\n' "$CPU_QUOTA_MILLI"
     printf 'VP_CPUSET_COUNT=%s\n' "$CPU_CPUSET_COUNT"
+    printf 'VP_MIXED_PORT=%s\n' "$VP_MIXED_PORT"
+    printf 'VP_CONTROLLER_PORT=%s\n' "$VP_CONTROLLER_PORT"
     printf 'VP_DNS_MODE=%s\n' "$VP_DNS_MODE"
     printf 'VP_DNS_SERVERS=%s\n' "$VP_DNS_SERVERS"
     printf 'VP_DNS_PUBLIC_OK=%s\n' "$VP_DNS_PUBLIC_OK"
@@ -1050,6 +1056,54 @@ rollback_core_binary() {
   fi
 }
 
+restore_core_env_backup() {
+  had_env="$1"
+  env_backup="$2"
+  if [ "$had_env" = "1" ] && [ -r "$env_backup" ]; then
+    cp -p "$env_backup" "$VP_CORE_ENV"
+    chmod 600 "$VP_CORE_ENV"
+  elif [ "$had_env" = "0" ]; then
+    rm -f "$VP_CORE_ENV"
+  fi
+}
+
+core_internal_port_owned() {
+  port_kind="$1"
+  port_value="$2"
+  [ -r "$VP_CORE_CONFIG" ] && core_process_running || return 1
+  case "$port_kind" in
+    mixed) grep -Eq "^mixed-port:[[:space:]]*$port_value$" "$VP_CORE_CONFIG" ;;
+    controller) grep -Eq "^external-controller:[[:space:]]*'127\\.0\\.0\\.1:$port_value'$" "$VP_CORE_CONFIG" ;;
+    *) return 1 ;;
+  esac
+}
+
+prepare_core_internal_ports() {
+  case "$VP_MIXED_PORT" in ''|*[!0-9]*) error "Mihomo 内部混合端口无效：$VP_MIXED_PORT。"; return 1 ;; esac
+  case "$VP_CONTROLLER_PORT" in ''|*[!0-9]*) error "Mihomo 控制端口无效：$VP_CONTROLLER_PORT。"; return 1 ;; esac
+  [ "$VP_MIXED_PORT" -ge 1024 ] && [ "$VP_MIXED_PORT" -le 65535 ] || { error "Mihomo 内部混合端口必须为 1024-65535。"; return 1; }
+  [ "$VP_CONTROLLER_PORT" -ge 1024 ] && [ "$VP_CONTROLLER_PORT" -le 65535 ] || { error "Mihomo 控制端口必须为 1024-65535。"; return 1; }
+  if port_in_use "$VP_MIXED_PORT" && ! core_internal_port_owned mixed "$VP_MIXED_PORT"; then
+    [ -z "$VP_MIXED_PORT_OVERRIDE" ] || { error "指定的内部混合端口 $VP_MIXED_PORT 已被其他任务占用。"; return 1; }
+    old_internal_port="$VP_MIXED_PORT"
+    VP_MIXED_PORT="$(choose_port)" || return 1
+    warn "内部混合端口 $old_internal_port 已占用，自动改用 $VP_MIXED_PORT。"
+  fi
+  if [ "$VP_CONTROLLER_PORT" = "$VP_MIXED_PORT" ] ||
+     { port_in_use "$VP_CONTROLLER_PORT" && ! core_internal_port_owned controller "$VP_CONTROLLER_PORT"; }; then
+    [ -z "$VP_CONTROLLER_PORT_OVERRIDE" ] || { error "指定的控制端口 $VP_CONTROLLER_PORT 不可用。"; return 1; }
+    old_internal_port="$VP_CONTROLLER_PORT"
+    attempts=0
+    while [ "$attempts" -lt 20 ]; do
+      VP_CONTROLLER_PORT="$(choose_port)" || return 1
+      [ "$VP_CONTROLLER_PORT" != "$VP_MIXED_PORT" ] && break
+      attempts=$((attempts + 1))
+    done
+    [ "$VP_CONTROLLER_PORT" != "$VP_MIXED_PORT" ] || { error "无法为 Mihomo 控制端口找到空闲端口。"; return 1; }
+    warn "控制端口 $old_internal_port 不可用，自动改用 $VP_CONTROLLER_PORT。"
+  fi
+}
+
 core_binary_rollback() {
   need_root || return 1
   [ -x "$VP_CORE_BACKUP_BIN" ] || { error "没有可回滚的 Mihomo 内核。"; return 1; }
@@ -1100,32 +1154,44 @@ core_install() {
   need_root || return 1
   ensure_runtime_dependencies || return 1
   init_layout >/dev/null || return 1
+  prepare_core_internal_ports || return 1
   core_had_binary=0
   [ -x "$VP_CORE_BIN" ] && core_had_binary=1
-  install_core_binary || return 1
-  write_core_runtime_env || { rollback_core_binary "$core_had_binary"; return 1; }
-  begin_state_transaction core-install || { rollback_core_binary "$core_had_binary"; return 1; }
+  core_had_env=0
+  [ -f "$VP_CORE_ENV" ] && core_had_env=1
+  core_env_backup="$(mktemp /tmp/vp-core-env.XXXXXX)" || return 1
+  [ "$core_had_env" = "0" ] || cp -p "$VP_CORE_ENV" "$core_env_backup" || { rm -f "$core_env_backup"; return 1; }
+  install_core_binary || { rm -f "$core_env_backup"; return 1; }
+  write_core_runtime_env || { rollback_core_binary "$core_had_binary"; restore_core_env_backup "$core_had_env" "$core_env_backup"; rm -f "$core_env_backup"; return 1; }
+  begin_state_transaction core-install || { rollback_core_binary "$core_had_binary"; restore_core_env_backup "$core_had_env" "$core_env_backup"; rm -f "$core_env_backup"; return 1; }
   candidate_root="$VP_TX_ACTIVE/candidate"
-  sed '/^ACTIVE_CORE=/d' "$candidate_root/state.env" > "$candidate_root/state.env.tmp"
+  sed '/^ACTIVE_CORE=/d;/^VP_MIXED_PORT=/d;/^VP_CONTROLLER_PORT=/d' "$candidate_root/state.env" > "$candidate_root/state.env.tmp"
   printf 'ACTIVE_CORE=mihomo\n' >> "$candidate_root/state.env.tmp"
+  printf 'VP_MIXED_PORT=%s\n' "$VP_MIXED_PORT" >> "$candidate_root/state.env.tmp"
+  printf 'VP_CONTROLLER_PORT=%s\n' "$VP_CONTROLLER_PORT" >> "$candidate_root/state.env.tmp"
   mv "$candidate_root/state.env.tmp" "$candidate_root/state.env"
   render_mihomo_config "$candidate_root/nodes.db" "$candidate_root/generated/mihomo.yaml" "$candidate_root/credential-rotations.db"
   if ! validate_state_candidate || ! "$VP_CORE_BIN" -t -d "$VP_CONFIG_DIR" -f "$candidate_root/generated/mihomo.yaml" >/dev/null 2>&1; then
     abort_state_transaction
     rollback_core_binary "$core_had_binary"
+    restore_core_env_backup "$core_had_env" "$core_env_backup"
+    rm -f "$core_env_backup"
     error "Mihomo 候选配置验证失败。"
     return 1
   fi
-  activate_state_candidate || { abort_state_transaction; rollback_core_binary "$core_had_binary"; return 1; }
-  install_core_service || { abort_state_transaction; rollback_core_binary "$core_had_binary"; return 1; }
+  activate_state_candidate || { abort_state_transaction; rollback_core_binary "$core_had_binary"; restore_core_env_backup "$core_had_env" "$core_env_backup"; rm -f "$core_env_backup"; return 1; }
+  install_core_service || { abort_state_transaction; rollback_core_binary "$core_had_binary"; restore_core_env_backup "$core_had_env" "$core_env_backup"; rm -f "$core_env_backup"; return 1; }
   if ! core_service_restart; then
     abort_state_transaction
     rollback_core_binary "$core_had_binary"
+    restore_core_env_backup "$core_had_env" "$core_env_backup"
+    rm -f "$core_env_backup"
     core_service_restart >/dev/null 2>&1 || true
     error "内核服务启动失败，已恢复旧状态。"
     return 1
   fi
   commit_state_transaction
+  rm -f "$core_env_backup"
   ok "Mihomo 内核已安装。"
 }
 
@@ -2208,7 +2274,7 @@ maintenance_mode() {
   fi
 
   temp_removed=0
-  for temp_path in /tmp/vp-node-test.* /tmp/vp-benchmark.* /tmp/vp-network-verify.* /tmp/vp-subscription.* /tmp/vp-backup.* /tmp/vp-restore.* /tmp/vp-repair-config.* /tmp/vp-repair-config-old.* /tmp/vp-expected-config.* /tmp/vp-reality-key.*; do
+  for temp_path in /tmp/vp-node-test.* /tmp/vp-benchmark.* /tmp/vp-network-verify.* /tmp/vp-subscription.* /tmp/vp-backup.* /tmp/vp-restore.* /tmp/vp-repair-config.* /tmp/vp-repair-config-old.* /tmp/vp-expected-config.* /tmp/vp-core-env.* /tmp/vp-reality-key.*; do
     [ -e "$temp_path" ] || continue
     if find "$temp_path" -maxdepth 0 -mmin +60 >/dev/null 2>&1 && [ -n "$(find "$temp_path" -maxdepth 0 -mmin +60 -print 2>/dev/null)" ]; then
       rm -rf "$temp_path"
@@ -2636,6 +2702,9 @@ show_status() {
     printf '  CPU 实际档位：%s 核（配额 %s/1000）\n' \
       "$(awk -F= '$1=="VP_CPU_EFFECTIVE_COUNT"{print $2;exit}' "$VP_CORE_ENV" 2>/dev/null || printf '未知')" \
       "$(awk -F= '$1=="VP_CPU_QUOTA_MILLI"{print $2;exit}' "$VP_CORE_ENV" 2>/dev/null || printf '未知')"
+    printf '  内部代理 / 控制端口：%s / %s\n' \
+      "$(awk -F= '$1=="VP_MIXED_PORT"{print $2;exit}' "$VP_CORE_ENV" 2>/dev/null || printf '未知')" \
+      "$(awk -F= '$1=="VP_CONTROLLER_PORT"{print $2;exit}' "$VP_CORE_ENV" 2>/dev/null || printf '未知')"
     printf '  DNS 策略：%s（%s）\n' \
       "$(awk -F= '$1=="VP_DNS_MODE"{print $2;exit}' "$VP_CORE_ENV" 2>/dev/null || printf '未知')" \
       "$(awk -F= '$1=="VP_DNS_SERVERS"{print $2;exit}' "$VP_CORE_ENV" 2>/dev/null || printf '未检测')"

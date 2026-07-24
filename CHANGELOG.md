@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.0-dev.25
+
+- Mihomo mixed-proxy and controller ports now detect conflicts at core installation, automatically select free internal ports and persist them in authoritative state for later repair/update runs.
+- Explicit user port overrides fail clearly instead of being silently changed; status shows the applied internal ports.
+- Core-install rollback now restores the previous binary, state/config and `core.env`; failure-injection tests verify all three hashes remain unchanged after a forced restart failure.
+
 ## 0.2.0-dev.24
 
 - Complete uninstall now previews, path-validates and removes the management-script rollback SHA-256 sidecar introduced in dev.19.
