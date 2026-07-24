@@ -30,6 +30,10 @@ VP_TUNNEL_RUNNER="$VP_LIB_DIR/bin/cloudflared-run"
 VP_TUNNEL_METRICS_PORT="${VP_TUNNEL_METRICS_PORT:-22041}"
 VP_CLOUDFLARED_API="${VP_CLOUDFLARED_API:-https://api.github.com/repos/cloudflare/cloudflared/releases/latest}"
 VP_BACKUP_DIR="$VP_DATA_DIR/backups"
+VP_CLI_PATH="${VP_CLI_PATH:-/usr/local/bin/vp}"
+VP_CLI_BACKUP_PATH="${VP_CLI_BACKUP_PATH:-$VP_CLI_PATH.previous}"
+VP_REPO="${VP_REPO:-tanying-spec/VPS-Node}"
+VP_REF="${VP_REF:-main}"
 
 is_tty() { [ -t 1 ]; }
 color() { is_tty && printf '\033[%sm' "$1" || true; }
@@ -1109,6 +1113,83 @@ maintenance_mode() {
   layered_health_check
 }
 
+resolve_repo_commit() {
+  commit_json="$(curl -fsSL --max-time 20 "https://api.github.com/repos/$VP_REPO/commits/$VP_REF")" || return 1
+  commit_sha="$(printf '%s\n' "$commit_json" | sed -n 's/.*"sha"[[:space:]]*:[[:space:]]*"\([0-9a-fA-F]\{40\}\)".*/\1/p' | head -n 1)"
+  case "$commit_sha" in ''|*[!0-9a-fA-F]*) return 1 ;; esac
+  [ "${#commit_sha}" -eq 40 ] || return 1
+  printf '%s' "$commit_sha"
+}
+
+download_update_candidate() {
+  script_target="$1"
+  checksum_target="$2"
+  if [ -n "${VP_UPDATE_SOURCE_DIR:-}" ]; then
+    cp "$VP_UPDATE_SOURCE_DIR/vp.sh" "$script_target" || return 1
+    cp "$VP_UPDATE_SOURCE_DIR/vp.sh.sha256" "$checksum_target" || return 1
+    printf 'local-test-source'
+    return 0
+  fi
+  commit_sha="$(resolve_repo_commit)" || { error "无法解析 $VP_REPO/$VP_REF 的精确提交。"; return 1; }
+  raw_base="https://raw.githubusercontent.com/$VP_REPO/$commit_sha"
+  curl -fsSL --max-time 30 "$raw_base/vp.sh" -o "$script_target" || return 1
+  curl -fsSL --max-time 15 "$raw_base/vp.sh.sha256" -o "$checksum_target" || return 1
+  printf '%s' "$commit_sha"
+}
+
+verify_script_sidecar() {
+  script_file="$1"
+  sidecar_file="$2"
+  expected="$(awk 'NR==1{print tolower($1)}' "$sidecar_file" 2>/dev/null)"
+  actual="$(sha256_file "$script_file" 2>/dev/null | tr 'A-F' 'a-f')"
+  case "$expected" in ''|*[!0-9a-f]*) return 1 ;; esac
+  [ "${#expected}" -eq 64 ] && [ "$expected" = "$actual" ]
+}
+
+update_cli() {
+  need_root || return 1
+  command -v curl >/dev/null 2>&1 || { error "缺少 curl。"; return 1; }
+  candidate="$(mktemp /tmp/vp-update.XXXXXX)" || return 1
+  sidecar="$(mktemp /tmp/vp-update-sha.XXXXXX)" || { rm -f "$candidate"; return 1; }
+  cleanup_update() { rm -f "$candidate" "$sidecar"; }
+  trap cleanup_update EXIT HUP INT TERM
+  source_revision="$(download_update_candidate "$candidate" "$sidecar")" || { cleanup_update; trap - EXIT HUP INT TERM; error "更新文件下载失败。"; return 1; }
+  verify_script_sidecar "$candidate" "$sidecar" || { cleanup_update; trap - EXIT HUP INT TERM; error "更新脚本 SHA-256 校验失败。"; return 1; }
+  sh -n "$candidate" || { cleanup_update; trap - EXIT HUP INT TERM; error "更新脚本语法检查失败。"; return 1; }
+  candidate_version="$(VP_CONFIG_DIR="$VP_CONFIG_DIR" sh "$candidate" version 2>/dev/null)"
+  [ -n "$candidate_version" ] || { cleanup_update; trap - EXIT HUP INT TERM; error "无法读取候选版本。"; return 1; }
+  if [ -f "$VP_CLI_PATH" ] && [ "$(sha256_file "$VP_CLI_PATH" 2>/dev/null)" = "$(sha256_file "$candidate" 2>/dev/null)" ]; then
+    cleanup_update; trap - EXIT HUP INT TERM
+    ok "当前已经是最新版本 $candidate_version。"
+    return 0
+  fi
+  mkdir -p "$(dirname "$VP_CLI_PATH")"
+  [ -f "$VP_CLI_PATH" ] && cp -p "$VP_CLI_PATH" "$VP_CLI_BACKUP_PATH"
+  chmod 755 "$candidate"
+  mv "$candidate" "$VP_CLI_PATH"
+  rm -f "$sidecar"
+  trap - EXIT HUP INT TERM
+  ok "管理脚本已更新到 $candidate_version（来源 $source_revision）。"
+}
+
+rollback_cli() {
+  need_root || return 1
+  [ -f "$VP_CLI_BACKUP_PATH" ] || { error "没有可回滚的管理脚本。"; return 1; }
+  sh -n "$VP_CLI_BACKUP_PATH" || { error "备份脚本语法检查失败。"; return 1; }
+  current_tmp="$(mktemp /tmp/vp-current.XXXXXX)" || return 1
+  [ -f "$VP_CLI_PATH" ] && cp -p "$VP_CLI_PATH" "$current_tmp" || : > "$current_tmp"
+  cp -p "$VP_CLI_BACKUP_PATH" "$VP_CLI_PATH" || { rm -f "$current_tmp"; return 1; }
+  chmod 755 "$VP_CLI_PATH"
+  if ! VP_CONFIG_DIR="$VP_CONFIG_DIR" sh "$VP_CLI_PATH" version >/dev/null 2>&1; then
+    [ -s "$current_tmp" ] && cp -p "$current_tmp" "$VP_CLI_PATH"
+    rm -f "$current_tmp"
+    error "回滚版本无法运行，已恢复当前版本。"
+    return 1
+  fi
+  [ -s "$current_tmp" ] && mv "$current_tmp" "$VP_CLI_BACKUP_PATH" || rm -f "$current_tmp"
+  ok "管理脚本已回滚到 $(sh "$VP_CLI_PATH" version)。"
+}
+
 node_count() {
   if [ -r "$VP_NODES_DB" ]; then
     awk 'NF { n++ } END { print n + 0 }' "$VP_NODES_DB" 2>/dev/null
@@ -1416,6 +1497,8 @@ case "${1:-}" in
   backup) shift; create_backup "$@" ;;
   restore) shift; restore_backup "$@" ;;
   maintain|maintenance) maintenance_mode ;;
+  update) update_cli ;;
+  rollback) rollback_cli ;;
   status) show_status ;;
   doctor) doctor ;;
   health|check) layered_health_check ;;
@@ -1424,7 +1507,7 @@ case "${1:-}" in
   uninstall) uninstall_project ;;
   debug-tx) shift; debug_transaction "$@" ;;
   help|-h|--help)
-    printf '用法：vp [status|doctor|health|repair|maintain|init|core-install|reality-add|tunnel-install|argo-add|nodes|link|test-node|rotate|rotations|rotate-finalize|backup|restore|uninstall|version]\n'
+    printf '用法：vp [status|doctor|health|repair|maintain|update|rollback|init|core-install|reality-add|tunnel-install|argo-add|nodes|link|test-node|rotate|rotations|rotate-finalize|backup|restore|uninstall|version]\n'
     ;;
   '') menu ;;
   *) error "未知命令：$1"; exit 2 ;;
