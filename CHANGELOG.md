@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.0-dev.86
+
+- Periodic self-heal now observes network runtime drift, invalid persistence, orphan rollback snapshots and configurations lacking rollback snapshots.
+- Network monitoring is intentionally read-only: it never calls the repair path, writes sysctl values, edits persistence or deletes anomaly evidence.
+- A transition back to active or unapplied consistency emits a recovered event, while unresolved anomaly states remain visible in the stability log.
+- Identical `network-monitor` and healthy-check states are deduplicated by their latest action-specific event, preventing five/fifteen-minute log spam.
+- Interactive self-heal summaries distinguish repairs, notices and actual failures.
+- Regression tests prove each anomaly and recovery event, one-event deduplication and byte-identical sysctl state and persistence across every background check.
+
 ## 0.2.0-dev.85
 
 - Redacted diagnostics now include the shared six-state network optimization verdict, live congestion control/qdisc, verified targets only when strict persistence is valid, and a machine-readable recommended action.

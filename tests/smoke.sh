@@ -1337,6 +1337,70 @@ VP_LIB_DIR="$dedupe_root/usr" VP_SKIP_SERVICE=1 sh "$ROOT/vp.sh" self-heal --qui
 VP_CONFIG_DIR="$dedupe_root/etc" VP_DATA_DIR="$dedupe_root/lib" VP_LOG_DIR="$dedupe_root/log" \
 VP_LIB_DIR="$dedupe_root/usr" VP_SKIP_SERVICE=1 sh "$ROOT/vp.sh" self-heal --quiet
 [ "$(grep -c '|healthy|check|no action required$' "$dedupe_root/log/stability.log")" -eq 1 ]
+
+network_monitor_root="$TMP/network-monitor"
+network_monitor_sysctl_state="$network_monitor_root/sysctl.state"
+network_monitor_config="$network_monitor_root/99-vps-node-network.conf"
+network_monitor_snapshot="$network_monitor_root/lib/network-before.env"
+VP_CONFIG_DIR="$network_monitor_root/etc" VP_DATA_DIR="$network_monitor_root/lib" \
+VP_LOG_DIR="$network_monitor_root/log" VP_LIB_DIR="$network_monitor_root/usr" \
+VP_SKIP_SERVICE=1 sh "$ROOT/vp.sh" init >/dev/null
+printf 'BEFORE_CC=cubic\nBEFORE_QDISC=pfifo_fast\n' > "$network_monitor_snapshot"
+printf '# Managed by VPS-Node after verified before/after benchmark\nnet.ipv4.tcp_congestion_control=bbr\nnet.core.default_qdisc=fq\n' > "$network_monitor_config"
+printf 'CC=cubic\nQDISC=fq\n' > "$network_monitor_sysctl_state"
+run_network_monitor() {
+  VP_CONFIG_DIR="$network_monitor_root/etc" VP_DATA_DIR="$network_monitor_root/lib" \
+  VP_LOG_DIR="$network_monitor_root/log" VP_LIB_DIR="$network_monitor_root/usr" \
+  VP_SYSCTL_BIN="$fake_sysctl" VP_FAKE_SYSCTL_STATE="$network_monitor_sysctl_state" \
+  VP_SYSCTL_CONFIG="$network_monitor_config" VP_NETWORK_SNAPSHOT="$network_monitor_snapshot" \
+  VP_SKIP_SERVICE=1 sh "$ROOT/vp.sh" self-heal --quiet
+}
+network_monitor_config_hash="$(sha256sum "$network_monitor_config" | awk '{print $1}')"
+network_monitor_snapshot_hash="$(sha256sum "$network_monitor_snapshot" | awk '{print $1}')"
+network_monitor_sysctl_hash="$(sha256sum "$network_monitor_sysctl_state" | awk '{print $1}')"
+run_network_monitor
+run_network_monitor
+[ "$(grep -c '|warning|network-monitor|runtime drift detected; automatic sysctl write refused$' "$network_monitor_root/log/stability.log")" -eq 1 ]
+[ "$(sha256sum "$network_monitor_config" | awk '{print $1}')" = "$network_monitor_config_hash" ]
+[ "$(sha256sum "$network_monitor_snapshot" | awk '{print $1}')" = "$network_monitor_snapshot_hash" ]
+[ "$(sha256sum "$network_monitor_sysctl_state" | awk '{print $1}')" = "$network_monitor_sysctl_hash" ]
+
+printf '# external network task\nnet.ipv4.tcp_congestion_control=bbr\nnet.core.default_qdisc=fq\n' > "$network_monitor_config"
+invalid_monitor_config_hash="$(sha256sum "$network_monitor_config" | awk '{print $1}')"
+run_network_monitor
+run_network_monitor
+[ "$(grep -c '|warning|network-monitor|persistence invalid; automatic file and sysctl writes refused$' "$network_monitor_root/log/stability.log")" -eq 1 ]
+[ "$(sha256sum "$network_monitor_config" | awk '{print $1}')" = "$invalid_monitor_config_hash" ]
+[ "$(sha256sum "$network_monitor_snapshot" | awk '{print $1}')" = "$network_monitor_snapshot_hash" ]
+[ "$(sha256sum "$network_monitor_sysctl_state" | awk '{print $1}')" = "$network_monitor_sysctl_hash" ]
+
+rm -f "$network_monitor_config"
+run_network_monitor
+run_network_monitor
+[ "$(grep -c '|warning|network-monitor|rollback snapshot orphaned; automatic cleanup refused$' "$network_monitor_root/log/stability.log")" -eq 1 ]
+[ "$(sha256sum "$network_monitor_snapshot" | awk '{print $1}')" = "$network_monitor_snapshot_hash" ]
+[ "$(sha256sum "$network_monitor_sysctl_state" | awk '{print $1}')" = "$network_monitor_sysctl_hash" ]
+
+printf '# Managed by VPS-Node after verified before/after benchmark\nnet.ipv4.tcp_congestion_control=bbr\nnet.core.default_qdisc=fq\n' > "$network_monitor_config"
+rm -f "$network_monitor_snapshot"
+orphan_monitor_config_hash="$(sha256sum "$network_monitor_config" | awk '{print $1}')"
+run_network_monitor
+run_network_monitor
+[ "$(grep -c '|warning|network-monitor|persistent config lacks rollback snapshot; automatic action refused$' "$network_monitor_root/log/stability.log")" -eq 1 ]
+[ "$(sha256sum "$network_monitor_config" | awk '{print $1}')" = "$orphan_monitor_config_hash" ]
+[ "$(sha256sum "$network_monitor_sysctl_state" | awk '{print $1}')" = "$network_monitor_sysctl_hash" ]
+
+printf 'BEFORE_CC=cubic\nBEFORE_QDISC=pfifo_fast\n' > "$network_monitor_snapshot"
+printf 'CC=bbr\nQDISC=fq\n' > "$network_monitor_sysctl_state"
+active_monitor_config_hash="$(sha256sum "$network_monitor_config" | awk '{print $1}')"
+active_monitor_snapshot_hash="$(sha256sum "$network_monitor_snapshot" | awk '{print $1}')"
+active_monitor_sysctl_hash="$(sha256sum "$network_monitor_sysctl_state" | awk '{print $1}')"
+run_network_monitor
+run_network_monitor
+[ "$(grep -c '|recovered|network-monitor|network optimization consistency restored$' "$network_monitor_root/log/stability.log")" -eq 1 ]
+[ "$(sha256sum "$network_monitor_config" | awk '{print $1}')" = "$active_monitor_config_hash" ]
+[ "$(sha256sum "$network_monitor_snapshot" | awk '{print $1}')" = "$active_monitor_snapshot_hash" ]
+[ "$(sha256sum "$network_monitor_sysctl_state" | awk '{print $1}')" = "$active_monitor_sysctl_hash" ]
 VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log" \
 VP_LIB_DIR="$TMP/dns-usr" VP_CORE_BIN="$TMP/dns-usr/bin/mihomo" \
 VP_CORE_BACKUP_BIN="$TMP/dns-usr/bin/mihomo.previous" VP_CLI_PATH="$ROOT/vp.sh" VP_SKIP_SERVICE=1 \

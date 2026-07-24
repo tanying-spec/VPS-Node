@@ -2,7 +2,7 @@
 
 set -u
 
-VP_VERSION="0.2.0-dev.85"
+VP_VERSION="0.2.0-dev.86"
 VP_CONFIG_DIR="${VP_CONFIG_DIR:-/etc/vps-node}"
 VP_DATA_DIR="${VP_DATA_DIR:-/var/lib/vps-node}"
 VP_LOG_DIR="${VP_LOG_DIR:-/var/log/vps-node}"
@@ -3440,10 +3440,15 @@ stability_event() {
   event_action="$2"
   event_detail="$3"
   mkdir -p "$VP_LOG_DIR" || return 1
-  if [ "$event_status" = healthy ] && [ -r "$VP_STABILITY_LOG" ] &&
-     tail -n 1 "$VP_STABILITY_LOG" 2>/dev/null | grep -Fq "|$event_status|$event_action|$event_detail"; then
-    return 0
-  fi
+  case "$event_action" in
+    check|network-monitor)
+      if [ -r "$VP_STABILITY_LOG" ] &&
+         awk -F'|' -v action="$event_action" '$3==action{last=$0}END{if(last)print last}' "$VP_STABILITY_LOG" 2>/dev/null |
+           grep -Fq "|$event_status|$event_action|$event_detail"; then
+        return 0
+      fi
+      ;;
+  esac
   printf '%s|%s|%s|%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$event_status" "$event_action" "$event_detail" >> "$VP_STABILITY_LOG"
   chmod 600 "$VP_STABILITY_LOG"
   event_lines="$(wc -l < "$VP_STABILITY_LOG" 2>/dev/null || printf 0)"
@@ -3535,10 +3540,12 @@ self_heal_once() {
   trap 'release_self_heal_lock' EXIT HUP INT TERM
   repaired=0
   failures=0
+  notices=0
   oom_snapshot
   if [ "$OOM_DELTA" -gt 0 ]; then
     stability_event warning memory "new oom kill detected"
     remember_oom_snapshot
+    notices=$((notices + 1))
   fi
   if [ "$had_transaction" -eq 1 ]; then
     stability_event recovered transaction "interrupted configuration restored"
@@ -3579,11 +3586,37 @@ self_heal_once() {
       fi
     fi
   fi
-  if [ "$repaired" -eq 0 ] && [ "$failures" -eq 0 ]; then
+  previous_network_monitor_status="$(awk -F'|' '$3=="network-monitor"{status=$2}END{print status}' "$VP_STABILITY_LOG" 2>/dev/null || true)"
+  inspect_network_optimization
+  case "$NETWORK_OPT_STATE" in
+    runtime-drift)
+      stability_event warning network-monitor "runtime drift detected; automatic sysctl write refused"
+      notices=$((notices + 1))
+      ;;
+    persistence-invalid)
+      stability_event warning network-monitor "persistence invalid; automatic file and sysctl writes refused"
+      notices=$((notices + 1))
+      ;;
+    orphan-snapshot)
+      stability_event warning network-monitor "rollback snapshot orphaned; automatic cleanup refused"
+      notices=$((notices + 1))
+      ;;
+    orphan-config)
+      stability_event warning network-monitor "persistent config lacks rollback snapshot; automatic action refused"
+      notices=$((notices + 1))
+      ;;
+    active|none)
+      if [ "$previous_network_monitor_status" = warning ]; then
+        stability_event recovered network-monitor "network optimization consistency restored"
+        notices=$((notices + 1))
+      fi
+      ;;
+  esac
+  if [ "$repaired" -eq 0 ] && [ "$failures" -eq 0 ] && [ "$notices" -eq 0 ]; then
     stability_event healthy check "no action required"
   fi
   if [ "$quiet" -eq 0 ]; then
-    [ "$failures" -eq 0 ] && ok "自愈检查完成：修复 $repaired 项。" || error "自愈检查完成：修复 $repaired 项，失败 $failures 项。"
+    [ "$failures" -eq 0 ] && ok "自愈检查完成：修复 $repaired 项，提醒 $notices 项。" || error "自愈检查完成：修复 $repaired 项，提醒 $notices 项，失败 $failures 项。"
   fi
   release_self_heal_lock
   trap - EXIT HUP INT TERM
