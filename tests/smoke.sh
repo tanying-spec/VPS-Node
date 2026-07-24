@@ -910,6 +910,28 @@ grep -q '^argo|concurrent-node|' "$delete_race_root/etc/nodes.db"
 [ "$(sha256sum "$delete_race_root/etc/credential-rotations.db" | awk '{print $1}')" = "$delete_race_rotations_hash" ]
 [ ! -e "$delete_race_root/etc/transactions/active" ]
 
+edit_race_root="$TMP/edit-race"
+VP_CONFIG_DIR="$edit_race_root/etc" VP_DATA_DIR="$edit_race_root/lib" \
+VP_LOG_DIR="$edit_race_root/log" VP_LIB_DIR="$edit_race_root/usr" \
+VP_SKIP_SERVICE=1 sh "$ROOT/vp.sh" init >/dev/null
+edit_race_record='argo|edit-target|29992|66666666-6666-4666-8666-666666666666|/original|original.example.com'
+printf '%s\n' "$edit_race_record" > "$edit_race_root/etc/nodes.db"
+edit_race_state_hash="$(sha256sum "$edit_race_root/etc/state.env" | awk '{print $1}')"
+edit_race_rotations_hash="$(sha256sum "$edit_race_root/etc/credential-rotations.db" | awk '{print $1}')"
+if VP_CONFIG_DIR="$edit_race_root/etc" VP_DATA_DIR="$edit_race_root/lib" \
+  VP_LOG_DIR="$edit_race_root/log" VP_LIB_DIR="$edit_race_root/usr" VP_SKIP_SERVICE=1 \
+  VP_ALLOW_TEST_HOOKS=1 VP_TEST_EDIT_NODE_RACE=1 \
+  sh "$ROOT/vp.sh" edit edit-target edited-target 29992 changed.example.com /changed >/dev/null 2>&1; then
+  printf 'node edit accepted a database changed while preparing the update\n' >&2
+  exit 1
+fi
+grep -Fqx "$edit_race_record" "$edit_race_root/etc/nodes.db"
+grep -q '^argo|concurrent-edit-node|' "$edit_race_root/etc/nodes.db"
+! grep -q '^argo|edited-target|' "$edit_race_root/etc/nodes.db"
+[ "$(sha256sum "$edit_race_root/etc/state.env" | awk '{print $1}')" = "$edit_race_state_hash" ]
+[ "$(sha256sum "$edit_race_root/etc/credential-rotations.db" | awk '{print $1}')" = "$edit_race_rotations_hash" ]
+[ ! -e "$edit_race_root/etc/transactions/active" ]
+
 uninstall_fail_root="$TMP/uninstall-stop-failure"
 mkdir -p "$uninstall_fail_root"
 : > "$uninstall_fail_root/vp"

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.0-dev.65
+
+- Node editing now binds the source record calculation to the exact node and credential-rotation database states read at command start.
+- Both databases are rechecked after port, endpoint, path and address-family preparation and before a state transaction is created.
+- Concurrent node or rotation changes are preserved instead of being overwritten by a replacement record derived from stale fields.
+- Regression tests inject a valid concurrent node and prove the original target, concurrent content, state and rotations remain intact with no transaction residue.
+
 ## 0.2.0-dev.64
 
 - Node deletion now binds `DELETE` approval to the exact node and credential-rotation database states shown before confirmation.
