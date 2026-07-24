@@ -21,7 +21,7 @@ chmod 755 "$TMP/bin/pgrep" "$TMP/bin/ss"
 check_output="$(cd "$ROOT" && PATH="$TMP/bin:$PATH" VP_LOCAL_SOURCE=1 \
   VP_INSTALL_PATH="$TMP/install/vp" sh ./install.sh --check)"
 printf '%s\n' "$check_output" | grep -q '现有 xray 进程'
-printf '%s\n' "$check_output" | grep -q '默认保留端口 17890 已被占用'
+printf '%s\n' "$check_output" | grep -q 'Mihomo 默认内部端口 17890 已占用'
 [ ! -e "$TMP/install/vp" ]
 
 dry_output="$(cd "$ROOT" && PATH="$TMP/bin:$PATH" VP_LOCAL_SOURCE=1 \
