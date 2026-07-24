@@ -465,6 +465,8 @@ grep -Fq "exec \"$ROOT/vp.sh\" self-heal --quiet" "$TMP/dns-usr/bin/watchdog-run
 uninstall_root="$TMP/uninstall"
 mkdir -p "$uninstall_root"
 : > "$uninstall_root/vp"
+: > "$uninstall_root/vp.previous"
+printf '%064d  vp.previous\n' 0 > "$uninstall_root/vp.previous.sha256"
 VP_CONFIG_DIR="$uninstall_root/etc" VP_DATA_DIR="$uninstall_root/lib" \
 VP_LOG_DIR="$uninstall_root/log" VP_LIB_DIR="$uninstall_root/usr" \
 VP_CLI_PATH="$uninstall_root/vp" VP_CLI_BACKUP_PATH="$uninstall_root/vp.previous" \
@@ -485,6 +487,8 @@ printf '11\nDELETE\n' | \
 [ ! -e "$uninstall_root/etc" ]
 [ ! -e "$uninstall_root/lib" ]
 [ ! -e "$uninstall_root/vp" ]
+[ ! -e "$uninstall_root/vp.previous" ]
+[ ! -e "$uninstall_root/vp.previous.sha256" ]
 uninstall_backup="$(find "$uninstall_root/recovery" -name 'vps-node-uninstall-backup-*.tar.gz' -type f | head -n 1)"
 [ -s "$uninstall_backup" ]
 [ -s "$uninstall_backup.sha256" ]

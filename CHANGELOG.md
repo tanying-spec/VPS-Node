@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.0-dev.24
+
+- Complete uninstall now previews, path-validates and removes the management-script rollback SHA-256 sidecar introduced in dev.19.
+- Added residual-file coverage proving the CLI, previous CLI and previous-CLI checksum are all absent after recoverable uninstall.
+
 ## 0.2.0-dev.23
 
 - Health checks now detect syntactically valid Mihomo configuration drift by rendering the expected configuration from authoritative node/rotation state and comparing it without exposing secrets.

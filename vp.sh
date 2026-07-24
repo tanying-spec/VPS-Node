@@ -2,7 +2,7 @@
 
 set -u
 
-VP_VERSION="0.2.0-dev.23"
+VP_VERSION="0.2.0-dev.24"
 VP_CONFIG_DIR="${VP_CONFIG_DIR:-/etc/vps-node}"
 VP_DATA_DIR="${VP_DATA_DIR:-/var/lib/vps-node}"
 VP_LOG_DIR="${VP_LOG_DIR:-/var/log/vps-node}"
@@ -2972,7 +2972,7 @@ uninstall_path_contains() {
 uninstall_plan() {
   printf '将停止并移除服务：%s、%s、%s\n' "$VP_CORE_SERVICE" "$VP_TUNNEL_SERVICE" "$VP_WATCHDOG_SERVICE"
   printf '将删除项目路径：\n'
-  printf '  %s\n' "$VP_CONFIG_DIR" "$VP_DATA_DIR" "$VP_LOG_DIR" "$VP_LIB_DIR" "$VP_CLI_PATH" "$VP_CLI_BACKUP_PATH"
+  printf '  %s\n' "$VP_CONFIG_DIR" "$VP_DATA_DIR" "$VP_LOG_DIR" "$VP_LIB_DIR" "$VP_CLI_PATH" "$VP_CLI_BACKUP_PATH" "$VP_CLI_BACKUP_SHA256"
 }
 
 uninstall_project() {
@@ -2980,7 +2980,7 @@ uninstall_project() {
   [ "$#" -le 1 ] || { error "卸载命令只接受 --dry-run 参数。"; return 2; }
   mode="${1:-}"
   case "$mode" in ''|--dry-run) ;; *) error "不支持的卸载参数：$mode"; return 2 ;; esac
-  for target in "$VP_CONFIG_DIR" "$VP_DATA_DIR" "$VP_LOG_DIR" "$VP_LIB_DIR" "$VP_CLI_PATH" "$VP_CLI_BACKUP_PATH"; do
+  for target in "$VP_CONFIG_DIR" "$VP_DATA_DIR" "$VP_LOG_DIR" "$VP_LIB_DIR" "$VP_CLI_PATH" "$VP_CLI_BACKUP_PATH" "$VP_CLI_BACKUP_SHA256"; do
     uninstall_path_safe "$target" || { error "拒绝卸载：检测到危险路径 $target"; return 1; }
   done
   uninstall_plan
@@ -3026,7 +3026,7 @@ uninstall_project() {
     esac
   fi
   rm -rf "$VP_CONFIG_DIR" "$VP_DATA_DIR" "$VP_LOG_DIR" "$VP_LIB_DIR"
-  rm -f "$VP_CLI_PATH" "$VP_CLI_BACKUP_PATH"
+  rm -f "$VP_CLI_PATH" "$VP_CLI_BACKUP_PATH" "$VP_CLI_BACKUP_SHA256"
   ok "VPS-Node 已卸载。"
   printf '恢复包：%s\n' "$backup_archive"
   printf '重新安装后恢复：vp restore %s\n' "$backup_archive"
