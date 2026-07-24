@@ -28,6 +28,7 @@ VP_TUNNEL_TOKEN_FILE="$VP_SECRETS_DIR/cloudflared.token"
 VP_TUNNEL_RUNNER="$VP_LIB_DIR/bin/cloudflared-run"
 VP_TUNNEL_METRICS_PORT="${VP_TUNNEL_METRICS_PORT:-22041}"
 VP_CLOUDFLARED_API="${VP_CLOUDFLARED_API:-https://api.github.com/repos/cloudflare/cloudflared/releases/latest}"
+VP_BACKUP_DIR="$VP_DATA_DIR/backups"
 
 is_tty() { [ -t 1 ]; }
 color() { is_tty && printf '\033[%sm' "$1" || true; }
@@ -832,6 +833,124 @@ EOF
   return 1
 }
 
+sha256_file() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{print $1}'
+  elif command -v openssl >/dev/null 2>&1; then
+    openssl dgst -sha256 "$1" | awk '{print $NF}'
+  else
+    return 1
+  fi
+}
+
+create_backup() {
+  need_root || return 1
+  init_layout >/dev/null || return 1
+  recover_state_transaction || return 1
+  destination="${1:-$VP_BACKUP_DIR}"
+  case "$destination" in *.tar.gz) archive="$destination"; mkdir -p "$(dirname "$archive")" ;; *) mkdir -p "$destination"; archive="$destination/vps-node-$(date '+%Y%m%d-%H%M%S').tar.gz" ;; esac
+  package="$(mktemp -d /tmp/vp-backup.XXXXXX)" || return 1
+  cleanup_backup() { rm -rf "$package"; }
+  trap cleanup_backup EXIT HUP INT TERM
+  mkdir -p "$package/config" "$package/data"
+  if [ -d "$VP_CONFIG_DIR" ]; then
+    cp -R -p "$VP_CONFIG_DIR/." "$package/config/"
+    rm -rf "$package/config/transactions"
+  fi
+  if [ -d "$VP_DATA_DIR" ]; then
+    cp -R -p "$VP_DATA_DIR/." "$package/data/"
+    rm -rf "$package/data/backups"
+  fi
+  {
+    printf 'FORMAT_VERSION=1\n'
+    printf 'VP_VERSION=%s\n' "$VP_VERSION"
+    printf 'CREATED_AT=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+  } > "$package/manifest.env"
+  chmod 600 "$package/manifest.env"
+  tar -czf "$archive" -C "$package" manifest.env config data || { rm -f "$archive"; cleanup_backup; trap - EXIT HUP INT TERM; return 1; }
+  chmod 600 "$archive"
+  checksum="$(sha256_file "$archive" 2>/dev/null || true)"
+  [ -n "$checksum" ] && { printf '%s  %s\n' "$checksum" "$(basename "$archive")" > "$archive.sha256"; chmod 600 "$archive.sha256"; }
+  cleanup_backup
+  trap - EXIT HUP INT TERM
+  ok "备份已创建：$archive"
+}
+
+backup_archive_safe() {
+  tar -tzf "$1" 2>/dev/null | awk '
+    /^\// {bad=1}
+    /(^|\/)\.\.($|\/)/ {bad=1}
+    END {exit bad ? 1 : 0}
+  '
+}
+
+restore_extra_snapshot() {
+  extra="$VP_TX_ACTIVE/restore-extra"
+  [ -d "$extra" ] || return 0
+  rm -rf "$VP_SECRETS_DIR" "$VP_DATA_DIR"
+  rm -f "$VP_CORE_ENV"
+  [ -d "$extra/secrets" ] && cp -R -p "$extra/secrets" "$VP_SECRETS_DIR"
+  [ -d "$extra/data" ] && { mkdir -p "$VP_DATA_DIR"; cp -R -p "$extra/data/." "$VP_DATA_DIR/"; }
+  [ -f "$extra/core.env" ] && cp -p "$extra/core.env" "$VP_CORE_ENV"
+}
+
+restore_backup() {
+  need_root || return 1
+  archive="${1:-}"
+  [ -r "$archive" ] || { error "备份文件不存在。"; return 1; }
+  backup_archive_safe "$archive" || { error "备份包含不安全路径。"; return 1; }
+  package="$(mktemp -d /tmp/vp-restore.XXXXXX)" || return 1
+  cleanup_restore() { rm -rf "$package"; }
+  trap cleanup_restore EXIT HUP INT TERM
+  tar -xzf "$archive" -C "$package" || { cleanup_restore; trap - EXIT HUP INT TERM; error "备份无法解压。"; return 1; }
+  [ -f "$package/manifest.env" ] && grep -q '^FORMAT_VERSION=1$' "$package/manifest.env" || { cleanup_restore; trap - EXIT HUP INT TERM; error "不支持该备份格式。"; return 1; }
+  [ -f "$package/config/nodes.db" ] && [ -f "$package/config/state.env" ] || { cleanup_restore; trap - EXIT HUP INT TERM; error "备份缺少必要状态文件。"; return 1; }
+
+  init_layout >/dev/null || { cleanup_restore; trap - EXIT HUP INT TERM; return 1; }
+  begin_state_transaction backup-restore || { cleanup_restore; trap - EXIT HUP INT TERM; return 1; }
+  extra="$VP_TX_ACTIVE/restore-extra"
+  mkdir -p "$extra"
+  [ -d "$VP_SECRETS_DIR" ] && cp -R -p "$VP_SECRETS_DIR" "$extra/secrets"
+  [ -d "$VP_DATA_DIR" ] && cp -R -p "$VP_DATA_DIR/." "$extra/data"
+  [ -f "$VP_CORE_ENV" ] && cp -p "$VP_CORE_ENV" "$extra/core.env"
+  cp -p "$package/config/nodes.db" "$VP_TX_ACTIVE/candidate/nodes.db"
+  cp -p "$package/config/state.env" "$VP_TX_ACTIVE/candidate/state.env"
+  rm -rf "$VP_TX_ACTIVE/candidate/generated"
+  [ -d "$package/config/generated" ] && cp -R -p "$package/config/generated" "$VP_TX_ACTIVE/candidate/generated" || mkdir -p "$VP_TX_ACTIVE/candidate/generated"
+  if ! validate_state_candidate; then
+    abort_state_transaction; cleanup_restore; trap - EXIT HUP INT TERM; return 1
+  fi
+  if [ -x "$VP_CORE_BIN" ] && [ -f "$VP_TX_ACTIVE/candidate/generated/mihomo.yaml" ] && ! "$VP_CORE_BIN" -t -d "$VP_CONFIG_DIR" -f "$VP_TX_ACTIVE/candidate/generated/mihomo.yaml" >/dev/null 2>&1; then
+    abort_state_transaction; cleanup_restore; trap - EXIT HUP INT TERM; error "备份中的 Mihomo 配置无效。"; return 1
+  fi
+  activate_state_candidate || { abort_state_transaction; cleanup_restore; trap - EXIT HUP INT TERM; return 1; }
+  rm -rf "$VP_SECRETS_DIR" "$VP_DATA_DIR"
+  [ -d "$package/config/secrets" ] && cp -R -p "$package/config/secrets" "$VP_SECRETS_DIR" || mkdir -p "$VP_SECRETS_DIR"
+  [ -f "$package/config/core.env" ] && cp -p "$package/config/core.env" "$VP_CORE_ENV"
+  mkdir -p "$VP_DATA_DIR"
+  [ -d "$package/data" ] && cp -R -p "$package/data/." "$VP_DATA_DIR/"
+  chmod 700 "$VP_SECRETS_DIR"
+  find "$VP_SECRETS_DIR" -type f -exec chmod 600 {} \; 2>/dev/null || true
+
+  restore_failed=0
+  [ -x "$VP_CORE_BIN" ] && ! core_service_restart && restore_failed=1
+  [ -s "$VP_TUNNEL_TOKEN_FILE" ] && [ -x "$VP_TUNNEL_BIN" ] && ! tunnel_service_restart && restore_failed=1
+  if [ "$restore_failed" -ne 0 ]; then
+    transaction_restore
+    restore_extra_snapshot
+    rm -rf "$VP_TX_ACTIVE"
+    core_service_restart >/dev/null 2>&1 || true
+    tunnel_service_restart >/dev/null 2>&1 || true
+    cleanup_restore; trap - EXIT HUP INT TERM
+    error "恢复后的服务验证失败，已回滚恢复前状态。"
+    return 1
+  fi
+  commit_state_transaction
+  cleanup_restore
+  trap - EXIT HUP INT TERM
+  ok "备份恢复完成。"
+}
+
 node_count() {
   if [ -r "$VP_NODES_DB" ]; then
     awk 'NF { n++ } END { print n + 0 }' "$VP_NODES_DB" 2>/dev/null
@@ -1118,6 +1237,8 @@ case "${1:-}" in
   nodes|list) show_nodes ;;
   link) shift; show_node_link "$@" ;;
   test-node|test) shift; test_node_end_to_end "$@" ;;
+  backup) shift; create_backup "$@" ;;
+  restore) shift; restore_backup "$@" ;;
   status) show_status ;;
   doctor) doctor ;;
   health|check) layered_health_check ;;
@@ -1126,7 +1247,7 @@ case "${1:-}" in
   uninstall) uninstall_project ;;
   debug-tx) shift; debug_transaction "$@" ;;
   help|-h|--help)
-    printf '用法：vp [status|doctor|health|repair|init|core-install|reality-add|tunnel-install|argo-add|nodes|link|test-node|uninstall|version]\n'
+    printf '用法：vp [status|doctor|health|repair|init|core-install|reality-add|tunnel-install|argo-add|nodes|link|test-node|backup|restore|uninstall|version]\n'
     ;;
   '') menu ;;
   *) error "未知命令：$1"; exit 2 ;;
