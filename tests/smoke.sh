@@ -1006,6 +1006,46 @@ printf '%s\n' "$preview_output" | grep -q '只读检查完成，未修改管理�
 [ "$(sha256sum "$update_root/installed-vp" | awk '{print $1}')" = "$installed_hash" ]
 [ ! -e "$update_root/installed-vp.previous" ]
 [ ! -e "$update_root/installed-vp.previous.sha256" ]
+
+for update_race_kind in target existing; do
+  update_race_cli="$update_root/race-$update_race_kind/vp"
+  mkdir -p "$(dirname "$update_race_cli")"
+  cp "$ROOT/vp.sh" "$update_race_cli"
+  cp "$update_root/lower/vp.sh" "$update_race_cli.previous"
+  printf '%s  vp.previous\n' "$(sha256sum "$update_race_cli.previous" | awk '{print $1}')" > "$update_race_cli.previous.sha256"
+  update_race_backup_hash="$(sha256sum "$update_race_cli.previous" | awk '{print $1}')"
+  update_race_sidecar_hash="$(sha256sum "$update_race_cli.previous.sha256" | awk '{print $1}')"
+  if [ "$update_race_kind" = target ]; then
+    update_race_hook=VP_TEST_CLI_UPDATE_TARGET_RACE=1
+    update_race_marker=changed-after-update-check
+  else
+    update_race_hook=VP_TEST_CLI_UPDATE_EXISTING_RACE=1
+    update_race_marker=changed-during-update-backup
+  fi
+  if env "$update_race_hook" VP_CONFIG_DIR="$TMP/etc" VP_CLI_PATH="$update_race_cli" \
+    VP_CLI_BACKUP_PATH="$update_race_cli.previous" VP_UPDATE_SOURCE_DIR="$update_root/good" \
+    VP_ALLOW_TEST_HOOKS=1 sh "$ROOT/vp.sh" update >/dev/null 2>&1; then
+    printf 'CLI update accepted concurrent target change: %s\n' "$update_race_kind" >&2
+    exit 1
+  fi
+  grep -q "^$update_race_marker$" "$update_race_cli"
+  [ "$(sha256sum "$update_race_cli.previous" | awk '{print $1}')" = "$update_race_backup_hash" ]
+  [ "$(sha256sum "$update_race_cli.previous.sha256" | awk '{print $1}')" = "$update_race_sidecar_hash" ]
+done
+
+update_commit_race_cli="$update_root/race-commit/vp"
+mkdir -p "$(dirname "$update_commit_race_cli")"
+if VP_CONFIG_DIR="$TMP/etc" VP_CLI_PATH="$update_commit_race_cli" \
+  VP_CLI_BACKUP_PATH="$update_commit_race_cli.previous" VP_UPDATE_SOURCE_DIR="$update_root/good" \
+  VP_ALLOW_TEST_HOOKS=1 VP_TEST_CLI_UPDATE_COMMIT_RACE=1 \
+  sh "$ROOT/vp.sh" update >/dev/null 2>&1; then
+  printf 'CLI update overwrote a target created at commit time\n' >&2
+  exit 1
+fi
+grep -q '^created-at-update-commit$' "$update_commit_race_cli"
+[ ! -e "$update_commit_race_cli.previous" ]
+[ ! -e "$update_commit_race_cli.previous.sha256" ]
+
 if VP_CONFIG_DIR="$TMP/etc" VP_CLI_PATH="$update_root/installed-vp" \
   VP_CLI_BACKUP_PATH="$update_root/installed-vp.previous" VP_UPDATE_SOURCE_DIR="$update_root/good" \
   sh "$ROOT/vp.sh" update >/dev/null 2>&1; then

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.0-dev.60
+
+- CLI update approval is now bound to SHA-256-backed states of the active CLI, rollback script and rollback sidecar captured before candidate download.
+- Changes detected after candidate verification, while copying the active CLI, or immediately before final replacement abort without overwriting the concurrent content.
+- First-time CLI creation through `vp update` uses an atomic no-clobber commit, preserving a target created in the final commit window.
+- Race-injection tests cover post-check mutation, mutation during backup and commit-time creation while proving prior rollback assets remain byte-identical.
+
 ## 0.2.0-dev.59
 
 - Installer approval is now bound to SHA-256-backed snapshots of the CLI, rollback script and rollback checksum paths taken before download or package installation.

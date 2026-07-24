@@ -2,7 +2,7 @@
 
 set -u
 
-VP_VERSION="0.2.0-dev.59"
+VP_VERSION="0.2.0-dev.60"
 VP_CONFIG_DIR="${VP_CONFIG_DIR:-/etc/vps-node}"
 VP_DATA_DIR="${VP_DATA_DIR:-/var/lib/vps-node}"
 VP_LOG_DIR="${VP_LOG_DIR:-/var/log/vps-node}"
@@ -2282,6 +2282,21 @@ sha256_file() {
   fi
 }
 
+managed_file_state() {
+  managed_path="$1"
+  if [ -L "$managed_path" ]; then
+    managed_hash="$(sha256_file "$managed_path" 2>/dev/null || printf unreadable)"
+    printf 'symlink:%s:%s' "$(readlink "$managed_path" 2>/dev/null || printf unknown)" "$managed_hash"
+  elif [ -f "$managed_path" ]; then
+    managed_hash="$(sha256_file "$managed_path" 2>/dev/null || printf unreadable)"
+    printf 'file:%s' "$managed_hash"
+  elif [ -e "$managed_path" ]; then
+    printf 'other'
+  else
+    printf 'missing'
+  fi
+}
+
 create_backup() {
   need_root || return 1
   init_layout >/dev/null || return 1
@@ -3199,6 +3214,9 @@ update_cli() {
   done
   [ "$update_mode" = check ] || need_root || return 1
   command -v curl >/dev/null 2>&1 || { error "缺少 curl。"; return 1; }
+  approved_cli_state="$(managed_file_state "$VP_CLI_PATH")"
+  approved_backup_state="$(managed_file_state "$VP_CLI_BACKUP_PATH")"
+  approved_sidecar_state="$(managed_file_state "$VP_CLI_BACKUP_SHA256")"
   candidate="$(mktemp /tmp/vp-update.XXXXXX)" || return 1
   sidecar="$(mktemp /tmp/vp-update-sha.XXXXXX)" || { rm -f "$candidate"; return 1; }
   cleanup_update() {
@@ -3266,6 +3284,12 @@ update_cli() {
     error "当前脚本、回滚脚本和校验文件路径必须彼此不同。"
     return 1
   fi
+  if [ "${VP_ALLOW_TEST_HOOKS:-0}" = 1 ] && [ "${VP_TEST_CLI_UPDATE_TARGET_RACE:-0}" = 1 ]; then
+    printf 'changed-after-update-check\n' > "$VP_CLI_PATH"
+  fi
+  [ "$(managed_file_state "$VP_CLI_PATH")" = "$approved_cli_state" ] || { cleanup_update; trap - EXIT HUP INT TERM; error "当前管理脚本在更新检查后发生变化，已中止且未覆盖该文件。"; return 1; }
+  [ "$(managed_file_state "$VP_CLI_BACKUP_PATH")" = "$approved_backup_state" ] || { cleanup_update; trap - EXIT HUP INT TERM; error "回滚脚本在更新检查后发生变化，已中止更新。"; return 1; }
+  [ "$(managed_file_state "$VP_CLI_BACKUP_SHA256")" = "$approved_sidecar_state" ] || { cleanup_update; trap - EXIT HUP INT TERM; error "回滚校验在更新检查后发生变化，已中止更新。"; return 1; }
   cli_dir="$(dirname "$VP_CLI_PATH")"
   backup_dir="$(dirname "$VP_CLI_BACKUP_PATH")"
   sidecar_dir="$(dirname "$VP_CLI_BACKUP_SHA256")"
@@ -3298,9 +3322,15 @@ update_cli() {
     [ -n "$previous_hash" ] || { cleanup_update; trap - EXIT HUP INT TERM; error "无法校验当前管理脚本，更新已取消。"; return 1; }
     new_backup_stage="$(mktemp "$backup_dir/.vp-update-previous.XXXXXX")" || { cleanup_update; trap - EXIT HUP INT TERM; return 1; }
     cp -p "$VP_CLI_PATH" "$new_backup_stage" || { cleanup_update; trap - EXIT HUP INT TERM; return 1; }
+    if [ "${VP_ALLOW_TEST_HOOKS:-0}" = 1 ] && [ "${VP_TEST_CLI_UPDATE_EXISTING_RACE:-0}" = 1 ]; then
+      printf 'changed-during-update-backup\n' > "$VP_CLI_PATH"
+    fi
+    [ "$(managed_file_state "$VP_CLI_PATH")" = "$approved_cli_state" ] || { cleanup_update; trap - EXIT HUP INT TERM; error "当前管理脚本在更新备份期间发生变化，已中止更新。"; return 1; }
     new_sidecar_stage="$(mktemp "$sidecar_dir/.vp-update-previous-sha.XXXXXX")" || { cleanup_update; trap - EXIT HUP INT TERM; return 1; }
     printf '%s  %s\n' "$previous_hash" "$(basename "$VP_CLI_BACKUP_PATH")" > "$new_sidecar_stage" || { cleanup_update; trap - EXIT HUP INT TERM; return 1; }
     chmod 600 "$new_sidecar_stage" || { cleanup_update; trap - EXIT HUP INT TERM; return 1; }
+    [ "$(managed_file_state "$VP_CLI_BACKUP_PATH")" = "$approved_backup_state" ] || { cleanup_update; trap - EXIT HUP INT TERM; error "回滚脚本在提交前发生变化，已中止更新。"; return 1; }
+    [ "$(managed_file_state "$VP_CLI_BACKUP_SHA256")" = "$approved_sidecar_state" ] || { cleanup_update; trap - EXIT HUP INT TERM; error "回滚校验在提交前发生变化，已中止更新。"; return 1; }
     mv "$new_backup_stage" "$VP_CLI_BACKUP_PATH" || { restore_update_rollback_point || true; cleanup_update; trap - EXIT HUP INT TERM; return 1; }
     new_backup_stage=""
     update_rollback_mutated=1
@@ -3319,8 +3349,23 @@ update_cli() {
       return 1
     fi
   fi
-  mv "$install_stage" "$VP_CLI_PATH" || { restore_update_rollback_point || true; cleanup_update; trap - EXIT HUP INT TERM; return 1; }
-  install_stage=""
+  if [ "$approved_cli_state" = missing ]; then
+    if [ "${VP_ALLOW_TEST_HOOKS:-0}" = 1 ] && [ "${VP_TEST_CLI_UPDATE_COMMIT_RACE:-0}" = 1 ]; then
+      printf 'created-at-update-commit\n' > "$VP_CLI_PATH"
+    fi
+    if ! ln "$install_stage" "$VP_CLI_PATH" 2>/dev/null; then
+      restore_update_rollback_point || true
+      cleanup_update; trap - EXIT HUP INT TERM
+      error "更新目标刚被其他任务创建，已中止且未覆盖该文件。"
+      return 1
+    fi
+    rm -f "$install_stage"
+    install_stage=""
+  else
+    [ "$(managed_file_state "$VP_CLI_PATH")" = "$approved_cli_state" ] || { restore_update_rollback_point || true; cleanup_update; trap - EXIT HUP INT TERM; error "当前管理脚本在最终提交前发生变化，已中止更新。"; return 1; }
+    mv "$install_stage" "$VP_CLI_PATH" || { restore_update_rollback_point || true; cleanup_update; trap - EXIT HUP INT TERM; return 1; }
+    install_stage=""
+  fi
   update_committed=1
   if [ -z "$current_version" ]; then
     rm -f "$VP_CLI_BACKUP_PATH" "$VP_CLI_BACKUP_SHA256"
