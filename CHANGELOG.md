@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.0-dev.68
+
+- `vp update` now owns the `UPDATE` confirmation after displaying the verified candidate preview; direct CLI use can no longer bypass the second confirmation provided by the menu.
+- Cancellation removes candidate stages and leaves the active CLI, rollback script and rollback sidecar untouched.
+- The numbered update menu delegates to the same command-level confirmation instead of maintaining a separate safety path.
+- Regression tests prove explicit cancellation is byte-for-byte zero-write before enabling confirmation for apply and failure-injection cases.
+
 ## 0.2.0-dev.67
 
 - Backup archives and SHA-256 sidecars now commit with same-directory atomic no-clobber links instead of overwrite-capable moves.

@@ -2,7 +2,7 @@
 
 set -u
 
-VP_VERSION="0.2.0-dev.67"
+VP_VERSION="0.2.0-dev.68"
 VP_CONFIG_DIR="${VP_CONFIG_DIR:-/etc/vps-node}"
 VP_DATA_DIR="${VP_DATA_DIR:-/var/lib/vps-node}"
 VP_LOG_DIR="${VP_LOG_DIR:-/var/log/vps-node}"
@@ -3353,6 +3353,17 @@ update_cli() {
     ok "只读检查完成，未修改管理脚本或回滚文件。"
     return 0
   fi
+  if [ -n "${VP_UPDATE_CONFIRM:-}" ]; then
+    update_confirm="$VP_UPDATE_CONFIRM"
+  else
+    printf '输入 UPDATE 确认替换管理脚本（节点与服务不会改变）：'
+    read -r update_confirm || true
+  fi
+  [ "$update_confirm" = UPDATE ] || {
+    cleanup_update; trap - EXIT HUP INT TERM
+    warn "已取消更新，当前管理脚本和回滚文件未修改。"
+    return 2
+  }
   if [ "$VP_CLI_PATH" = "$VP_CLI_BACKUP_PATH" ] || [ "$VP_CLI_PATH" = "$VP_CLI_BACKUP_SHA256" ] || \
      [ "$VP_CLI_BACKUP_PATH" = "$VP_CLI_BACKUP_SHA256" ]; then
     cleanup_update; trap - EXIT HUP INT TERM
@@ -4386,11 +4397,7 @@ interactive_update() {
   read -r action || true
   case "$action" in
     1) update_cli --check ;;
-    2)
-      printf '输入 UPDATE 确认替换管理脚本（节点与服务不会改变）：'
-      read -r update_confirm || true
-      [ "$update_confirm" = UPDATE ] && update_cli || warn "已取消更新。"
-      ;;
+    2) update_cli ;;
     3) rollback_cli ;;
     0) return 0 ;;
     *) warn "无效选择。" ;;

@@ -1,5 +1,7 @@
 # VPS-Node
 
+> `0.2.0-dev.68` 统一菜单与命令行更新安全入口：`vp update` 自身在展示当前版本、候选版本、变更类型、精确来源和完整性后要求输入 `UPDATE`，取消时保证 CLI 与回滚资产零写入。编号菜单不再维护另一套确认逻辑，避免直接命令绕过二次确认。
+>
 > `0.2.0-dev.67` 修复备份创建的最终覆盖窗口：归档与 SHA-256 sidecar 都使用同目录原子“不覆盖创建”。提交瞬间出现同名归档会被保留；sidecar 同名冲突会只撤销本次新归档并保留外部 sidecar，清理逻辑不再误删并发任务创建的文件。
 >
 > `0.2.0-dev.66` 将凭据轮换开始与最终切换都绑定到节点、轮换数据库的精确状态。生成新 UUID 或输入 `FINALIZE` 后如其他任务修改了节点或宽限记录，操作会在配置事务前中止，保留并发内容、原 UUID 及旧凭据宽限期。
@@ -176,6 +178,7 @@ vp migrate-mh /etc/mihomo/nodes.db --apply
 vp maintain
 vp version-status
 vp update --check
+# 正式更新会先显示候选信息，并要求输入 UPDATE：
 vp update
 vp update --allow-downgrade
 vp rollback
@@ -190,7 +193,7 @@ DNS 选择会在核心安装或优化时重新检测：优先验证 `1.1.1.1`、
 
 ## 验证范围
 
-指定测试机上已验证：
+以下能力已有自动测试或早期隔离实机记录；早期实机结果不等同于当前版本验收。当前版本仍缺少的唯一测试机证据以 [完成度审计](docs/COMPLETION_AUDIT.md) 和 [测试矩阵](docs/TEST_MATRIX.md) 为准：
 
 - 事务正常提交、验证失败回滚、SIGKILL 中断恢复
 - Reality 和 VLESS-WS 独立客户端真实 HTTPS 代理

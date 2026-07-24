@@ -1141,6 +1141,14 @@ printf '%s\n' "$preview_output" | grep -q '只读检查完成，未修改管理�
 [ "$(sha256sum "$update_root/installed-vp" | awk '{print $1}')" = "$installed_hash" ]
 [ ! -e "$update_root/installed-vp.previous" ]
 [ ! -e "$update_root/installed-vp.previous.sha256" ]
+cancelled_update_output="$(VP_CONFIG_DIR="$TMP/etc" VP_CLI_PATH="$update_root/installed-vp" \
+  VP_CLI_BACKUP_PATH="$update_root/installed-vp.previous" VP_UPDATE_SOURCE_DIR="$update_root/good" \
+  VP_ALLOW_TEST_HOOKS=1 VP_UPDATE_CONFIRM=CANCEL sh "$ROOT/vp.sh" update 2>&1 || true)"
+printf '%s\n' "$cancelled_update_output" | grep -q '已取消更新'
+[ "$(sha256sum "$update_root/installed-vp" | awk '{print $1}')" = "$installed_hash" ]
+[ ! -e "$update_root/installed-vp.previous" ]
+[ ! -e "$update_root/installed-vp.previous.sha256" ]
+export VP_UPDATE_CONFIRM=UPDATE
 
 for update_race_kind in target existing; do
   update_race_cli="$update_root/race-$update_race_kind/vp"
@@ -1307,6 +1315,7 @@ if VP_CONFIG_DIR="$TMP/etc" VP_CLI_PATH="$update_root/installed-vp" \
   exit 1
 fi
 [ "$(sh "$update_root/installed-vp" version)" = '0.2.0-dev.99' ]
+unset VP_UPDATE_CONFIRM
 
 printf 'TEST_VALUE=before\n' >> "$TMP/etc/state.env"
 VP_CONFIG_DIR="$TMP/etc" VP_DATA_DIR="$TMP/lib" VP_LOG_DIR="$TMP/log" VP_LIB_DIR="$TMP/usr-lib" \
