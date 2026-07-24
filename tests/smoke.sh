@@ -86,8 +86,10 @@ custom_status="$(PATH="$TMP/status-bin:$PATH" VP_CONFIG_DIR="$TMP/etc" VP_DATA_D
   VP_TUNNEL_SERVICE=custom-tunnel sh "$ROOT/vp.sh" status)"
 printf '%s\n' "$custom_status" | grep -q '^Cloudflare Tunnel：active$'
 
-VP_CONFIG_DIR="$TMP/etc" VP_DATA_DIR="$TMP/lib" VP_LOG_DIR="$TMP/log" VP_LIB_DIR="$TMP/usr-lib" \
-sh "$ROOT/vp.sh" status | grep -q '总体状态：尚未安装'
+uninstalled_status="$(VP_CONFIG_DIR="$TMP/etc" VP_DATA_DIR="$TMP/lib" VP_LOG_DIR="$TMP/log" \
+  VP_LIB_DIR="$TMP/usr-lib" sh "$ROOT/vp.sh" status)"
+printf '%s\n' "$uninstalled_status" | grep -q '总体状态：尚未安装'
+printf '%s\n' "$uninstalled_status" | grep -q '^下一步：请选择 1 创建 Reality 主节点'
 
 VP_CONFIG_DIR="$TMP/etc" \
 VP_DATA_DIR="$TMP/lib" \
@@ -170,13 +172,37 @@ rotation_dashboard="$(PATH="$TMP/status-bin:$PATH" VP_CONFIG_DIR="$TMP/dns-etc" 
   VP_LOG_DIR="$TMP/dns-log" VP_LIB_DIR="$TMP/dns-usr" VP_CORE_BIN="$TMP/dns-usr/bin/mihomo" \
   VP_CORE_SERVICE=custom-core VP_TUNNEL_SERVICE=custom-tunnel sh "$ROOT/vp.sh" status)"
 printf '%s\n' "$rotation_dashboard" | grep -q '^总体状态：凭据轮换中$'
+printf '%s\n' "$rotation_dashboard" | grep -q '下一步：先选择 3 → 选择节点 → 2.*重新选择 3 → 同一节点 → 5'
 cp "$TMP/dns-etc/credential-rotations.db" "$TMP/rotations-active"
 awk -F'|' 'BEGIN{OFS="|"}{$5=2;$6=1;print}' "$TMP/rotations-active" > "$TMP/dns-etc/credential-rotations.db"
 expired_dashboard="$(PATH="$TMP/status-bin:$PATH" VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" \
   VP_LOG_DIR="$TMP/dns-log" VP_LIB_DIR="$TMP/dns-usr" VP_CORE_BIN="$TMP/dns-usr/bin/mihomo" \
   VP_CORE_SERVICE=custom-core VP_TUNNEL_SERVICE=custom-tunnel sh "$ROOT/vp.sh" status)"
 printf '%s\n' "$expired_dashboard" | grep -q '^总体状态：凭据轮换已到期$'
+printf '%s\n' "$expired_dashboard" | grep -q '下一步：.*选择 3 → 选择节点 → 5.*FINALIZE'
 mv "$TMP/rotations-active" "$TMP/dns-etc/credential-rotations.db"
+mkdir -p "$TMP/status-core-only" "$TMP/dns-etc/secrets"
+cat > "$TMP/status-core-only/systemctl" <<'CORE_ONLY_SYSTEMCTL'
+#!/bin/sh
+if [ "${1:-}" = is-active ] && [ "${2:-}" = custom-core ]; then
+  printf 'active\n'
+  exit 0
+fi
+printf 'inactive\n'
+exit 3
+CORE_ONLY_SYSTEMCTL
+chmod 755 "$TMP/status-core-only/systemctl"
+cp "$TMP/dns-etc/credential-rotations.db" "$TMP/rotations-before-token-only-dashboard"
+: > "$TMP/dns-etc/credential-rotations.db"
+printf 'token-present-without-argo-node\n' > "$TMP/dns-etc/secrets/cloudflared.token"
+token_only_dashboard="$(PATH="$TMP/status-core-only:$PATH" VP_CONFIG_DIR="$TMP/dns-etc" \
+  VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log" VP_LIB_DIR="$TMP/dns-usr" \
+  VP_CORE_BIN="$TMP/dns-usr/bin/mihomo" VP_CORE_SERVICE=custom-core VP_TUNNEL_SERVICE=custom-tunnel \
+  sh "$ROOT/vp.sh" status)"
+printf '%s\n' "$token_only_dashboard" | grep -q '^总体状态：主线路已就绪$'
+printf '%s\n' "$token_only_dashboard" | grep -q '^下一步：可选择 2 增加 Cloudflare 备用节点'
+mv "$TMP/rotations-before-token-only-dashboard" "$TMP/dns-etc/credential-rotations.db"
+rm -f "$TMP/dns-etc/secrets/cloudflared.token"
 VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log" \
 VP_LIB_DIR="$TMP/dns-usr" VP_CORE_BIN="$TMP/dns-usr/bin/mihomo" \
 VP_CORE_BACKUP_BIN="$TMP/dns-usr/bin/mihomo.previous" VP_SKIP_SERVICE=1 \
@@ -222,6 +248,7 @@ invalid_dashboard="$(PATH="$TMP/status-bin:$PATH" VP_CONFIG_DIR="$TMP/dns-etc" V
   VP_LOG_DIR="$TMP/dns-log" VP_LIB_DIR="$TMP/dns-usr" VP_CORE_SERVICE=custom-core \
   VP_TUNNEL_SERVICE=custom-tunnel sh "$ROOT/vp.sh" status)"
 printf '%s\n' "$invalid_dashboard" | grep -q '^总体状态：状态数据异常$'
+printf '%s\n' "$invalid_dashboard" | grep -q '下一步：.*5 → 3.*7 → 5'
 mv "$TMP/nodes-before-dashboard-check" "$TMP/dns-etc/nodes.db"
 clean_config_hash="$(sha256sum "$TMP/dns-etc/generated/mihomo.yaml" | awk '{print $1}')"
 printf '\n# syntactically-valid manual drift\n' >> "$TMP/dns-etc/generated/mihomo.yaml"

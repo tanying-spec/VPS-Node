@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.0-dev.55
+
+- Dashboard next actions now show the complete main-menu and submenu route instead of implying that entering a top-level menu performs the action directly.
+- Repair, diagnostic, restore, link, test and credential-finalization guidance now maps to the exact numbered choices the user must press.
+- A leftover Tunnel token without any Argo node no longer makes the dashboard report a broken backup route or a fully ready primary/backup setup.
+- Scenario tests verify uninstalled, active/expired rotation, invalid-state and token-without-node conclusions plus their actionable routes.
+
 ## 0.2.0-dev.54
 
 - Self-heal locks now bind the PID to the Linux process start time instead of trusting a reusable PID alone.
