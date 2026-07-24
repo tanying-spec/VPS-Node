@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.0-dev.73
+
+- Mihomo and cloudflared installation now snapshot any pre-existing rollback binary before promoting the active version to the new rollback point.
+- A failure after candidate commit restores both the prior active binary and the exact rollback point that existed before installation.
+- The prior rollback snapshot is discarded only after state, service and restart commits all succeed, so successful updates still expose the immediately previous active version.
+- Regression tests force core and Tunnel restart failures and prove active binaries, runtime state, tokens and older rollback binaries remain byte-identical.
+
 ## 0.2.0-dev.72
 
 - Mihomo and cloudflared installation approval is now bound to SHA-256-backed states of both the active and rollback binaries captured before dependency work or downloads.

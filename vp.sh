@@ -2,7 +2,7 @@
 
 set -u
 
-VP_VERSION="0.2.0-dev.72"
+VP_VERSION="0.2.0-dev.73"
 VP_CONFIG_DIR="${VP_CONFIG_DIR:-/etc/vps-node}"
 VP_DATA_DIR="${VP_DATA_DIR:-/var/lib/vps-node}"
 VP_LOG_DIR="${VP_LOG_DIR:-/var/log/vps-node}"
@@ -806,9 +806,34 @@ install_core_binary() {
     error "Mihomo 回滚二进制在下载验证期间发生变化，已中止安装。"
     return 1
   }
-  [ -x "$VP_CORE_BIN" ] && cp "$VP_CORE_BIN" "$VP_CORE_BACKUP_BIN"
-  mv "$binary_tmp" "$VP_CORE_BIN"
+  core_prior_backup_snapshot=""
+  core_prior_backup_present=0
+  if [ -x "$VP_CORE_BIN" ]; then
+    core_prior_backup_snapshot="$(mktemp /tmp/vp-core-prior-backup.XXXXXX)" || { rm -f "$binary_tmp"; return 1; }
+    if [ -e "$VP_CORE_BACKUP_BIN" ]; then
+      cp -p "$VP_CORE_BACKUP_BIN" "$core_prior_backup_snapshot" || { rm -f "$binary_tmp" "$core_prior_backup_snapshot"; core_prior_backup_snapshot=""; return 1; }
+      core_prior_backup_present=1
+    fi
+    cp "$VP_CORE_BIN" "$VP_CORE_BACKUP_BIN" || { restore_core_install_backup_point; rm -f "$binary_tmp"; return 1; }
+  fi
+  mv "$binary_tmp" "$VP_CORE_BIN" || { restore_core_install_backup_point; rm -f "$binary_tmp"; return 1; }
   chmod 755 "$VP_CORE_BIN"
+}
+
+restore_core_install_backup_point() {
+  [ -n "${core_prior_backup_snapshot:-}" ] || return 0
+  if [ "${core_prior_backup_present:-0}" = 1 ]; then
+    cp -p "$core_prior_backup_snapshot" "$VP_CORE_BACKUP_BIN" || return 1
+  else
+    rm -f "$VP_CORE_BACKUP_BIN"
+  fi
+  rm -f "$core_prior_backup_snapshot"
+  core_prior_backup_snapshot=""
+}
+
+commit_core_install_backup_point() {
+  [ -z "${core_prior_backup_snapshot:-}" ] || rm -f "$core_prior_backup_snapshot"
+  core_prior_backup_snapshot=""
 }
 
 write_core_runtime_env() {
@@ -973,8 +998,33 @@ install_tunnel_binary() {
     error "cloudflared 回滚二进制在下载验证期间发生变化，已中止安装。"
     return 1
   }
-  [ -x "$VP_TUNNEL_BIN" ] && cp "$VP_TUNNEL_BIN" "$VP_TUNNEL_BACKUP_BIN"
-  mv "$tunnel_tmp" "$VP_TUNNEL_BIN"
+  tunnel_prior_backup_snapshot=""
+  tunnel_prior_backup_present=0
+  if [ -x "$VP_TUNNEL_BIN" ]; then
+    tunnel_prior_backup_snapshot="$(mktemp /tmp/vp-tunnel-prior-backup.XXXXXX)" || { rm -f "$tunnel_tmp"; return 1; }
+    if [ -e "$VP_TUNNEL_BACKUP_BIN" ]; then
+      cp -p "$VP_TUNNEL_BACKUP_BIN" "$tunnel_prior_backup_snapshot" || { rm -f "$tunnel_tmp" "$tunnel_prior_backup_snapshot"; tunnel_prior_backup_snapshot=""; return 1; }
+      tunnel_prior_backup_present=1
+    fi
+    cp "$VP_TUNNEL_BIN" "$VP_TUNNEL_BACKUP_BIN" || { restore_tunnel_install_backup_point; rm -f "$tunnel_tmp"; return 1; }
+  fi
+  mv "$tunnel_tmp" "$VP_TUNNEL_BIN" || { restore_tunnel_install_backup_point; rm -f "$tunnel_tmp"; return 1; }
+}
+
+restore_tunnel_install_backup_point() {
+  [ -n "${tunnel_prior_backup_snapshot:-}" ] || return 0
+  if [ "${tunnel_prior_backup_present:-0}" = 1 ]; then
+    cp -p "$tunnel_prior_backup_snapshot" "$VP_TUNNEL_BACKUP_BIN" || return 1
+  else
+    rm -f "$VP_TUNNEL_BACKUP_BIN"
+  fi
+  rm -f "$tunnel_prior_backup_snapshot"
+  tunnel_prior_backup_snapshot=""
+}
+
+commit_tunnel_install_backup_point() {
+  [ -z "${tunnel_prior_backup_snapshot:-}" ] || rm -f "$tunnel_prior_backup_snapshot"
+  tunnel_prior_backup_snapshot=""
 }
 
 install_tunnel_service() {
@@ -1110,6 +1160,7 @@ rollback_tunnel_install() {
       service_action stop "$VP_TUNNEL_SERVICE" >/dev/null 2>&1 || true
     fi
   fi
+  restore_tunnel_install_backup_point || true
 }
 
 tunnel_install() {
@@ -1211,6 +1262,7 @@ tunnel_install() {
     return 1
   fi
   commit_state_transaction
+  commit_tunnel_install_backup_point
   rm -f "$token_backup" "$runner_backup"
   ok "Cloudflare Tunnel 已安装。"
 }
@@ -1308,6 +1360,12 @@ rollback_core_binary() {
   elif [ "$had_binary" = "0" ]; then
     rm -f "$VP_CORE_BIN"
   fi
+}
+
+rollback_core_install() {
+  had_binary="$1"
+  rollback_core_binary "$had_binary"
+  restore_core_install_backup_point || true
 }
 
 restore_core_env_backup() {
@@ -1502,8 +1560,8 @@ core_install() {
   core_env_backup="$(mktemp /tmp/vp-core-env.XXXXXX)" || return 1
   [ "$core_had_env" = "0" ] || cp -p "$VP_CORE_ENV" "$core_env_backup" || { rm -f "$core_env_backup"; return 1; }
   install_core_binary || { rm -f "$core_env_backup"; return 1; }
-  write_core_runtime_env || { rollback_core_binary "$core_had_binary"; restore_core_env_backup "$core_had_env" "$core_env_backup"; rm -f "$core_env_backup"; return 1; }
-  begin_state_transaction core-install || { rollback_core_binary "$core_had_binary"; restore_core_env_backup "$core_had_env" "$core_env_backup"; rm -f "$core_env_backup"; return 1; }
+  write_core_runtime_env || { rollback_core_install "$core_had_binary"; restore_core_env_backup "$core_had_env" "$core_env_backup"; rm -f "$core_env_backup"; return 1; }
+  begin_state_transaction core-install || { rollback_core_install "$core_had_binary"; restore_core_env_backup "$core_had_env" "$core_env_backup"; rm -f "$core_env_backup"; return 1; }
   candidate_root="$VP_TX_ACTIVE/candidate"
   sed '/^ACTIVE_CORE=/d;/^VP_MIXED_PORT=/d;/^VP_CONTROLLER_PORT=/d' "$candidate_root/state.env" > "$candidate_root/state.env.tmp"
   printf 'ACTIVE_CORE=mihomo\n' >> "$candidate_root/state.env.tmp"
@@ -1513,17 +1571,17 @@ core_install() {
   render_mihomo_config "$candidate_root/nodes.db" "$candidate_root/generated/mihomo.yaml" "$candidate_root/credential-rotations.db"
   if ! validate_state_candidate || ! "$VP_CORE_BIN" -t -d "$VP_CONFIG_DIR" -f "$candidate_root/generated/mihomo.yaml" >/dev/null 2>&1; then
     abort_state_transaction
-    rollback_core_binary "$core_had_binary"
+    rollback_core_install "$core_had_binary"
     restore_core_env_backup "$core_had_env" "$core_env_backup"
     rm -f "$core_env_backup"
     error "Mihomo 候选配置验证失败。"
     return 1
   fi
-  activate_state_candidate || { abort_state_transaction; rollback_core_binary "$core_had_binary"; restore_core_env_backup "$core_had_env" "$core_env_backup"; rm -f "$core_env_backup"; return 1; }
-  install_core_service || { abort_state_transaction; rollback_core_binary "$core_had_binary"; restore_core_env_backup "$core_had_env" "$core_env_backup"; rm -f "$core_env_backup"; return 1; }
+  activate_state_candidate || { abort_state_transaction; rollback_core_install "$core_had_binary"; restore_core_env_backup "$core_had_env" "$core_env_backup"; rm -f "$core_env_backup"; return 1; }
+  install_core_service || { abort_state_transaction; rollback_core_install "$core_had_binary"; restore_core_env_backup "$core_had_env" "$core_env_backup"; rm -f "$core_env_backup"; return 1; }
   if ! core_service_restart; then
     abort_state_transaction
-    rollback_core_binary "$core_had_binary"
+    rollback_core_install "$core_had_binary"
     restore_core_env_backup "$core_had_env" "$core_env_backup"
     rm -f "$core_env_backup"
     core_service_restart >/dev/null 2>&1 || true
@@ -1531,6 +1589,7 @@ core_install() {
     return 1
   fi
   commit_state_transaction
+  commit_core_install_backup_point
   rm -f "$core_env_backup"
   ok "Mihomo 内核已安装。"
 }

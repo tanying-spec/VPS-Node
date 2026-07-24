@@ -221,6 +221,10 @@ grep -q '^VP_DNS_MODE=system$' "$TMP/dns-etc/core.env"
 core_env_hash_before="$(sha256sum "$TMP/dns-etc/core.env" | awk '{print $1}')"
 core_state_hash_before="$(sha256sum "$TMP/dns-etc/state.env" | awk '{print $1}')"
 core_binary_hash_before="$(sha256sum "$TMP/dns-usr/bin/mihomo" | awk '{print $1}')"
+cp "$fake_core" "$TMP/dns-usr/bin/mihomo.previous"
+printf '\n# prior-core-rollback-point\n' >> "$TMP/dns-usr/bin/mihomo.previous"
+chmod 755 "$TMP/dns-usr/bin/mihomo.previous"
+core_prior_rollback_hash="$(sha256sum "$TMP/dns-usr/bin/mihomo.previous" | awk '{print $1}')"
 if VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log" \
   VP_LIB_DIR="$TMP/dns-usr" VP_CORE_BIN="$TMP/dns-usr/bin/mihomo" \
   VP_CORE_BACKUP_BIN="$TMP/dns-usr/bin/mihomo.previous" VP_CORE_SOURCE_BIN="$fake_core" \
@@ -232,6 +236,7 @@ fi
 [ "$(sha256sum "$TMP/dns-etc/core.env" | awk '{print $1}')" = "$core_env_hash_before" ]
 [ "$(sha256sum "$TMP/dns-etc/state.env" | awk '{print $1}')" = "$core_state_hash_before" ]
 [ "$(sha256sum "$TMP/dns-usr/bin/mihomo" | awk '{print $1}')" = "$core_binary_hash_before" ]
+[ "$(sha256sum "$TMP/dns-usr/bin/mihomo.previous" | awk '{print $1}')" = "$core_prior_rollback_hash" ]
 VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log" \
 VP_LIB_DIR="$TMP/dns-usr" VP_CORE_BIN="$TMP/dns-usr/bin/mihomo" \
 VP_CORE_BACKUP_BIN="$TMP/dns-usr/bin/mihomo.previous" VP_MEMORY_LIMIT_BYTES_OVERRIDE=$((512 * 1048576)) \
@@ -685,9 +690,13 @@ cat > "$tunnel_tx/new-cloudflared" <<'NEW_TUNNEL'
 exit 0
 NEW_TUNNEL
 chmod 755 "$tunnel_tx/usr/bin/cloudflared" "$tunnel_tx/new-cloudflared"
+cp "$tunnel_tx/usr/bin/cloudflared" "$tunnel_tx/usr/bin/cloudflared.previous"
+printf '\n# prior-tunnel-rollback-point\n' >> "$tunnel_tx/usr/bin/cloudflared.previous"
+chmod 755 "$tunnel_tx/usr/bin/cloudflared.previous"
 printf 'old.transaction.token\n' > "$tunnel_tx/etc/secrets/cloudflared.token"
 printf 'new.transaction.token\n' > "$tunnel_tx/new.token"
 old_tunnel_hash="$(sha256sum "$tunnel_tx/usr/bin/cloudflared" | awk '{print $1}')"
+prior_tunnel_rollback_hash="$(sha256sum "$tunnel_tx/usr/bin/cloudflared.previous" | awk '{print $1}')"
 tunnel_install_race="$TMP/tunnel-install-race"
 mkdir -p "$tunnel_install_race/usr/bin" "$tunnel_install_race/etc/secrets"
 cp "$tunnel_tx/usr/bin/cloudflared" "$tunnel_install_race/usr/bin/cloudflared"
@@ -717,6 +726,7 @@ tunnel_failure_code=$?
 set -e
 [ "$tunnel_failure_code" -ne 0 ]
 [ "$(sha256sum "$tunnel_tx/usr/bin/cloudflared" | awk '{print $1}')" = "$old_tunnel_hash" ]
+[ "$(sha256sum "$tunnel_tx/usr/bin/cloudflared.previous" | awk '{print $1}')" = "$prior_tunnel_rollback_hash" ]
 [ "$(cat "$tunnel_tx/etc/secrets/cloudflared.token")" = 'old.transaction.token' ]
 [ "$(stat -c '%a' "$tunnel_tx/etc/secrets/cloudflared.token")" = 600 ]
 ! grep -q '^VP_TUNNEL_METRICS_PORT=' "$tunnel_tx/etc/state.env"
