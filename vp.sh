@@ -2,7 +2,7 @@
 
 set -u
 
-VP_VERSION="0.2.0-dev.35"
+VP_VERSION="0.2.0-dev.36"
 VP_CONFIG_DIR="${VP_CONFIG_DIR:-/etc/vps-node}"
 VP_DATA_DIR="${VP_DATA_DIR:-/var/lib/vps-node}"
 VP_LOG_DIR="${VP_LOG_DIR:-/var/log/vps-node}"
@@ -2177,8 +2177,17 @@ create_backup() {
   recover_state_transaction || return 1
   destination="${1:-$VP_BACKUP_DIR}"
   case "$destination" in *.tar.gz) archive="$destination"; mkdir -p "$(dirname "$archive")" ;; *) mkdir -p "$destination"; archive="$destination/vps-node-$(date '+%Y%m%d-%H%M%S').tar.gz" ;; esac
+  [ ! -e "$archive" ] && [ ! -e "$archive.sha256" ] || { error "目标备份或校验文件已存在，拒绝覆盖：$archive"; return 1; }
   package="$(mktemp -d /tmp/vp-backup.XXXXXX)" || return 1
-  cleanup_backup() { rm -rf "$package"; }
+  archive_stage="$(mktemp "$(dirname "$archive")/.vps-node-backup.XXXXXX")" || { rm -rf "$package"; return 1; }
+  checksum_stage="$(mktemp "$(dirname "$archive")/.vps-node-backup-sha.XXXXXX")" || { rm -rf "$package"; rm -f "$archive_stage"; return 1; }
+  backup_complete=0
+  cleanup_backup() {
+    rm -rf "$package"
+    [ -n "$archive_stage" ] && rm -f "$archive_stage"
+    [ -n "$checksum_stage" ] && rm -f "$checksum_stage"
+    [ "$backup_complete" = 1 ] || rm -f "$archive" "$archive.sha256"
+  }
   trap cleanup_backup EXIT HUP INT TERM
   mkdir -p "$package/config" "$package/data"
   if [ -d "$VP_CONFIG_DIR" ]; then
@@ -2195,13 +2204,128 @@ create_backup() {
     printf 'CREATED_AT=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
   } > "$package/manifest.env"
   chmod 600 "$package/manifest.env"
-  tar -czf "$archive" -C "$package" manifest.env config data || { rm -f "$archive"; cleanup_backup; trap - EXIT HUP INT TERM; return 1; }
-  chmod 600 "$archive"
-  checksum="$(sha256_file "$archive" 2>/dev/null || true)"
-  [ -n "$checksum" ] && { printf '%s  %s\n' "$checksum" "$(basename "$archive")" > "$archive.sha256"; chmod 600 "$archive.sha256"; }
+  tar -czf "$archive_stage" -C "$package" manifest.env config data || { cleanup_backup; trap - EXIT HUP INT TERM; return 1; }
+  chmod 600 "$archive_stage"
+  checksum="$(sha256_file "$archive_stage" 2>/dev/null || true)"
+  [ -n "$checksum" ] || { cleanup_backup; trap - EXIT HUP INT TERM; error "无法为备份生成 SHA-256，未保留不完整恢复点。"; return 1; }
+  printf '%s  %s\n' "$checksum" "$(basename "$archive")" > "$checksum_stage" || { cleanup_backup; trap - EXIT HUP INT TERM; return 1; }
+  chmod 600 "$checksum_stage"
+  mv "$archive_stage" "$archive" || { cleanup_backup; trap - EXIT HUP INT TERM; return 1; }
+  archive_stage=""
+  if ! mv "$checksum_stage" "$archive.sha256"; then
+    rm -f "$archive"
+    cleanup_backup; trap - EXIT HUP INT TERM
+    error "备份校验文件提交失败，已移除不完整恢复点。"
+    return 1
+  fi
+  checksum_stage=""
+  backup_complete=1
   cleanup_backup
   trap - EXIT HUP INT TERM
   ok "备份已创建：$archive"
+}
+
+backup_directory_safe() {
+  backup_path="${1:-}"
+  case "$backup_path" in
+    ''|/|/etc|/var|/usr|/usr/local|/var/lib|/var/log|.|..|*/../*|*/..|*/./*|*/.) return 1 ;;
+    /*) ;;
+    *) return 1 ;;
+  esac
+  [ ! -L "$backup_path" ] || return 1
+  if [ -d "$backup_path" ]; then
+    physical_backup_path="$(CDPATH= cd -- "$backup_path" 2>/dev/null && pwd -P)" || return 1
+    [ "$physical_backup_path" = "${backup_path%/}" ] || return 1
+  fi
+}
+
+managed_backup_name() {
+  case "$(basename "$1")" in
+    vps-node-[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9].tar.gz) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+managed_backup_valid() {
+  managed_archive="$1"
+  [ -f "$managed_archive" ] && [ ! -L "$managed_archive" ] && managed_backup_name "$managed_archive" || return 1
+  [ -f "$managed_archive.sha256" ] && [ ! -L "$managed_archive.sha256" ] || return 1
+  expected_managed_hash="$(awk 'NR==1{print tolower($1)}' "$managed_archive.sha256" 2>/dev/null)"
+  actual_managed_hash="$(sha256_file "$managed_archive" 2>/dev/null | tr 'A-F' 'a-f')"
+  [ "${#expected_managed_hash}" -eq 64 ] && [ "$expected_managed_hash" = "$actual_managed_hash" ] || return 1
+  backup_archive_safe "$managed_archive"
+}
+
+backup_list() {
+  [ "$#" -le 1 ] || { error "用法：vp backups [备份目录]"; return 2; }
+  backup_directory="${1:-$VP_BACKUP_DIR}"
+  backup_directory_safe "$backup_directory" || { error "备份目录不安全：$backup_directory"; return 1; }
+  printf '备份目录：%s\n' "$backup_directory"
+  [ -d "$backup_directory" ] || { printf '恢复点：0 个\n'; return 0; }
+  backup_count=0
+  for listed_archive in "$backup_directory"/vps-node-????????-??????.tar.gz; do
+    [ -e "$listed_archive" ] || continue
+    managed_backup_name "$listed_archive" || continue
+    backup_count=$((backup_count + 1))
+    if managed_backup_valid "$listed_archive"; then
+      listed_state=可恢复
+      listed_version="$(tar -xOf "$listed_archive" manifest.env 2>/dev/null | awk -F= '$1=="VP_VERSION"{print $2;exit}')"
+    else
+      listed_state=异常-不会自动删除
+      listed_version=未知
+    fi
+    listed_size="$(du -k "$listed_archive" 2>/dev/null | awk 'NR==1{print $1}')"
+    printf '%s | %s KiB | 版本 %s | %s\n' "$(basename "$listed_archive")" "${listed_size:-未知}" "${listed_version:-未知}" "$listed_state"
+  done
+  printf '恢复点：%s 个\n' "$backup_count"
+}
+
+backup_prune() {
+  keep=5
+  prune_mode=--dry-run
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --keep) [ "$#" -ge 2 ] || { error "--keep 缺少数量。"; return 2; }; shift; keep="$1" ;;
+      --dry-run|--apply) prune_mode="$1" ;;
+      *) error "用法：vp backup-prune [--keep N] [--dry-run|--apply]"; return 2 ;;
+    esac
+    shift
+  done
+  case "$keep" in ''|*[!0-9]*) error "保留数量必须是正整数。"; return 2 ;; esac
+  [ "$keep" -ge 1 ] || { error "至少保留 1 个已验证恢复点。"; return 2; }
+  backup_directory_safe "$VP_BACKUP_DIR" || { error "备份目录不安全：$VP_BACKUP_DIR"; return 1; }
+  [ -d "$VP_BACKUP_DIR" ] || { ok "没有备份目录，无需整理。"; return 0; }
+  valid_list="$(mktemp /tmp/vp-backup-list.XXXXXX)" || return 1
+  trap 'rm -f "$valid_list"' EXIT HUP INT TERM
+  for prune_archive in "$VP_BACKUP_DIR"/vps-node-????????-??????.tar.gz; do
+    [ -e "$prune_archive" ] || continue
+    managed_backup_valid "$prune_archive" && printf '%s\n' "$prune_archive" >> "$valid_list"
+  done
+  sort "$valid_list" -o "$valid_list"
+  valid_count="$(awk 'NF{n++}END{print n+0}' "$valid_list")"
+  delete_count=$((valid_count - keep))
+  [ "$delete_count" -gt 0 ] || { rm -f "$valid_list"; trap - EXIT HUP INT TERM; ok "已验证恢复点 $valid_count 个，不超过保留数量 $keep。"; return 0; }
+  printf '备份整理：已验证 %s 个，保留最新 %s 个，计划删除最早 %s 个。\n' "$valid_count" "$keep" "$delete_count"
+  awk -v n="$delete_count" 'NF && ++seen<=n{print}' "$valid_list" | while IFS= read -r prune_target; do
+    printf '  %s\n' "$(basename "$prune_target")"
+  done
+  if [ "$prune_mode" = --dry-run ]; then
+    rm -f "$valid_list"; trap - EXIT HUP INT TERM
+    ok "预览完成，异常备份、非项目文件及现有恢复点均未修改。"
+    return 0
+  fi
+  need_root || { rm -f "$valid_list"; trap - EXIT HUP INT TERM; return 1; }
+  if [ -n "${VP_BACKUP_PRUNE_CONFIRM:-}" ]; then prune_confirm="$VP_BACKUP_PRUNE_CONFIRM"; else printf '输入 PRUNE 确认删除以上旧恢复点：'; read -r prune_confirm || true; fi
+  [ "$prune_confirm" = PRUNE ] || { rm -f "$valid_list"; trap - EXIT HUP INT TERM; warn "已取消备份整理。"; return 2; }
+  deleted_backups=0
+  while IFS= read -r prune_target; do
+    [ "$deleted_backups" -lt "$delete_count" ] || break
+    managed_backup_valid "$prune_target" || { error "删除前复核失败，已停止整理。"; rm -f "$valid_list"; trap - EXIT HUP INT TERM; return 1; }
+    rm -f "$prune_target" "$prune_target.sha256" || { error "无法删除旧恢复点。"; rm -f "$valid_list"; trap - EXIT HUP INT TERM; return 1; }
+    deleted_backups=$((deleted_backups + 1))
+  done < "$valid_list"
+  rm -f "$valid_list"; trap - EXIT HUP INT TERM
+  ok "备份整理完成：删除 $deleted_backups 个，保留最新 $keep 个已验证恢复点。"
 }
 
 backup_archive_safe() {
@@ -3757,13 +3881,16 @@ interactive_health() {
 }
 
 interactive_backup() {
-  printf '1. 创建备份\n2. 预览并恢复 VPS-Node 备份\n3. 预览旧 Mihomo-lite-argo 迁移\n4. 应用旧项目无损迁移\n0. 返回\n请选择：'
+  printf '1. 创建恢复点\n2. 查看恢复点\n3. 预览旧恢复点整理\n4. 应用旧恢复点整理\n5. 预览并恢复 VPS-Node 备份\n6. 预览旧 Mihomo-lite-argo 迁移\n7. 应用旧项目无损迁移\n0. 返回\n请选择：'
   read -r action || true
   case "$action" in
     1) create_backup "$VP_BACKUP_DIR" ;;
-    2) printf '请输入备份文件完整路径：'; read -r archive || true; restore_backup "$archive" ;;
-    3) printf '旧项目 nodes.db 路径（默认 /etc/mihomo/nodes.db）：'; read -r source_db || true; migrate_from_mihomo_lite "${source_db:-/etc/mihomo/nodes.db}" --dry-run ;;
-    4) printf '旧项目 nodes.db 路径（默认 /etc/mihomo/nodes.db）：'; read -r source_db || true; migrate_from_mihomo_lite "${source_db:-/etc/mihomo/nodes.db}" --apply ;;
+    2) backup_list ;;
+    3) backup_prune --keep 5 --dry-run ;;
+    4) backup_prune --keep 5 --apply ;;
+    5) printf '请输入备份文件完整路径：'; read -r archive || true; restore_backup "$archive" ;;
+    6) printf '旧项目 nodes.db 路径（默认 /etc/mihomo/nodes.db）：'; read -r source_db || true; migrate_from_mihomo_lite "${source_db:-/etc/mihomo/nodes.db}" --dry-run ;;
+    7) printf '旧项目 nodes.db 路径（默认 /etc/mihomo/nodes.db）：'; read -r source_db || true; migrate_from_mihomo_lite "${source_db:-/etc/mihomo/nodes.db}" --apply ;;
     0) return 0 ;;
     *) warn "无效选择。" ;;
   esac
@@ -3884,6 +4011,8 @@ case "${1:-}" in
   rotations|rotation-status) show_rotations ;;
   rotate-finalize|rotation-finalize) shift; finalize_rotation "$@" ;;
   backup) shift; create_backup "$@" ;;
+  backups|backup-list) shift; backup_list "$@" ;;
+  backup-prune) shift; backup_prune "$@" ;;
   restore) shift; restore_backup "$@" ;;
   migrate-mh|migrate-from-mh) shift; migrate_from_mihomo_lite "$@" ;;
   maintain|maintenance) maintenance_mode ;;
@@ -3909,7 +4038,7 @@ case "${1:-}" in
   _test-select-release-record) shift; test_select_release_asset_record "$@" ;;
   _test-json-top-level) shift; test_json_top_level_string "$@" ;;
   help|-h|--help)
-    printf '用法：vp [status|version-status|doctor|health|repair|report|self-heal|monitor-install|stability|network|network-optimize|network-rollback|test-all|optimize|maintain|update|rollback|init|core-install|reality-add|tunnel-install|argo-add|nodes|subscription|edit|delete|link|test-node|rotate|rotations|rotate-finalize|backup|restore|migrate-mh|uninstall|version]\n'
+    printf '用法：vp [status|version-status|doctor|health|repair|report|self-heal|monitor-install|stability|network|network-optimize|network-rollback|test-all|optimize|maintain|update|rollback|init|core-install|reality-add|tunnel-install|argo-add|nodes|subscription|edit|delete|link|test-node|rotate|rotations|rotate-finalize|backup|backups|backup-prune|restore|migrate-mh|uninstall|version]\n'
     ;;
   '') menu ;;
   *) error "未知命令：$1"; exit 2 ;;

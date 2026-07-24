@@ -476,6 +476,52 @@ VP_LIB_DIR="$TMP/dns-usr" VP_CORE_BIN="$TMP/dns-usr/bin/mihomo" VP_SKIP_SERVICE=
 sh "$ROOT/vp.sh" backup "$portable_backup" >/dev/null
 [ -s "$portable_backup" ]
 [ -s "$portable_backup.sha256" ]
+managed_data="$TMP/managed-lib"
+managed_backups="$managed_data/backups"
+mkdir -p "$managed_backups"
+for backup_index in 1 2 3 4 5 6 7; do
+  managed_target="$managed_backups/vps-node-20260101-00000${backup_index}.tar.gz"
+  VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log" \
+  VP_LIB_DIR="$TMP/dns-usr" VP_CORE_BIN="$TMP/dns-usr/bin/mihomo" VP_SKIP_SERVICE=1 \
+  sh "$ROOT/vp.sh" backup "$managed_target" >/dev/null
+done
+first_managed_hash="$(sha256sum "$managed_backups/vps-node-20260101-000001.tar.gz" | awk '{print $1}')"
+if VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log" \
+  VP_LIB_DIR="$TMP/dns-usr" VP_CORE_BIN="$TMP/dns-usr/bin/mihomo" VP_SKIP_SERVICE=1 \
+  sh "$ROOT/vp.sh" backup "$managed_backups/vps-node-20260101-000001.tar.gz" >/dev/null 2>&1; then
+  printf 'existing backup unexpectedly overwritten\n' >&2
+  exit 1
+fi
+[ "$(sha256sum "$managed_backups/vps-node-20260101-000001.tar.gz" | awk '{print $1}')" = "$first_managed_hash" ]
+printf 'unrelated\n' > "$managed_backups/notes.tar.gz"
+printf 'invalid\n' > "$managed_backups/vps-node-20250101-000000.tar.gz"
+printf '%064d  vps-node-20250101-000000.tar.gz\n' 0 > "$managed_backups/vps-node-20250101-000000.tar.gz.sha256"
+backup_list_output="$(VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log" \
+  VP_LIB_DIR="$TMP/dns-usr" VP_SKIP_SERVICE=1 sh "$ROOT/vp.sh" backups "$managed_backups")"
+[ "$(printf '%s\n' "$backup_list_output" | grep -c '| 可恢复$')" = 7 ]
+printf '%s\n' "$backup_list_output" | grep -q '异常-不会自动删除'
+prune_preview="$(VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/managed-lib" VP_LOG_DIR="$TMP/dns-log" \
+  VP_LIB_DIR="$TMP/dns-usr" VP_SKIP_SERVICE=1 sh "$ROOT/vp.sh" backup-prune --keep 3 --dry-run)"
+printf '%s\n' "$prune_preview" | grep -q '计划删除最早 4 个'
+[ -e "$managed_backups/vps-node-20260101-000001.tar.gz" ]
+mkdir -p "$TMP/symlink-data"
+ln -s "$managed_backups" "$TMP/symlink-data/backups"
+if VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/symlink-data" VP_LOG_DIR="$TMP/dns-log" \
+  VP_LIB_DIR="$TMP/dns-usr" VP_SKIP_SERVICE=1 sh "$ROOT/vp.sh" backup-prune --keep 3 --dry-run >/dev/null 2>&1; then
+  printf 'symlinked backup directory unexpectedly accepted for pruning\n' >&2
+  exit 1
+fi
+[ -e "$managed_backups/vps-node-20260101-000001.tar.gz" ]
+VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/managed-lib" VP_LOG_DIR="$TMP/dns-log" \
+VP_LIB_DIR="$TMP/dns-usr" VP_BACKUP_PRUNE_CONFIRM=PRUNE VP_SKIP_SERVICE=1 \
+sh "$ROOT/vp.sh" backup-prune --keep 3 --apply >/dev/null
+[ ! -e "$managed_backups/vps-node-20260101-000001.tar.gz" ]
+[ ! -e "$managed_backups/vps-node-20260101-000001.tar.gz.sha256" ]
+[ -e "$managed_backups/vps-node-20260101-000005.tar.gz" ]
+[ -e "$managed_backups/vps-node-20260101-000006.tar.gz" ]
+[ -e "$managed_backups/vps-node-20260101-000007.tar.gz" ]
+[ -e "$managed_backups/vps-node-20250101-000000.tar.gz" ]
+[ -e "$managed_backups/notes.tar.gz" ]
 sed -i 's/BACKUP_TEST_MARKER=original/BACKUP_TEST_MARKER=changed/' "$TMP/dns-etc/state.env"
 restore_preview="$(VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log" \
   VP_LIB_DIR="$TMP/dns-usr" VP_CORE_BIN="$TMP/dns-usr/bin/mihomo" VP_SKIP_SERVICE=1 \

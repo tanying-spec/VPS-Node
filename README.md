@@ -1,5 +1,6 @@
 # VPS-Node
 
+> `0.2.0-dev.36` 增加长期运行所需的恢复点管理：备份拒绝覆盖、必须同时提交 SHA-256；`vp backups` 显示大小、版本和可恢复状态；`vp backup-prune --keep 5 --dry-run|--apply` 只整理最旧且完整验证通过的项目备份，异常备份、无关文件和符号链接目录绝不自动删除，正式整理需输入 `PRUNE`。
 > `0.2.0-dev.35` 新增 `vp update --check` 只读更新检查，显示当前/候选版本、升级或降级方向、精确提交来源和完整性结论且不写文件；正式更新把当前 CLI、上一版 CLI 和校验文件纳入完整事务，中途失败恢复原回滚点，编号菜单会先检查并要求输入 `UPDATE` 才应用。
 > `0.2.0-dev.34` 回滚改为“先完整验证、再同目录原子交换”，在 CLI 或回滚文件交换后的故障都会恢复三个原文件；首页、更新菜单及 `vp version-status` 会显示当前版本、可回滚版本和校验状态，损坏回滚文件会明确警告并禁止执行。
 > `0.2.0-dev.33` 加固安装、更新和降级：本地测试源不能进入生产路径，非官方仓库必须显式授权；更新拒绝同版本不同内容和隐式降级，确需降级必须使用 `vp update --allow-downgrade`；安装初始化失败会恢复原管理脚本及原有回滚文件，替换过程改为目标目录内原子切换。
@@ -111,6 +112,9 @@ vp optimize
 vp rotate home 24
 vp rotate-finalize home
 vp backup
+vp backups
+vp backup-prune --keep 5 --dry-run
+vp backup-prune --keep 5 --apply
 vp restore /path/to/backup.tar.gz --dry-run
 vp restore /path/to/backup.tar.gz --apply
 vp migrate-mh /etc/mihomo/nodes.db --dry-run

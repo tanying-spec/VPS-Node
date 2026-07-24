@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.0-dev.36
+
+- Backup creation now refuses overwrite, requires SHA-256 and commits archive/checksum from same-directory temporary files; checksum commit failure removes the incomplete restore point.
+- Added `vp backups` with per-restore-point size, embedded version and integrity/restorability status.
+- Added `vp backup-prune --keep N --dry-run|--apply`: only the oldest fully verified project restore points are eligible, at least one is retained, and apply requires `PRUNE` confirmation.
+- Corrupt backups, unrelated files and symlinked/escaped backup directories are never auto-deleted; regression tests cover seven valid points, invalid and unrelated files, zero-write preview, overwrite refusal and retention results.
+
 ## 0.2.0-dev.35
 
 - Added `vp update --check` / `--dry-run`: it downloads and verifies the exact candidate, then reports current/candidate versions, change direction and immutable source without changing CLI or rollback files.
