@@ -1,6 +1,6 @@
 # VPS-Node 完成度审计
 
-审计版本：`0.2.0-dev.30`。
+审计版本：`0.2.0-dev.31`。
 
 | 目标要求 | 权威证据 | 当前判断 |
 | --- | --- | --- |
@@ -22,6 +22,6 @@
 
 1. 在唯一授权主机运行 `tests/isolated_acceptance.sh`，保存完整脱敏输出。
 2. 运行锁定主机的 `tests/memory_profiles.sh`，记录真实 Mihomo 64–2048 MiB 档位结果。
-3. 使用独立 Cloudflare 测试 Tunnel（不能复用正式 Tunnel）验证公网 WS、断线恢复和吞吐。
+3. 使用 `tests/isolated_acceptance.sh` 的独立 Cloudflare 测试参数（不能复用正式 Tunnel）验证公网 WS、断线恢复和吞吐。
 4. 若测试机具有公网 IPv6，完成 Reality IPv6 外部网络复核；否则明确记录环境不具备条件。
 5. 验收后复核 `FEATURE_GAP.md`，只有全部门槛有当前版本证据时才能标记目标完成。

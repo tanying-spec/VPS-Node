@@ -18,6 +18,20 @@
 VP_TEST_MIHOMO_BIN=/正式内核路径 sh tests/isolated_acceptance.sh
 ```
 
+如需同时验收 Cloudflare 公网备用线路，必须预先创建一条与正式业务完全独立的 Tunnel，并将其 Public Hostname 服务指向指定的固定源站端口：
+
+```sh
+VP_TEST_MIHOMO_BIN=/正式内核路径 \
+VP_TEST_CLOUDFLARED_BIN=/正式cloudflared二进制路径 \
+VP_TEST_TUNNEL_TOKEN_FILE=/root/独立测试.token \
+VP_TEST_ARGO_HOST=独立测试域名 \
+VP_TEST_ARGO_PATH=/独立测试路径 \
+VP_TEST_ARGO_ORIGIN_PORT=独立固定端口 \
+sh tests/isolated_acceptance.sh
+```
+
+五项 Tunnel 参数必须同时提供。脚本会在安装测试组件前拒绝已知正式 Token，以及出现在正式 `/etc/mihomo/nodes.db` 中的域名。Token、域名和链接不会写入验收证据。
+
 网络候选参数只执行 `--dry-run`；实机验收不会修改主机全局 sysctl。
 
 尚需在获得 SSH 授权后记录：

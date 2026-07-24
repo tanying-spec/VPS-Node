@@ -12,12 +12,43 @@ TUNNEL_SERVICE="vps-node-acceptance-tunnel-$RUN_ID"
 CLI="$BASE/bin/vp"
 BACKUP_DIR="$BASE/external-backup"
 EVIDENCE_DIR="${VP_ACCEPTANCE_EVIDENCE_DIR:-/root}"
+TEST_CLOUDFLARED_BIN="${VP_TEST_CLOUDFLARED_BIN:-}"
+TEST_TUNNEL_TOKEN_FILE="${VP_TEST_TUNNEL_TOKEN_FILE:-}"
+TEST_ARGO_HOST="${VP_TEST_ARGO_HOST:-}"
+TEST_ARGO_PATH="${VP_TEST_ARGO_PATH:-}"
+TEST_ARGO_ORIGIN_PORT="${VP_TEST_ARGO_ORIGIN_PORT:-}"
 
 [ "$(id -u)" = 0 ] || { printf 'acceptance requires root\n' >&2; exit 1; }
 [ -x "$MIHOMO_BIN" ] || { printf 'mihomo binary is not executable\n' >&2; exit 1; }
 case "$EVIDENCE_DIR" in /*) ;; *) printf 'evidence directory must be absolute\n' >&2; exit 1 ;; esac
 observed_host="$(curl -4 -fsS --max-time 8 https://api.ipify.org 2>/dev/null || true)"
 [ "$observed_host" = "$ACCEPT_HOST" ] || { printf 'refusing acceptance on an unauthorized host\n' >&2; exit 1; }
+
+argo_inputs=0
+for argo_input in "$TEST_CLOUDFLARED_BIN" "$TEST_TUNNEL_TOKEN_FILE" "$TEST_ARGO_HOST" "$TEST_ARGO_PATH" "$TEST_ARGO_ORIGIN_PORT"; do
+  [ -n "$argo_input" ] && argo_inputs=$((argo_inputs + 1))
+done
+[ "$argo_inputs" -eq 0 ] || [ "$argo_inputs" -eq 5 ] || {
+  printf 'independent Argo acceptance requires binary, token file, host, path and origin port together\n' >&2
+  exit 1
+}
+if [ "$argo_inputs" -eq 5 ]; then
+  [ -x "$TEST_CLOUDFLARED_BIN" ] || { printf 'test cloudflared binary is not executable\n' >&2; exit 1; }
+  [ -r "$TEST_TUNNEL_TOKEN_FILE" ] || { printf 'test Tunnel token file is not readable\n' >&2; exit 1; }
+  case "$TEST_ARGO_HOST" in *.*) ;; *) printf 'test Argo host is invalid\n' >&2; exit 1 ;; esac
+  case "$TEST_ARGO_PATH" in /*) ;; *) printf 'test Argo path must start with /\n' >&2; exit 1 ;; esac
+  case "$TEST_ARGO_ORIGIN_PORT" in ''|*[!0-9]*) printf 'test Argo origin port is invalid\n' >&2; exit 1 ;; esac
+  [ "$TEST_ARGO_ORIGIN_PORT" -ge 1024 ] && [ "$TEST_ARGO_ORIGIN_PORT" -le 65535 ] || { printf 'test Argo origin port out of range\n' >&2; exit 1; }
+  if [ -r /etc/cloudflared/token ] &&
+     [ "$(sha256sum "$TEST_TUNNEL_TOKEN_FILE" | awk '{print $1}')" = "$(sha256sum /etc/cloudflared/token | awk '{print $1}')" ]; then
+    printf 'refusing to reuse the formal Cloudflare Tunnel token\n' >&2
+    exit 1
+  fi
+  if [ -r /etc/mihomo/nodes.db ] && grep -Fq "$TEST_ARGO_HOST" /etc/mihomo/nodes.db; then
+    printf 'refusing to reuse a host present in the formal node database\n' >&2
+    exit 1
+  fi
+fi
 
 service_active() {
   rc-service "$1" status >/dev/null 2>&1
@@ -32,6 +63,17 @@ process_ids() {
   command -v pidof >/dev/null 2>&1 || { printf unavailable; return; }
   ids="$(pidof "$process_name" 2>/dev/null | tr ' ' '\n' | awk 'NF' | sort -n | tr '\n' ',' | sed 's/,$//' || true)"
   printf '%s' "${ids:-none}"
+}
+
+test_tunnel_pid() {
+  command -v pidof >/dev/null 2>&1 || return 1
+  for candidate_pid in $(pidof cloudflared 2>/dev/null); do
+    candidate_cmdline="$(tr '\0' ' ' < "/proc/$candidate_pid/cmdline" 2>/dev/null || true)"
+    case "$candidate_cmdline" in
+      *"$BASE/usr/bin/cloudflared"*"$BASE/etc/secrets/cloudflared.token"*) printf '%s' "$candidate_pid"; return 0 ;;
+    esac
+  done
+  return 1
 }
 
 formal_mihomo_before=inactive
@@ -79,13 +121,54 @@ if vp_env "$CLI" network 2>/dev/null | grep -q '公网 IPv6：可用'; then
   vp_env env VP_TEST_SERVER=::1 VP_TEST_BYTES=1048576 "$CLI" test-node acceptance-reality-v6 2 | grep -q '2/2 路成功'
   ipv6_result=loopback-passed
 fi
+argo_result=not-requested
+if [ "$argo_inputs" -eq 5 ]; then
+  vp_env "$CLI" argo-add acceptance-argo "$TEST_ARGO_ORIGIN_PORT" "$TEST_ARGO_HOST" "$TEST_ARGO_PATH" >/dev/null
+  VP_TUNNEL_SOURCE_BIN="$TEST_CLOUDFLARED_BIN" vp_env "$CLI" tunnel-install "$TEST_TUNNEL_TOKEN_FILE" >/dev/null
+  metrics_port="$(awk -F= '$1=="VP_TUNNEL_METRICS_PORT"{print $2;exit}' "$BASE/etc/state.env")"
+  edges=0
+  attempts=0
+  while [ "$attempts" -lt 20 ]; do
+    edges="$(curl -fsS --max-time 2 "http://127.0.0.1:$metrics_port/metrics" 2>/dev/null | awk '/^cloudflared_tunnel_ha_connections /{sum+=$2}END{print sum+0}')"
+    [ "$edges" -gt 0 ] && break
+    sleep 1
+    attempts=$((attempts + 1))
+  done
+  [ "$edges" -gt 0 ]
+  vp_env env VP_TEST_BYTES=1048576 "$CLI" test-node acceptance-argo 2 | grep -q '2/2 路成功'
+  old_test_tunnel_pid="$(test_tunnel_pid || true)"
+  [ -n "$old_test_tunnel_pid" ]
+  kill -9 "$old_test_tunnel_pid"
+  new_test_tunnel_pid=""
+  attempts=0
+  while [ "$attempts" -lt 20 ]; do
+    sleep 1
+    new_test_tunnel_pid="$(test_tunnel_pid || true)"
+    [ -n "$new_test_tunnel_pid" ] && [ "$new_test_tunnel_pid" != "$old_test_tunnel_pid" ] && break
+    attempts=$((attempts + 1))
+  done
+  [ -n "$new_test_tunnel_pid" ] && [ "$new_test_tunnel_pid" != "$old_test_tunnel_pid" ]
+  edges=0
+  attempts=0
+  while [ "$attempts" -lt 20 ]; do
+    edges="$(curl -fsS --max-time 2 "http://127.0.0.1:$metrics_port/metrics" 2>/dev/null | awk '/^cloudflared_tunnel_ha_connections /{sum+=$2}END{print sum+0}')"
+    [ "$edges" -gt 0 ] && break
+    sleep 1
+    attempts=$((attempts + 1))
+  done
+  [ "$edges" -gt 0 ]
+  vp_env env VP_TEST_BYTES=1048576 "$CLI" test-node acceptance-argo 2 | grep -q '2/2 路成功'
+  argo_result=public-concurrency-and-respawn-passed
+fi
 vp_env "$CLI" rotate acceptance-reality 1 >/dev/null
 expected_rotation_links=2
 [ "$ipv6_result" = loopback-passed ] && expected_rotation_links=3
+[ "$argo_result" = public-concurrency-and-respawn-passed ] && expected_rotation_links=$((expected_rotation_links + 1))
 [ "$(vp_env "$CLI" subscription plain | grep -c '^vless://')" -eq "$expected_rotation_links" ]
 vp_env "$CLI" rotate-finalize acceptance-reality >/dev/null
 expected_final_links=1
 [ "$ipv6_result" = loopback-passed ] && expected_final_links=2
+[ "$argo_result" = public-concurrency-and-respawn-passed ] && expected_final_links=$((expected_final_links + 1))
 [ "$(vp_env "$CLI" subscription plain | grep -c '^vless://')" -eq "$expected_final_links" ]
 printf 'ACCEPTANCE_MARKER=original\n' >> "$BASE/etc/state.env"
 vp_env "$CLI" backup "$BASE/acceptance.tar.gz" >/dev/null
@@ -131,6 +214,7 @@ evidence_file="$EVIDENCE_DIR/vps-node-acceptance-$(date -u '+%Y%m%dT%H%M%SZ').tx
   printf 'tested_at=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
   printf 'reality_ipv4_loopback_concurrency=2/2\n'
   printf 'reality_ipv6=%s\n' "$ipv6_result"
+  printf 'independent_cloudflare_tunnel=%s\n' "$argo_result"
   printf 'credential_rotation=passed\n'
   printf 'backup_restore_roundtrip=passed\n'
   printf 'config_drift_self_heal=passed\n'

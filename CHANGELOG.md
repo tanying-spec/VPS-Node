@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.0-dev.31
+
+- Authorized-host acceptance can optionally validate an independent Cloudflare Tunnel using a separate binary/token/hostname/path/fixed origin port bundle.
+- The harness rejects partial inputs, the known formal Tunnel token and hostnames present in the formal Mihomo database before changing test state.
+- Optional Argo acceptance proves edge connections, two-stream public transfer, supervised cloudflared respawn and successful transfer after respawn without exposing credentials in evidence.
+
 ## 0.2.0-dev.30
 
 - Isolated acceptance now proves formal Mihomo/cloudflared process IDs remain unchanged in addition to service states and config/init digests.
