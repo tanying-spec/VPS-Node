@@ -5,6 +5,7 @@
 - Added a one-command optimization and verification workflow.
 - Added applied memory tuning parameters to the status dashboard.
 - Added adaptive DNS upstream detection with public-DNS preference and system fallback.
+- Hardened the installer so local script files require an explicit opt-in.
 
 ## 0.2.0-dev.1
 

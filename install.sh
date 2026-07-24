@@ -37,7 +37,7 @@ sha256_file() {
   fi
 }
 
-if [ -f "./vp.sh" ]; then
+if [ "${VP_LOCAL_SOURCE:-0}" = "1" ] && [ -f "./vp.sh" ]; then
   cp ./vp.sh "$tmp"
   [ -f "./vp.sh.sha256" ] && cp ./vp.sh.sha256 "$checksum_tmp" || printf '%s  vp.sh\n' "$(sha256_file "$tmp")" > "$checksum_tmp"
 else
