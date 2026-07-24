@@ -1,5 +1,7 @@
 # VPS-Node
 
+> `0.2.0-dev.49` 加固灾难恢复入口：备份归档和 SHA-256 必须都是普通文件，符号链接与异常 sidecar 会被拒绝；缺少 SHA-256 的旧备份默认不再允许覆盖恢复，只有用户明确添加 `--allow-unverified` 后才进入路径、数据库关联和 Mihomo 配置验证。
+>
 > `0.2.0-dev.48` 为网络回滚的两项内核参数增加补偿事务：拥塞算法恢复成功但队列规则写入失败时，会恢复调用前的完整参数组合，避免留下混合状态；回滚快照和持久化配置继续保留，故障解除后可安全重试。
 >
 > `0.2.0-dev.47` 将验证通过后的网络优化持久化改为同目录暂存、权限校验和原子提交：回滚快照与 sysctl 配置不会再直接半写目标文件。故障注入覆盖“快照已提交”和“配置提交前”两个中断点，均要求恢复原拥塞算法/队列、清除新快照与暂存文件且不留下残缺配置；已有异常快照或非普通配置会保留原件并拒绝覆盖，性能门槛未通过仍立即回退。
@@ -130,6 +132,8 @@ vp backup-prune --keep 5 --dry-run
 vp backup-prune --keep 5 --apply
 vp restore /path/to/backup.tar.gz --dry-run
 vp restore /path/to/backup.tar.gz --apply
+# 仅兼容确认可信但没有 SHA-256 的旧备份：
+vp restore /path/to/legacy-backup.tar.gz --dry-run --allow-unverified
 vp migrate-mh /etc/mihomo/nodes.db --dry-run
 vp migrate-mh /etc/mihomo/nodes.db --apply
 vp maintain

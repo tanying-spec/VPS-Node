@@ -2,7 +2,7 @@
 
 set -u
 
-VP_VERSION="0.2.0-dev.48"
+VP_VERSION="0.2.0-dev.49"
 VP_CONFIG_DIR="${VP_CONFIG_DIR:-/etc/vps-node}"
 VP_DATA_DIR="${VP_DATA_DIR:-/var/lib/vps-node}"
 VP_LOG_DIR="${VP_LOG_DIR:-/var/log/vps-node}"
@@ -2436,15 +2436,40 @@ restore_extra_snapshot() {
 restore_backup() {
   need_root || return 1
   archive="${1:-}"
-  restore_mode="${2:---apply}"
-  case "$restore_mode" in --dry-run|--apply) ;; *) error "恢复模式只能是 --dry-run 或 --apply。"; return 2 ;; esac
+  [ -n "$archive" ] || { error "用法：vp restore 备份文件 [--dry-run|--apply] [--allow-unverified]"; return 2; }
+  shift
+  restore_mode=--apply
+  allow_unverified=0
+  restore_mode_seen=0
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --dry-run|--apply)
+        [ "$restore_mode_seen" -eq 0 ] || { error "恢复模式只能指定一次。"; return 2; }
+        restore_mode="$1"
+        restore_mode_seen=1
+        ;;
+      --allow-unverified) allow_unverified=1 ;;
+      *) error "用法：vp restore 备份文件 [--dry-run|--apply] [--allow-unverified]"; return 2 ;;
+    esac
+    shift
+  done
   [ -r "$archive" ] || { error "备份文件不存在。"; return 1; }
-  if [ -r "$archive.sha256" ]; then
+  [ -f "$archive" ] && [ ! -L "$archive" ] || { error "备份必须是普通文件，不能使用符号链接。"; return 1; }
+  if [ -e "$archive.sha256" ]; then
+    [ -f "$archive.sha256" ] && [ ! -L "$archive.sha256" ] && [ -r "$archive.sha256" ] || {
+      error "备份 SHA-256 文件不是可读普通文件，拒绝恢复。"
+      return 1
+    }
     expected_archive_hash="$(awk 'NR==1{print tolower($1)}' "$archive.sha256" 2>/dev/null)"
     actual_archive_hash="$(sha256_file "$archive" 2>/dev/null | tr 'A-F' 'a-f')"
-    [ -n "$expected_archive_hash" ] && [ "$expected_archive_hash" = "$actual_archive_hash" ] || { error "备份 SHA-256 校验失败。"; return 1; }
+    case "$expected_archive_hash" in ''|*[!0-9a-f]*) error "备份 SHA-256 文件格式无效。"; return 1 ;; esac
+    [ "${#expected_archive_hash}" -eq 64 ] && [ "$expected_archive_hash" = "$actual_archive_hash" ] || { error "备份 SHA-256 校验失败。"; return 1; }
   else
-    warn "备份旁路 SHA-256 文件不存在，将继续进行内容和配置验证。"
+    [ "$allow_unverified" -eq 1 ] || {
+      error "缺少备份 SHA-256 文件，默认拒绝恢复。确认这是可信旧备份后，可显式添加 --allow-unverified。"
+      return 1
+    }
+    warn "已显式允许无 SHA-256 的旧备份；仍会执行路径、数据库和 Mihomo 配置检查。"
   fi
   backup_archive_safe "$archive" || { error "备份包含不安全路径。"; return 1; }
   package="$(mktemp -d /tmp/vp-restore.XXXXXX)" || return 1

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.0-dev.49
+
+- Restore now rejects archives and SHA-256 sidecars that are not readable regular files, including symlinks.
+- Backups without a SHA-256 sidecar are rejected by default instead of being accepted after a warning.
+- Trusted legacy backups can still be inspected or restored only through the explicit `--allow-unverified` compatibility flag.
+- Regression tests prove the secure default, explicit legacy path and sidecar-symlink rejection while still exercising unsafe-archive and database-integrity checks.
+
 ## 0.2.0-dev.48
 
 - Network rollback now treats congestion-control and qdisc restoration as a compensated transaction.

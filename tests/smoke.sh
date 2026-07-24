@@ -587,6 +587,26 @@ VP_LIB_DIR="$TMP/dns-usr" VP_CORE_BIN="$TMP/dns-usr/bin/mihomo" VP_SKIP_SERVICE=
 VP_RESTORE_CONFIRM=RESTORE sh "$ROOT/vp.sh" restore "$portable_backup" --apply >/dev/null
 grep -q '^BACKUP_TEST_MARKER=original$' "$TMP/dns-etc/state.env"
 
+unverified_backup="$TMP/unverified-backup.tar.gz"
+cp "$portable_backup" "$unverified_backup"
+if VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log" \
+  VP_LIB_DIR="$TMP/dns-usr" VP_CORE_BIN="$TMP/dns-usr/bin/mihomo" VP_SKIP_SERVICE=1 \
+  sh "$ROOT/vp.sh" restore "$unverified_backup" --dry-run >/dev/null 2>&1; then
+  printf 'backup without checksum unexpectedly accepted by default\n' >&2
+  exit 1
+fi
+VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log" \
+VP_LIB_DIR="$TMP/dns-usr" VP_CORE_BIN="$TMP/dns-usr/bin/mihomo" VP_SKIP_SERVICE=1 \
+sh "$ROOT/vp.sh" restore "$unverified_backup" --allow-unverified --dry-run >/dev/null
+ln -s "$portable_backup.sha256" "$unverified_backup.sha256"
+if VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log" \
+  VP_LIB_DIR="$TMP/dns-usr" VP_CORE_BIN="$TMP/dns-usr/bin/mihomo" VP_SKIP_SERVICE=1 \
+  sh "$ROOT/vp.sh" restore "$unverified_backup" --dry-run >/dev/null 2>&1; then
+  printf 'symlinked backup checksum unexpectedly accepted\n' >&2
+  exit 1
+fi
+rm -f "$unverified_backup.sha256"
+
 malicious_package="$TMP/malicious-package"
 mkdir -p "$malicious_package/config" "$malicious_package/data"
 printf 'FORMAT_VERSION=1\n' > "$malicious_package/manifest.env"
@@ -596,7 +616,7 @@ ln -s "$TMP/outside-target" "$malicious_package/config/secrets"
 tar -czf "$TMP/malicious-backup.tar.gz" -C "$malicious_package" manifest.env config data
 if VP_CONFIG_DIR="$TMP/malicious-restore/etc" VP_DATA_DIR="$TMP/malicious-restore/lib" \
   VP_LOG_DIR="$TMP/malicious-restore/log" VP_LIB_DIR="$TMP/malicious-restore/usr" VP_SKIP_SERVICE=1 \
-  sh "$ROOT/vp.sh" restore "$TMP/malicious-backup.tar.gz" >/dev/null 2>&1; then
+  sh "$ROOT/vp.sh" restore "$TMP/malicious-backup.tar.gz" --allow-unverified >/dev/null 2>&1; then
   printf 'symlink backup unexpectedly accepted\n' >&2
   exit 1
 fi
@@ -615,7 +635,7 @@ tar -czf "$TMP/invalid-state.tar.gz" -C "$invalid_state" manifest.env config dat
 state_hash_before="$(sha256sum "$TMP/dns-etc/state.env" | awk '{print $1}')"
 if VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log" \
   VP_LIB_DIR="$TMP/dns-usr" VP_CORE_BIN="$TMP/dns-usr/bin/mihomo" VP_SKIP_SERVICE=1 \
-  sh "$ROOT/vp.sh" restore "$TMP/invalid-state.tar.gz" >/dev/null 2>&1; then
+  sh "$ROOT/vp.sh" restore "$TMP/invalid-state.tar.gz" --allow-unverified >/dev/null 2>&1; then
   printf 'duplicate listener backup unexpectedly accepted\n' >&2
   exit 1
 fi
@@ -630,7 +650,7 @@ printf '%s\n' 'rotation-node|argo|44444444-4444-4444-8444-444444444444|55555555-
 tar -czf "$TMP/invalid-rotation.tar.gz" -C "$rotation_state" manifest.env config data
 if VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log" \
   VP_LIB_DIR="$TMP/dns-usr" VP_CORE_BIN="$TMP/dns-usr/bin/mihomo" VP_SKIP_SERVICE=1 \
-  sh "$ROOT/vp.sh" restore "$TMP/invalid-rotation.tar.gz" >/dev/null 2>&1; then
+  sh "$ROOT/vp.sh" restore "$TMP/invalid-rotation.tar.gz" --allow-unverified >/dev/null 2>&1; then
   printf 'orphan rotation backup unexpectedly accepted\n' >&2
   exit 1
 fi
