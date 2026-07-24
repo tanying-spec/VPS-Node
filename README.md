@@ -29,6 +29,7 @@ vp argo-add backup 25443 tunnel.example.com /private-path
 vp nodes
 vp link home
 vp test-node home
+vp optimize
 vp rotate home 24
 vp rotate-finalize home
 vp backup
@@ -39,6 +40,8 @@ vp rollback
 ```
 
 普通用户可以直接运行 `vp`，首页菜单会引导创建主节点、备用节点、测试、修复、维护和迁移；命令参数适合高级用户和自动化。
+
+`vp optimize` 会根据当前 cgroup/主机内存重新计算已验证的 Mihomo 运行参数，必要时重启服务，并立即执行健康检查；不会修改节点地址、UUID 或 Tunnel Token。
 
 ## 验证范围
 
@@ -56,4 +59,3 @@ vp rollback
 Reality 从 VPS 内部使用公网 IP 测试时，如果宿主网络不支持 NAT hairpin，程序会明确提示需要外部网络复核，不会误判为协议故障。
 
 项目仍处于开发阶段，建议先在自己的测试 VPS 上验证域名、Tunnel ingress 和防火墙策略。
-

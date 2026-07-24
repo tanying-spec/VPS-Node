@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.0-dev.2
+
+- Added a one-command optimization and verification workflow.
+- Added applied memory tuning parameters to the status dashboard.
+
 ## 0.2.0-dev.1
 
 - Added Mihomo Reality primary node lifecycle.
@@ -11,4 +16,3 @@
 - Added validated backups, migration, maintenance mode and complete uninstall.
 - Added exact-commit script updates, Release asset digests and rollback.
 - Added OpenRC/systemd service templates and service recovery tests.
-

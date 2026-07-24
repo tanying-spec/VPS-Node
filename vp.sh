@@ -2,7 +2,7 @@
 
 set -u
 
-VP_VERSION="0.2.0-dev.1"
+VP_VERSION="0.2.0-dev.2"
 VP_CONFIG_DIR="${VP_CONFIG_DIR:-/etc/vps-node}"
 VP_DATA_DIR="${VP_DATA_DIR:-/var/lib/vps-node}"
 VP_LOG_DIR="${VP_LOG_DIR:-/var/log/vps-node}"
@@ -1396,7 +1396,27 @@ show_status() {
     printf '  内存限制：宿主机管理\n'
   fi
   printf '  Swap：%s MiB\n' "$(bytes_to_mib "$MEM_SWAP_BYTES")"
+  if [ -r "$VP_CORE_ENV" ]; then
+    printf '\n已应用的优化参数：\n'
+    printf '  内存档位：%s\n' "$(awk -F= '$1=="VP_MEMORY_PROFILE"{print $2;exit}' "$VP_CORE_ENV" 2>/dev/null || printf '未知')"
+    printf '  核心预算：%s MiB\n' "$(awk -F= '$1=="VP_CORE_BUDGET_MIB"{print $2;exit}' "$VP_CORE_ENV" 2>/dev/null || printf '未知')"
+    printf '  GOMEMLIMIT：%s\n' "$(awk -F= '$1=="GOMEMLIMIT"{print $2;exit}' "$VP_CORE_ENV" 2>/dev/null || printf '未知')"
+    printf '  GOGC / GOMAXPROCS：%s / %s\n' \
+      "$(awk -F= '$1=="GOGC"{print $2;exit}' "$VP_CORE_ENV" 2>/dev/null || printf '未知')" \
+      "$(awk -F= '$1=="GOMAXPROCS"{print $2;exit}' "$VP_CORE_ENV" 2>/dev/null || printf '未知')"
+  fi
   printf '%s\n\n' '----------------------------------------'
+}
+
+optimize_and_verify() {
+  need_root || return 1
+  init_layout >/dev/null || return 1
+  info "正在检测当前内存限制、配置和服务状态。"
+  if ! doctor; then
+    warn "基础检查发现问题，将只应用不会改变节点凭据的安全优化。"
+  fi
+  safe_repair || return 1
+  layered_health_check
 }
 
 dns_probe() {
@@ -1790,12 +1810,13 @@ menu() {
     printf '1. 创建 Reality 主节点\n'
     printf '2. 配置 Cloudflare 备用节点\n'
     printf '3. 查看与管理节点\n'
-    printf '4. 健康检查与安全修复\n'
-    printf '5. 一键安全维护\n'
-    printf '6. 备份与迁移\n'
-    printf '7. 更新与回滚\n'
-    printf '8. 高级设置\n'
-    printf '9. 刷新状态\n'
+    printf '4. 一键优化并验证\n'
+    printf '5. 健康检查与安全修复\n'
+    printf '6. 一键安全维护\n'
+    printf '7. 备份与迁移\n'
+    printf '8. 更新与回滚\n'
+    printf '9. 高级设置\n'
+    printf '10. 刷新状态\n'
     printf '0. 退出\n'
     printf '请选择：'
     read -r choice || return 0
@@ -1803,12 +1824,13 @@ menu() {
       1) interactive_reality_add; pause_screen ;;
       2) interactive_argo_setup; pause_screen ;;
       3) interactive_node_action; pause_screen ;;
-      4) interactive_health; pause_screen ;;
-      5) maintenance_mode; pause_screen ;;
-      6) interactive_backup; pause_screen ;;
-      7) interactive_update; pause_screen ;;
-      8) advanced_menu; pause_screen ;;
-      9) ;;
+      4) optimize_and_verify; pause_screen ;;
+      5) interactive_health; pause_screen ;;
+      6) maintenance_mode; pause_screen ;;
+      7) interactive_backup; pause_screen ;;
+      8) interactive_update; pause_screen ;;
+      9) advanced_menu; pause_screen ;;
+      10) ;;
       0) return 0 ;;
       *) warn "无效选择。" ;;
     esac
@@ -1839,11 +1861,12 @@ case "${1:-}" in
   doctor) doctor ;;
   health|check) layered_health_check ;;
   repair|fix) safe_repair ;;
+  optimize|optimization) optimize_and_verify ;;
   version|--version|-V) printf '%s\n' "$VP_VERSION" ;;
   uninstall) uninstall_project ;;
   debug-tx) shift; debug_transaction "$@" ;;
   help|-h|--help)
-    printf '用法：vp [status|doctor|health|repair|maintain|update|rollback|init|core-install|reality-add|tunnel-install|argo-add|nodes|delete|link|test-node|rotate|rotations|rotate-finalize|backup|restore|uninstall|version]\n'
+    printf '用法：vp [status|doctor|health|repair|optimize|maintain|update|rollback|init|core-install|reality-add|tunnel-install|argo-add|nodes|delete|link|test-node|rotate|rotations|rotate-finalize|backup|restore|uninstall|version]\n'
     ;;
   '') menu ;;
   *) error "未知命令：$1"; exit 2 ;;
