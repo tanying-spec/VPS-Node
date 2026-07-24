@@ -1,5 +1,7 @@
 # VPS-Node
 
+> `0.2.0-dev.17` Cloudflare Tunnel 安装与 Token 更新改为原子操作：新二进制、新 Token 或服务重启任一步失败，都会恢复旧二进制、旧 Token 权限及更新前服务状态；首次安装失败则清除不完整文件。
+
 > `0.2.0-dev.16` 分享链接会先执行完整性检查，再安全编码路径和节点名称；UUID、端口、Reality 参数、Tunnel 域名、WebSocket 路径或公网地址异常时会明确报错，不再输出看似完整但无法使用的残缺链接。订阅导出执行同样的检查。
 
 > `0.2.0-dev.15` 新增 `vp migrate-mh /etc/mihomo/nodes.db --dry-run` 和 `--apply`。只迁移能够无损映射的 Reality 与标准 Argo WS；不猜测转换其他协议，也不读取旧 Tunnel Token、用户、iptables、cron 或 sysctl。

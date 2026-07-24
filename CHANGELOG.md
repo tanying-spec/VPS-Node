@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.0-dev.17
+
+- Cloudflare Tunnel installation and token rotation are now atomic across the binary, token file and service restart.
+- A failed first install removes partial binary/token artifacts; a failed update restores the previous executable, token permissions and prior running/stopped state.
+- Added failure-injection coverage for both update rollback and clean first-install rollback.
+
 ## 0.2.0-dev.16
 
 - Share links are now validated before output; malformed UUIDs, ports, Reality fields, Tunnel hosts, WebSocket paths and unavailable public addresses produce specific errors instead of incomplete links.

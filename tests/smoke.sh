@@ -284,6 +284,47 @@ grep -q 'credentials=<redacted>' "$diagnostic"
 node_uuid="$(awk -F'|' 'NR==1{print $4}' "$TMP/dns-etc/nodes.db")"
 ! grep -Fq "$node_uuid" "$diagnostic"
 
+tunnel_tx="$TMP/tunnel-transaction"
+mkdir -p "$tunnel_tx/usr/bin" "$tunnel_tx/etc/secrets"
+cat > "$tunnel_tx/usr/bin/cloudflared" <<'OLD_TUNNEL'
+#!/bin/sh
+[ "${1:-}" = version ] && { printf 'old-cloudflared\n'; exit 0; }
+exit 0
+OLD_TUNNEL
+cat > "$tunnel_tx/new-cloudflared" <<'NEW_TUNNEL'
+#!/bin/sh
+[ "${1:-}" = version ] && { printf 'new-cloudflared\n'; exit 0; }
+exit 0
+NEW_TUNNEL
+chmod 755 "$tunnel_tx/usr/bin/cloudflared" "$tunnel_tx/new-cloudflared"
+printf 'old.transaction.token\n' > "$tunnel_tx/etc/secrets/cloudflared.token"
+printf 'new.transaction.token\n' > "$tunnel_tx/new.token"
+old_tunnel_hash="$(sha256sum "$tunnel_tx/usr/bin/cloudflared" | awk '{print $1}')"
+set +e
+VP_CONFIG_DIR="$tunnel_tx/etc" VP_DATA_DIR="$tunnel_tx/lib" VP_LOG_DIR="$tunnel_tx/log" \
+VP_LIB_DIR="$tunnel_tx/usr" VP_TUNNEL_BIN="$tunnel_tx/usr/bin/cloudflared" \
+VP_TUNNEL_BACKUP_BIN="$tunnel_tx/usr/bin/cloudflared.previous" \
+VP_TUNNEL_SOURCE_BIN="$tunnel_tx/new-cloudflared" VP_SKIP_SERVICE=1 VP_ALLOW_TEST_HOOKS=1 \
+VP_TEST_TUNNEL_RESTART_FAIL=1 sh "$ROOT/vp.sh" tunnel-install "$tunnel_tx/new.token" >/dev/null 2>&1
+tunnel_failure_code=$?
+set -e
+[ "$tunnel_failure_code" -ne 0 ]
+[ "$(sha256sum "$tunnel_tx/usr/bin/cloudflared" | awk '{print $1}')" = "$old_tunnel_hash" ]
+[ "$(cat "$tunnel_tx/etc/secrets/cloudflared.token")" = 'old.transaction.token' ]
+[ "$(stat -c '%a' "$tunnel_tx/etc/secrets/cloudflared.token")" = 600 ]
+fresh_tunnel="$TMP/tunnel-fresh-failure"
+mkdir -p "$fresh_tunnel"
+set +e
+VP_CONFIG_DIR="$fresh_tunnel/etc" VP_DATA_DIR="$fresh_tunnel/lib" VP_LOG_DIR="$fresh_tunnel/log" \
+VP_LIB_DIR="$fresh_tunnel/usr" VP_TUNNEL_SOURCE_BIN="$tunnel_tx/new-cloudflared" \
+VP_SKIP_SERVICE=1 VP_ALLOW_TEST_HOOKS=1 VP_TEST_TUNNEL_RESTART_FAIL=1 \
+sh "$ROOT/vp.sh" tunnel-install "$tunnel_tx/new.token" >/dev/null 2>&1
+fresh_tunnel_code=$?
+set -e
+[ "$fresh_tunnel_code" -ne 0 ]
+[ ! -e "$fresh_tunnel/usr/bin/cloudflared" ]
+[ ! -e "$fresh_tunnel/etc/secrets/cloudflared.token" ]
+
 VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log" \
 VP_LIB_DIR="$TMP/dns-usr" VP_CORE_BIN="$TMP/dns-usr/bin/mihomo" \
 VP_CORE_BACKUP_BIN="$TMP/dns-usr/bin/mihomo.previous" VP_SKIP_SERVICE=1 \

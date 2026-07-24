@@ -2,7 +2,7 @@
 
 set -u
 
-VP_VERSION="0.2.0-dev.16"
+VP_VERSION="0.2.0-dev.17"
 VP_CONFIG_DIR="${VP_CONFIG_DIR:-/etc/vps-node}"
 VP_DATA_DIR="${VP_DATA_DIR:-/var/lib/vps-node}"
 VP_LOG_DIR="${VP_LOG_DIR:-/var/log/vps-node}"
@@ -799,6 +799,9 @@ EOF
 }
 
 tunnel_service_restart() {
+  if [ "${VP_ALLOW_TEST_HOOKS:-0}" = "1" ] && [ "${VP_TEST_TUNNEL_RESTART_FAIL:-0}" = "1" ]; then
+    return 1
+  fi
   [ "${VP_SKIP_SERVICE:-0}" = "1" ] && return 0
   service_action restart "$VP_TUNNEL_SERVICE" >/dev/null 2>&1 || return 1
   attempts=0
@@ -808,6 +811,30 @@ tunnel_service_restart() {
     attempts=$((attempts + 1))
   done
   return 1
+}
+
+rollback_tunnel_install() {
+  had_binary="$1"
+  had_token="$2"
+  token_backup="$3"
+  was_running="$4"
+  if [ "$had_binary" = "1" ] && [ -x "$VP_TUNNEL_BACKUP_BIN" ]; then
+    cp "$VP_TUNNEL_BACKUP_BIN" "$VP_TUNNEL_BIN" && chmod 755 "$VP_TUNNEL_BIN"
+  elif [ "$had_binary" = "0" ]; then
+    rm -f "$VP_TUNNEL_BIN"
+  fi
+  if [ "$had_token" = "1" ] && [ -r "$token_backup" ]; then
+    cp "$token_backup" "$VP_TUNNEL_TOKEN_FILE" && chmod 600 "$VP_TUNNEL_TOKEN_FILE"
+  elif [ "$had_token" = "0" ]; then
+    rm -f "$VP_TUNNEL_TOKEN_FILE"
+  fi
+  if [ "${VP_SKIP_SERVICE:-0}" != "1" ]; then
+    if [ "$was_running" = "1" ]; then
+      service_action restart "$VP_TUNNEL_SERVICE" >/dev/null 2>&1 || true
+    else
+      service_action stop "$VP_TUNNEL_SERVICE" >/dev/null 2>&1 || true
+    fi
+  fi
 }
 
 tunnel_install() {
@@ -828,11 +855,38 @@ tunnel_install() {
   fi
   [ -n "${token:-}" ] || { error "Token 不能为空。"; return 1; }
   case "$token" in *[!A-Za-z0-9._-]*) error "Token 格式无效。"; return 1 ;; esac
-  install_tunnel_binary || return 1
-  printf '%s\n' "$token" > "$VP_TUNNEL_TOKEN_FILE"
-  chmod 600 "$VP_TUNNEL_TOKEN_FILE"
-  install_tunnel_service || return 1
-  tunnel_service_restart || { error "Tunnel 启动失败。"; return 1; }
+  tunnel_had_binary=0
+  tunnel_had_token=0
+  tunnel_was_running=0
+  [ -x "$VP_TUNNEL_BIN" ] && tunnel_had_binary=1
+  [ -s "$VP_TUNNEL_TOKEN_FILE" ] && tunnel_had_token=1
+  case "$(service_state "$VP_TUNNEL_SERVICE")" in active|started) tunnel_was_running=1 ;; esac
+  token_backup="$(mktemp /tmp/vp-tunnel-token.XXXXXX)" || return 1
+  if [ "$tunnel_had_token" = "1" ]; then
+    cp "$VP_TUNNEL_TOKEN_FILE" "$token_backup" || { rm -f "$token_backup"; return 1; }
+    chmod 600 "$token_backup"
+  fi
+  install_tunnel_binary || { rm -f "$token_backup"; return 1; }
+  token_candidate="$(mktemp "$VP_SECRETS_DIR/.cloudflared-token.XXXXXX")" || {
+    rollback_tunnel_install "$tunnel_had_binary" "$tunnel_had_token" "$token_backup" "$tunnel_was_running"
+    rm -f "$token_backup"
+    return 1
+  }
+  printf '%s\n' "$token" > "$token_candidate" || {
+    rm -f "$token_candidate"
+    rollback_tunnel_install "$tunnel_had_binary" "$tunnel_had_token" "$token_backup" "$tunnel_was_running"
+    rm -f "$token_backup"
+    return 1
+  }
+  chmod 600 "$token_candidate"
+  mv "$token_candidate" "$VP_TUNNEL_TOKEN_FILE"
+  if ! install_tunnel_service || ! tunnel_service_restart; then
+    rollback_tunnel_install "$tunnel_had_binary" "$tunnel_had_token" "$token_backup" "$tunnel_was_running"
+    rm -f "$token_backup"
+    error "Tunnel 更新启动失败，已恢复旧二进制、Token 和服务状态。"
+    return 1
+  fi
+  rm -f "$token_backup"
   ok "Cloudflare Tunnel 已安装。"
 }
 
