@@ -51,7 +51,7 @@ powershell -ExecutionPolicy Bypass -File .\tests\run_authorized_host.ps1 `
 powershell -ExecutionPolicy Bypass -File .\tests\run_authorized_host.ps1 -SelfTestEvidence
 ```
 
-默认入口随后会执行八档真实内存验收，而不是只计算参数。测试机必须提供可委派的 cgroup v2 memory controller；每档都会在独立 cgroup 中施加 64、96、128、192、256、512、1024 或 2048 MiB 硬上限，启动真实 Mihomo，验证代理出口并完成四路并发、每路 1 MiB 的精确字节传输，记录峰值及 OOM 后清理。若环境无法提供真正的 cgroup 内存约束，验收会明确失败，不会降级成模拟结果。
+默认入口随后会执行十五档真实内存验收，而不是只计算参数。测试机必须提供可委派的 cgroup v2 memory controller；档位为 64、96、97、128、160、161、192、256、320、321、512、640、641、1024、2048 MiB，覆盖全部策略切换边界前后。每档都会施加独立硬上限，启动真实 Mihomo，验证代理出口并完成四路并发、每路 1 MiB 的精确字节传输，记录峰值及 OOM 后清理。若环境无法提供真正的 cgroup 内存约束，验收会明确失败，不会降级成模拟结果。
 
 脚本中的目标 IP 为常量，不能通过环境变量改成其他主机。旧的非隔离系统测试已经删除。
 

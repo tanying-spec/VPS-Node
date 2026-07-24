@@ -157,13 +157,13 @@ function Assert-MemoryEvidence([string]$Directory) {
         tested_script_sha256 = $expectedScriptHash
         authorized_host = $AuthorizedHost
         cgroup_version = '2'
-        memory_limits_tested = '64,96,128,192,256,512,1024,2048'
-        profile_count = '8'
-        real_core_startups = '8'
-        functional_proxy_checks = '8'
-        traffic_survival_checks = '8'
-        concurrent_transfer_checks = '32'
-        verified_transfer_bytes = '33554432'
+        memory_limits_tested = '64,96,97,128,160,161,192,256,320,321,512,640,641,1024,2048'
+        profile_count = '15'
+        real_core_startups = '15'
+        functional_proxy_checks = '15'
+        traffic_survival_checks = '15'
+        concurrent_transfer_checks = '60'
+        verified_transfer_bytes = '62914560'
         oom_kill_total = '0'
         formal_services_and_sensitive_state_unchanged = 'yes'
     }
@@ -173,12 +173,12 @@ function Assert-MemoryEvidence([string]$Directory) {
         }
     }
     $rows = @(Import-Csv -LiteralPath $csvFiles[0].FullName)
-    $limits = @(64, 96, 128, 192, 256, 512, 1024, 2048)
-    $budgets = @(38, 57, 76, 115, 153, 307, 512, 512)
-    $profiles = @('ultra-compact', 'ultra-compact', 'compact', 'balanced', 'balanced', 'standard', 'performance', 'performance')
-    $gogc = @(50, 50, 60, 80, 80, 100, 100, 100)
-    $gomaxprocs = @(1, 1, 1, 2, 2, 2, 4, 4)
-    if ($rows.Count -ne $limits.Count) { throw "Expected eight memory profile rows; found $($rows.Count)." }
+    $limits = @(64, 96, 97, 128, 160, 161, 192, 256, 320, 321, 512, 640, 641, 1024, 2048)
+    $budgets = @(38, 57, 58, 76, 96, 96, 115, 153, 192, 192, 307, 384, 384, 512, 512)
+    $profiles = @('ultra-compact', 'ultra-compact', 'compact', 'compact', 'compact', 'balanced', 'balanced', 'balanced', 'balanced', 'standard', 'standard', 'standard', 'performance', 'performance', 'performance')
+    $gogc = @(50, 50, 60, 60, 60, 80, 80, 80, 80, 100, 100, 100, 100, 100, 100)
+    $gomaxprocs = @(1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 2, 4, 4, 4)
+    if ($rows.Count -ne $limits.Count) { throw "Expected fifteen memory profile rows; found $($rows.Count)." }
     $maximumPeak = 0
     for ($index = 0; $index -lt $limits.Count; $index++) {
         $row = $rows[$index]
@@ -316,15 +316,15 @@ if ($SelfTestEvidence) {
             "tested_script_sha256=$expectedScriptHash",
             "authorized_host=$AuthorizedHost",
             'cgroup_version=2',
-            'memory_limits_tested=64,96,128,192,256,512,1024,2048',
-            'profile_count=8',
-            'real_core_startups=8',
-            'functional_proxy_checks=8',
-            'traffic_survival_checks=8',
-            'concurrent_transfer_checks=32',
-            'verified_transfer_bytes=33554432',
+            'memory_limits_tested=64,96,97,128,160,161,192,256,320,321,512,640,641,1024,2048',
+            'profile_count=15',
+            'real_core_startups=15',
+            'functional_proxy_checks=15',
+            'traffic_survival_checks=15',
+            'concurrent_transfer_checks=60',
+            'verified_transfer_bytes=62914560',
             'oom_kill_total=0',
-            'max_observed_peak_mib=48',
+            'max_observed_peak_mib=55',
             'formal_services_and_sensitive_state_unchanged=yes'
         ) | Set-Content -LiteralPath $memorySummary -Encoding ascii
         $memoryCsv = Join-Path $selfTestDirectory 'memory-profiles.csv'
@@ -332,12 +332,19 @@ if ($SelfTestEvidence) {
             'limit_mib,budget_mib,profile,gomemlimit,gogc,gomaxprocs,peak_mib,oom_kill,proxy_result,concurrent_success,total_bytes',
             '64,38,ultra-compact,38MiB,50,1,31,0,passed,4,4194304',
             '96,57,ultra-compact,57MiB,50,1,32,0,passed,4,4194304',
-            '128,76,compact,76MiB,60,1,33,0,passed,4,4194304',
-            '192,115,balanced,115MiB,80,2,35,0,passed,4,4194304',
-            '256,153,balanced,153MiB,80,2,36,0,passed,4,4194304',
-            '512,307,standard,307MiB,100,2,40,0,passed,4,4194304',
-            '1024,512,performance,512MiB,100,4,45,0,passed,4,4194304',
-            '2048,512,performance,512MiB,100,4,48,0,passed,4,4194304'
+            '97,58,compact,58MiB,60,1,33,0,passed,4,4194304',
+            '128,76,compact,76MiB,60,1,34,0,passed,4,4194304',
+            '160,96,compact,96MiB,60,1,35,0,passed,4,4194304',
+            '161,96,balanced,96MiB,80,2,36,0,passed,4,4194304',
+            '192,115,balanced,115MiB,80,2,37,0,passed,4,4194304',
+            '256,153,balanced,153MiB,80,2,38,0,passed,4,4194304',
+            '320,192,balanced,192MiB,80,2,39,0,passed,4,4194304',
+            '321,192,standard,192MiB,100,2,40,0,passed,4,4194304',
+            '512,307,standard,307MiB,100,2,42,0,passed,4,4194304',
+            '640,384,standard,384MiB,100,2,44,0,passed,4,4194304',
+            '641,384,performance,384MiB,100,4,46,0,passed,4,4194304',
+            '1024,512,performance,512MiB,100,4,50,0,passed,4,4194304',
+            '2048,512,performance,512MiB,100,4,55,0,passed,4,4194304'
         )
         $validMemoryRows | Set-Content -LiteralPath $memoryCsv -Encoding ascii
         foreach ($memoryFile in @($memorySummary, $memoryCsv)) {
@@ -502,12 +509,14 @@ else
   printf 'preflight_tunnel_mode=skipped\n'
 fi
 '@
-$preflightCommand = "PREFLIGHT_MEMORY=$(if ($SkipMemoryProfiles) { '0' } else { '1' }) " +
-    "PREFLIGHT_TUNNEL=$(if ($TunnelInputCount -eq 4) { '1' } else { '0' }) " +
-    "PREFLIGHT_TOKEN_FILE=$(Quote-Sh $TunnelTokenFile) " +
-    "PREFLIGHT_HOST=$(Quote-Sh $TunnelHost) " +
-    "PREFLIGHT_PATH=$(Quote-Sh $TunnelPath) " +
-    "PREFLIGHT_PORT=$(Quote-Sh ([string]$TunnelOriginPort)) " + $preflightScript
+$preflightCommand = "PREFLIGHT_MEMORY=$(if ($SkipMemoryProfiles) { '0' } else { '1' }); " +
+    "PREFLIGHT_TUNNEL=$(if ($TunnelInputCount -eq 4) { '1' } else { '0' }); " +
+    "PREFLIGHT_TOKEN_FILE=$(Quote-Sh $TunnelTokenFile); " +
+    "PREFLIGHT_HOST=$(Quote-Sh $TunnelHost); " +
+    "PREFLIGHT_PATH=$(Quote-Sh $TunnelPath); " +
+    "PREFLIGHT_PORT=$(Quote-Sh ([string]$TunnelOriginPort)); " +
+    "export PREFLIGHT_MEMORY PREFLIGHT_TUNNEL PREFLIGHT_TOKEN_FILE PREFLIGHT_HOST PREFLIGHT_PATH PREFLIGHT_PORT; " +
+    $preflightScript
 $preflight = Invoke-AuthorizedSsh $preflightCommand
 $PreflightLines = Assert-PreflightResult $preflight.Output (-not $SkipMemoryProfiles) ($TunnelInputCount -eq 4)
 $PreflightLines | ForEach-Object { Write-Host $_ }

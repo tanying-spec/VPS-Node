@@ -95,7 +95,7 @@ printf 'limit_mib,budget_mib,profile,gomemlimit,gogc,gomaxprocs,peak_mib,oom_kil
 previous_budget=0
 profile_count=0
 max_peak_mib=0
-for limit_mib in 64 96 128 192 256 512 1024 2048; do
+for limit_mib in 64 96 97 128 160 161 192 256 320 321 512 640 641 1024 2048; do
   case_dir="$TMP/$limit_mib"
   VP_CONFIG_DIR="$case_dir/etc" VP_DATA_DIR="$case_dir/lib" VP_LOG_DIR="$case_dir/log" \
   VP_LIB_DIR="$case_dir/usr-lib" VP_CORE_BIN="$case_dir/usr-lib/bin/mihomo" \
@@ -205,7 +205,7 @@ formal_tunnel_state_after="$(rc-service cloudflared-tunnel status >/dev/null 2>&
   printf 'tested_script_sha256=%s\n' "$tested_script_sha256"
   printf 'authorized_host=%s\n' "$ACCEPT_HOST"
   printf 'cgroup_version=2\n'
-  printf 'memory_limits_tested=64,96,128,192,256,512,1024,2048\n'
+  printf 'memory_limits_tested=64,96,97,128,160,161,192,256,320,321,512,640,641,1024,2048\n'
   printf 'profile_count=%s\n' "$profile_count"
   printf 'real_core_startups=%s\n' "$profile_count"
   printf 'functional_proxy_checks=%s\n' "$profile_count"

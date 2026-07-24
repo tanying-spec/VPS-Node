@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.0-dev.43
+
+- Expanded real-core memory acceptance from eight representative limits to fifteen limits covering both sides of every 96/160/320/640 MiB profile boundary.
+- The matrix now proves 15 isolated core startups, 60 concurrent clients and exactly 60 MiB transferred while retaining hard cgroup limits, peak tracking and zero-OOM requirements.
+- Local evidence verification checks every exact budget, profile, GOMEMLIMIT, GOGC and GOMAXPROCS transition, including equal budgets across adjacent threshold boundaries without regression.
+- Authorized-host preflight inputs are now assigned and explicitly exported before the remote script, avoiding shell-specific temporary-assignment behavior.
+
 ## 0.2.0-dev.42
 
 - Added a mandatory read-only authorized-host preflight before any source upload or test execution, plus a standalone `-PreflightOnly` mode.
