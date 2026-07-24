@@ -105,6 +105,7 @@ Reality 从 VPS 内部使用公网 IP 测试时，如果宿主网络不支持 NA
 项目仍处于开发阶段，建议先在自己的测试 VPS 上验证域名、Tunnel ingress 和防火墙策略。
 
 新旧项目的逐项能力取舍见 [docs/FEATURE_GAP.md](docs/FEATURE_GAP.md)。
+唯一测试机的隔离验收步骤见 [docs/ACCEPTANCE.md](docs/ACCEPTANCE.md)。
 
 只有设置 `VP_LOCAL_SOURCE=1` 时安装器才会读取当前目录的 `vp.sh`；普通远程一键安装始终从 GitHub 精确提交下载，避免误用当前目录中的旧文件。
 

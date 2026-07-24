@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.0-dev.14
+
+- Added a host-locked isolated acceptance harness for the only authorized test machine (`134.209.180.134`).
+- Acceptance uses unique temporary paths, OpenRC service names and ports, then verifies formal Mihomo/cloudflared service states and configuration digests are unchanged.
+- The harness covers real Reality loopback authentication, two-stream download, rotation-aware subscriptions, backup, redacted diagnostics, network dry-run and recoverable uninstall.
+
 ## 0.2.0-dev.13
 
 - Added explicit IPv4/IPv6 Reality lifecycle with public-IPv6 preflight, family-aware listeners, bracketed IPv6 links, editing and health diagnostics.
