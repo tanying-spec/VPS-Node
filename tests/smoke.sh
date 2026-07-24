@@ -687,6 +687,19 @@ if VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/symlink-data" VP_LOG_DIR="$TMP
   exit 1
 fi
 [ -e "$managed_backups/vps-node-20260101-000001.tar.gz" ]
+prune_replacement="$managed_backups/vps-node-20260101-000007.tar.gz"
+prune_replacement_hash="$(sha256sum "$prune_replacement" | awk '{print $1}')"
+if VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/managed-lib" VP_LOG_DIR="$TMP/dns-log" \
+  VP_LIB_DIR="$TMP/dns-usr" VP_BACKUP_PRUNE_CONFIRM=PRUNE VP_SKIP_SERVICE=1 \
+  VP_ALLOW_TEST_HOOKS=1 VP_TEST_BACKUP_PRUNE_REPLACEMENT="$prune_replacement" \
+  sh "$ROOT/vp.sh" backup-prune --keep 3 --apply >/dev/null 2>&1; then
+  printf 'backup prune deleted a valid recovery point replaced after confirmation\n' >&2
+  exit 1
+fi
+[ "$(sha256sum "$managed_backups/vps-node-20260101-000001.tar.gz" | awk '{print $1}')" = "$prune_replacement_hash" ]
+for preserved_backup_index in 2 3 4 5 6 7; do
+  [ -e "$managed_backups/vps-node-20260101-00000${preserved_backup_index}.tar.gz" ]
+done
 VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/managed-lib" VP_LOG_DIR="$TMP/dns-log" \
 VP_LIB_DIR="$TMP/dns-usr" VP_BACKUP_PRUNE_CONFIRM=PRUNE VP_SKIP_SERVICE=1 \
 sh "$ROOT/vp.sh" backup-prune --keep 3 --apply >/dev/null

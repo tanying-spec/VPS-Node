@@ -2,7 +2,7 @@
 
 set -u
 
-VP_VERSION="0.2.0-dev.62"
+VP_VERSION="0.2.0-dev.63"
 VP_CONFIG_DIR="${VP_CONFIG_DIR:-/etc/vps-node}"
 VP_DATA_DIR="${VP_DATA_DIR:-/var/lib/vps-node}"
 VP_LOG_DIR="${VP_LOG_DIR:-/var/log/vps-node}"
@@ -2424,15 +2424,16 @@ backup_prune() {
   trap 'rm -f "$valid_list"' EXIT HUP INT TERM
   for prune_archive in "$VP_BACKUP_DIR"/vps-node-????????-??????.tar.gz; do
     [ -e "$prune_archive" ] || continue
-    managed_backup_valid "$prune_archive" && printf '%s\n' "$prune_archive" >> "$valid_list"
+    managed_backup_valid "$prune_archive" && printf '%s|%s|%s\n' "$(basename "$prune_archive")" \
+      "$(managed_file_state "$prune_archive")" "$(managed_file_state "$prune_archive.sha256")" >> "$valid_list"
   done
   sort "$valid_list" -o "$valid_list"
   valid_count="$(awk 'NF{n++}END{print n+0}' "$valid_list")"
   delete_count=$((valid_count - keep))
   [ "$delete_count" -gt 0 ] || { rm -f "$valid_list"; trap - EXIT HUP INT TERM; ok "已验证恢复点 $valid_count 个，不超过保留数量 $keep。"; return 0; }
   printf '备份整理：已验证 %s 个，保留最新 %s 个，计划删除最早 %s 个。\n' "$valid_count" "$keep" "$delete_count"
-  awk -v n="$delete_count" 'NF && ++seen<=n{print}' "$valid_list" | while IFS= read -r prune_target; do
-    printf '  %s\n' "$(basename "$prune_target")"
+  awk -F'|' -v n="$delete_count" 'NF && ++seen<=n{print $1}' "$valid_list" | while IFS= read -r prune_name; do
+    printf '  %s\n' "$prune_name"
   done
   if [ "$prune_mode" = --dry-run ]; then
     rm -f "$valid_list"; trap - EXIT HUP INT TERM
@@ -2442,9 +2443,20 @@ backup_prune() {
   need_root || { rm -f "$valid_list"; trap - EXIT HUP INT TERM; return 1; }
   if [ -n "${VP_BACKUP_PRUNE_CONFIRM:-}" ]; then prune_confirm="$VP_BACKUP_PRUNE_CONFIRM"; else printf '输入 PRUNE 确认删除以上旧恢复点：'; read -r prune_confirm || true; fi
   [ "$prune_confirm" = PRUNE ] || { rm -f "$valid_list"; trap - EXIT HUP INT TERM; warn "已取消备份整理。"; return 2; }
+  if [ "${VP_ALLOW_TEST_HOOKS:-0}" = 1 ] && [ -n "${VP_TEST_BACKUP_PRUNE_REPLACEMENT:-}" ]; then
+    prune_test_name="$(awk -F'|' 'NF{print $1;exit}' "$valid_list")"
+    cp "$VP_TEST_BACKUP_PRUNE_REPLACEMENT" "$VP_BACKUP_DIR/$prune_test_name"
+    cp "$VP_TEST_BACKUP_PRUNE_REPLACEMENT.sha256" "$VP_BACKUP_DIR/$prune_test_name.sha256"
+  fi
   deleted_backups=0
-  while IFS= read -r prune_target; do
+  while IFS='|' read -r prune_name approved_prune_archive_state approved_prune_sidecar_state; do
     [ "$deleted_backups" -lt "$delete_count" ] || break
+    prune_target="$VP_BACKUP_DIR/$prune_name"
+    [ "$(managed_file_state "$prune_target")" = "$approved_prune_archive_state" ] && \
+      [ "$(managed_file_state "$prune_target.sha256")" = "$approved_prune_sidecar_state" ] || {
+        error "恢复点在预览确认后发生变化，已停止整理且未删除该文件：$prune_name"
+        rm -f "$valid_list"; trap - EXIT HUP INT TERM; return 1
+      }
     managed_backup_valid "$prune_target" || { error "删除前复核失败，已停止整理。"; rm -f "$valid_list"; trap - EXIT HUP INT TERM; return 1; }
     rm -f "$prune_target" "$prune_target.sha256" || { error "无法删除旧恢复点。"; rm -f "$valid_list"; trap - EXIT HUP INT TERM; return 1; }
     deleted_backups=$((deleted_backups + 1))

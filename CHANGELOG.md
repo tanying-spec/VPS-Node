@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.0-dev.63
+
+- Backup pruning now records the exact archive and sidecar file states for every validated recovery point in the displayed deletion plan.
+- Each pair must still match its approved content immediately before deletion; merely remaining a different valid backup is no longer sufficient.
+- A same-name recovery point replaced after `PRUNE` confirmation stops the operation before that file or any later candidate is deleted.
+- Regression tests replace the oldest candidate with another valid recovery point and prove all planned files remain present.
+
 ## 0.2.0-dev.62
 
 - Backup restore now binds the archive and SHA-256 sidecar file type, symlink identity and content hash to the validated preview.
