@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.0-dev.67
+
+- Backup archives and SHA-256 sidecars now commit with same-directory atomic no-clobber links instead of overwrite-capable moves.
+- An archive created by another task in the final commit window is preserved and makes backup creation fail safely.
+- A sidecar collision removes only the archive committed by this transaction while preserving the external sidecar.
+- Cleanup tracks ownership of each committed path, and race-injection tests prove concurrent archive and sidecar files are never deleted or overwritten.
+
 ## 0.2.0-dev.66
 
 - Starting a credential rotation now binds the old UUID and in-progress-rotation check to exact node and rotation database states.

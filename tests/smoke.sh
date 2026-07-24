@@ -641,6 +641,23 @@ selected_metrics_port="$(awk -F= '$1=="VP_TUNNEL_METRICS_PORT"{print $2;exit}' "
 printf 'BACKUP_TEST_MARKER=original\n' >> "$TMP/dns-etc/state.env"
 printf 'HOST_LOCAL_MARKER=preserve\n' > "$TMP/dns-lib/host-local.state"
 printf 'BEFORE_CC=cubic\nBEFORE_QDISC=pfifo_fast\n' > "$TMP/dns-lib/network-before.env"
+for backup_commit_race_phase in archive sidecar; do
+  backup_commit_race_target="$TMP/backup-commit-race-$backup_commit_race_phase.tar.gz"
+  if VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log" \
+    VP_LIB_DIR="$TMP/dns-usr" VP_CORE_BIN="$TMP/dns-usr/bin/mihomo" VP_SKIP_SERVICE=1 \
+    VP_ALLOW_TEST_HOOKS=1 VP_TEST_BACKUP_COMMIT_RACE="$backup_commit_race_phase" \
+    sh "$ROOT/vp.sh" backup "$backup_commit_race_target" >/dev/null 2>&1; then
+    printf 'backup overwrote a target created during commit: %s\n' "$backup_commit_race_phase" >&2
+    exit 1
+  fi
+  if [ "$backup_commit_race_phase" = archive ]; then
+    grep -q '^created-at-archive-commit$' "$backup_commit_race_target"
+    [ ! -e "$backup_commit_race_target.sha256" ]
+  else
+    [ ! -e "$backup_commit_race_target" ]
+    grep -q '^created-at-sidecar-commit$' "$backup_commit_race_target.sha256"
+  fi
+done
 portable_backup="$TMP/portable-backup.tar.gz"
 VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log" \
 VP_LIB_DIR="$TMP/dns-usr" VP_CORE_BIN="$TMP/dns-usr/bin/mihomo" VP_SKIP_SERVICE=1 \

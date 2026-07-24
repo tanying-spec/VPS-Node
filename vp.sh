@@ -2,7 +2,7 @@
 
 set -u
 
-VP_VERSION="0.2.0-dev.66"
+VP_VERSION="0.2.0-dev.67"
 VP_CONFIG_DIR="${VP_CONFIG_DIR:-/etc/vps-node}"
 VP_DATA_DIR="${VP_DATA_DIR:-/var/lib/vps-node}"
 VP_LOG_DIR="${VP_LOG_DIR:-/var/log/vps-node}"
@@ -2336,11 +2336,20 @@ create_backup() {
   archive_stage="$(mktemp "$(dirname "$archive")/.vps-node-backup.XXXXXX")" || { rm -rf "$package"; return 1; }
   checksum_stage="$(mktemp "$(dirname "$archive")/.vps-node-backup-sha.XXXXXX")" || { rm -rf "$package"; rm -f "$archive_stage"; return 1; }
   backup_complete=0
+  archive_committed=0
+  sidecar_committed=0
   cleanup_backup() {
     rm -rf "$package"
+    if [ "$backup_complete" != 1 ]; then
+      if [ "$archive_committed" = 1 ] && [ -e "$archive_stage" ] && [ "$archive" -ef "$archive_stage" ]; then
+        rm -f "$archive"
+      fi
+      if [ "$sidecar_committed" = 1 ] && [ -e "$checksum_stage" ] && [ "$archive.sha256" -ef "$checksum_stage" ]; then
+        rm -f "$archive.sha256"
+      fi
+    fi
     [ -n "$archive_stage" ] && rm -f "$archive_stage"
     [ -n "$checksum_stage" ] && rm -f "$checksum_stage"
-    [ "$backup_complete" = 1 ] || rm -f "$archive" "$archive.sha256"
   }
   trap cleanup_backup EXIT HUP INT TERM
   mkdir -p "$package/config" "$package/data"
@@ -2363,14 +2372,27 @@ create_backup() {
   [ -n "$checksum" ] || { cleanup_backup; trap - EXIT HUP INT TERM; error "无法为备份生成 SHA-256，未保留不完整恢复点。"; return 1; }
   printf '%s  %s\n' "$checksum" "$(basename "$archive")" > "$checksum_stage" || { cleanup_backup; trap - EXIT HUP INT TERM; return 1; }
   chmod 600 "$checksum_stage"
-  mv "$archive_stage" "$archive" || { cleanup_backup; trap - EXIT HUP INT TERM; return 1; }
-  archive_stage=""
-  if ! mv "$checksum_stage" "$archive.sha256"; then
-    rm -f "$archive"
+  if [ "${VP_ALLOW_TEST_HOOKS:-0}" = 1 ] && [ "${VP_TEST_BACKUP_COMMIT_RACE:-}" = archive ]; then
+    printf 'created-at-archive-commit\n' > "$archive"
+  fi
+  if ! ln "$archive_stage" "$archive" 2>/dev/null; then
     cleanup_backup; trap - EXIT HUP INT TERM
-    error "备份校验文件提交失败，已移除不完整恢复点。"
+    error "备份目标刚被其他任务创建，已中止且未覆盖该文件。"
     return 1
   fi
+  archive_committed=1
+  if [ "${VP_ALLOW_TEST_HOOKS:-0}" = 1 ] && [ "${VP_TEST_BACKUP_COMMIT_RACE:-}" = sidecar ]; then
+    printf 'created-at-sidecar-commit\n' > "$archive.sha256"
+  fi
+  if ! ln "$checksum_stage" "$archive.sha256" 2>/dev/null; then
+    cleanup_backup; trap - EXIT HUP INT TERM
+    error "备份 SHA-256 目标刚被其他任务创建；已移除本次归档并保留外部文件。"
+    return 1
+  fi
+  sidecar_committed=1
+  rm -f "$archive_stage"
+  archive_stage=""
+  rm -f "$checksum_stage"
   checksum_stage=""
   backup_complete=1
   cleanup_backup
