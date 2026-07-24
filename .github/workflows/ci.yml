@@ -1,0 +1,28 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  shell:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check shell syntax
+        shell: bash
+        run: |
+          set -eu
+          sh -n vp.sh
+          sh -n install.sh
+          for file in tests/*.sh; do sh -n "$file"; done
+      - name: Verify script checksum
+        shell: bash
+        run: |
+          set -eu
+          expected="$(awk 'NR==1{print tolower($1)}' vp.sh.sha256)"
+          actual="$(sha256sum vp.sh | awk '{print tolower($1)}')"
+          test "$expected" = "$actual"
+      - name: Run portable smoke test
+        shell: bash
+        run: sh tests/smoke.sh
