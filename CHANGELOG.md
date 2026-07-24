@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.0-dev.22
+
+- Dashboard service status now consistently honors custom/isolated core and Tunnel service names instead of using a hard-coded Tunnel name.
+- The home conclusion detects invalid live node/rotation databases before reporting readiness.
+- Active and expired credential rotations receive explicit outcome-first conclusions and next-step guidance; both counts are visible in status.
+
 ## 0.2.0-dev.21
 
 - Added `vp restore BACKUP --dry-run` with archive, state-database and current-Mihomo validation before any project state is initialized or changed.

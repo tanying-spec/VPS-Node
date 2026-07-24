@@ -2,7 +2,7 @@
 
 set -u
 
-VP_VERSION="0.2.0-dev.21"
+VP_VERSION="0.2.0-dev.22"
 VP_CONFIG_DIR="${VP_CONFIG_DIR:-/etc/vps-node}"
 VP_DATA_DIR="${VP_DATA_DIR:-/var/lib/vps-node}"
 VP_LOG_DIR="${VP_LOG_DIR:-/var/log/vps-node}"
@@ -2530,9 +2530,15 @@ show_dashboard_summary() {
   ipv6_nodes="$(awk -F'|' '$1=="reality" && $10=="ipv6"{n++}END{print n+0}' "$VP_NODES_DB" 2>/dev/null)"
   core_state="$(service_state "$VP_CORE_SERVICE")"
   tunnel_state="$(service_state "$VP_TUNNEL_SERVICE")"
+  active_rotations="$(rotation_count active)"
+  expired_rotations="$(rotation_count expired)"
   if [ -d "$VP_TX_ACTIVE" ]; then
     overall="需要修复"
     next_action="发现未完成的配置事务，请选择 5 执行健康检查与安全修复。"
+  elif { [ -r "$VP_NODES_DB" ] && ! validate_nodes_database "$VP_NODES_DB" >/dev/null 2>&1; } ||
+       { [ -r "$VP_ROTATIONS_DB" ] && ! validate_rotations_database "$VP_NODES_DB" "$VP_ROTATIONS_DB" >/dev/null 2>&1; }; then
+    overall="状态数据异常"
+    next_action="节点或凭据轮换记录未通过完整性检查，请选择 5 导出诊断并安全修复。"
   elif [ ! -x "$VP_CORE_BIN" ]; then
     overall="尚未安装"
     next_action="请选择 1 创建 Reality 主节点，程序会引导安装内核。"
@@ -2551,6 +2557,12 @@ show_dashboard_summary() {
   elif [ -s "$VP_TUNNEL_TOKEN_FILE" ] && [ "$tunnel_state" != "active" ] && [ "$tunnel_state" != "started" ]; then
     overall="主线路可用，备用异常"
     next_action="Cloudflare 备用线路未运行，请选择 5 检查并修复。"
+  elif [ "$expired_rotations" -gt 0 ]; then
+    overall="凭据轮换已到期"
+    next_action="有 $expired_rotations 个旧凭据等待移除，请选择 3 完成凭据切换。"
+  elif [ "$active_rotations" -gt 0 ]; then
+    overall="凭据轮换中"
+    next_action="请先用新链接完成测试，再选择 3 正式切换并移除旧凭据。"
   elif [ ! -s "$VP_TUNNEL_TOKEN_FILE" ]; then
     overall="主线路已就绪"
     next_action="可选择 2 增加 Cloudflare 备用节点，或选择 3 查看和测试节点。"
@@ -2572,9 +2584,10 @@ show_status() {
   printf '%s\n' '----------------------------------------'
   show_dashboard_summary
   printf '代理核心：%s\n' "$(service_state "$VP_CORE_SERVICE")"
-  printf 'Cloudflare Tunnel：%s\n' "$(service_state vps-node-tunnel)"
+  printf 'Cloudflare Tunnel：%s\n' "$(service_state "$VP_TUNNEL_SERVICE")"
   printf '节点数量：%s\n' "$(node_count)"
   printf '进行中凭据轮换：%s\n' "$(rotation_count active)"
+  printf '已到期凭据轮换：%s\n' "$(rotation_count expired)"
   printf '\n内存（%s）：\n' "$MEM_SOURCE"
   printf '  实际工作内存：%s MiB\n' "$(bytes_to_mib "$MEM_WORKING_BYTES")"
   printf '  可回收文件缓存：%s MiB\n' "$(bytes_to_mib "$MEM_FILE_BYTES")"

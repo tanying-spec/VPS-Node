@@ -27,6 +27,22 @@ VP_LOG_DIR="$TMP/log" \
 VP_LIB_DIR="$TMP/usr-lib" \
 sh "$ROOT/vp.sh" status | grep -q '实际工作内存'
 
+mkdir -p "$TMP/status-bin"
+cat > "$TMP/status-bin/systemctl" <<'FAKE_SYSTEMCTL'
+#!/bin/sh
+if [ "${1:-}" = is-active ] && { [ "${2:-}" = custom-core ] || [ "${2:-}" = custom-tunnel ]; }; then
+  printf 'active\n'
+  exit 0
+fi
+printf 'inactive\n'
+exit 3
+FAKE_SYSTEMCTL
+chmod 755 "$TMP/status-bin/systemctl"
+custom_status="$(PATH="$TMP/status-bin:$PATH" VP_CONFIG_DIR="$TMP/etc" VP_DATA_DIR="$TMP/lib" \
+  VP_LOG_DIR="$TMP/log" VP_LIB_DIR="$TMP/usr-lib" VP_CORE_SERVICE=custom-core \
+  VP_TUNNEL_SERVICE=custom-tunnel sh "$ROOT/vp.sh" status)"
+printf '%s\n' "$custom_status" | grep -q '^Cloudflare Tunnel：active$'
+
 VP_CONFIG_DIR="$TMP/etc" VP_DATA_DIR="$TMP/lib" VP_LOG_DIR="$TMP/log" VP_LIB_DIR="$TMP/usr-lib" \
 sh "$ROOT/vp.sh" status | grep -q '总体状态：尚未安装'
 
@@ -82,6 +98,17 @@ VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log
 VP_LIB_DIR="$TMP/dns-usr" VP_CORE_BIN="$TMP/dns-usr/bin/mihomo" \
 VP_CORE_BACKUP_BIN="$TMP/dns-usr/bin/mihomo.previous" VP_SKIP_SERVICE=1 \
 sh "$ROOT/vp.sh" rotate numbered-node 24 >/dev/null
+rotation_dashboard="$(PATH="$TMP/status-bin:$PATH" VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" \
+  VP_LOG_DIR="$TMP/dns-log" VP_LIB_DIR="$TMP/dns-usr" VP_CORE_BIN="$TMP/dns-usr/bin/mihomo" \
+  VP_CORE_SERVICE=custom-core VP_TUNNEL_SERVICE=custom-tunnel sh "$ROOT/vp.sh" status)"
+printf '%s\n' "$rotation_dashboard" | grep -q '^总体状态：凭据轮换中$'
+cp "$TMP/dns-etc/credential-rotations.db" "$TMP/rotations-active"
+awk -F'|' 'BEGIN{OFS="|"}{$5=2;$6=1;print}' "$TMP/rotations-active" > "$TMP/dns-etc/credential-rotations.db"
+expired_dashboard="$(PATH="$TMP/status-bin:$PATH" VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" \
+  VP_LOG_DIR="$TMP/dns-log" VP_LIB_DIR="$TMP/dns-usr" VP_CORE_BIN="$TMP/dns-usr/bin/mihomo" \
+  VP_CORE_SERVICE=custom-core VP_TUNNEL_SERVICE=custom-tunnel sh "$ROOT/vp.sh" status)"
+printf '%s\n' "$expired_dashboard" | grep -q '^总体状态：凭据轮换已到期$'
+mv "$TMP/rotations-active" "$TMP/dns-etc/credential-rotations.db"
 VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log" \
 VP_LIB_DIR="$TMP/dns-usr" VP_CORE_BIN="$TMP/dns-usr/bin/mihomo" \
 VP_CORE_BACKUP_BIN="$TMP/dns-usr/bin/mihomo.previous" VP_SKIP_SERVICE=1 \
@@ -121,6 +148,13 @@ sh "$ROOT/vp.sh" argo-add 'phone#backup' 25436 share.example.com '/ws?ed=2048&mo
 special_link="$(VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log" \
   VP_LIB_DIR="$TMP/dns-usr" sh "$ROOT/vp.sh" link 'phone#backup')"
 printf '%s\n' "$special_link" | grep -Fq 'path=%2Fws%3Fed%3D2048%26mode%3Dfast#phone%23backup'
+cp "$TMP/dns-etc/nodes.db" "$TMP/nodes-before-dashboard-check"
+printf '%s\n' 'argo|bad-duplicate|25436|66666666-6666-4666-8666-666666666666|/bad|bad.example.com' >> "$TMP/dns-etc/nodes.db"
+invalid_dashboard="$(PATH="$TMP/status-bin:$PATH" VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" \
+  VP_LOG_DIR="$TMP/dns-log" VP_LIB_DIR="$TMP/dns-usr" VP_CORE_SERVICE=custom-core \
+  VP_TUNNEL_SERVICE=custom-tunnel sh "$ROOT/vp.sh" status)"
+printf '%s\n' "$invalid_dashboard" | grep -q '^总体状态：状态数据异常$'
+mv "$TMP/nodes-before-dashboard-check" "$TMP/dns-etc/nodes.db"
 plain_subscription="$(VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log" \
   VP_LIB_DIR="$TMP/dns-usr" VP_PUBLIC_IPV6_OVERRIDE=2001:db8::10 sh "$ROOT/vp.sh" subscription plain)"
 [ "$(printf '%s\n' "$plain_subscription" | grep -c '^vless://')" -eq 4 ]
