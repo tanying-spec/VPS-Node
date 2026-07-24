@@ -4,6 +4,7 @@ set -eu
 
 REPO="${VP_REPO:-tanying-spec/VPS-Node}"
 REF="${VP_REF:-main}"
+OFFICIAL_REPO="tanying-spec/VPS-Node"
 INSTALL_PATH="${VP_INSTALL_PATH:-/usr/local/bin/vp}"
 INSTALL_BACKUP_PATH="${VP_INSTALL_BACKUP_PATH:-$INSTALL_PATH.previous}"
 INSTALL_BACKUP_SHA256="${VP_INSTALL_BACKUP_SHA256:-$INSTALL_BACKUP_PATH.sha256}"
@@ -34,6 +35,25 @@ PREFLIGHT_WARNINGS=0
 preflight_error() { warn "阻止安装：$*"; PREFLIGHT_ERRORS=$((PREFLIGHT_ERRORS + 1)); }
 preflight_warn() { warn "$*"; PREFLIGHT_WARNINGS=$((PREFLIGHT_WARNINGS + 1)); }
 
+validate_source_policy() {
+  if [ "${VP_LOCAL_SOURCE:-0}" = 1 ]; then
+    [ "${VP_ALLOW_TEST_HOOKS:-0}" = 1 ] || { preflight_error "本地安装源仅允许用于测试。"; return 1; }
+    return 0
+  fi
+  case "$REPO" in
+    *[!A-Za-z0-9_.\/-]*|/*|*/|*//*|*/*/*|'') preflight_error "安装仓库格式无效。"; return 1 ;;
+  esac
+  case "$REPO" in */*) ;; *) preflight_error "安装仓库必须使用 owner/repository 格式。"; return 1 ;; esac
+  case "$REF" in *[!A-Za-z0-9._\/-]*|/*|*/|*//*|'') preflight_error "安装引用格式无效。"; return 1 ;; esac
+  if [ "$REPO" != "$OFFICIAL_REPO" ] || [ "$REF" != main ]; then
+    [ "${VP_ALLOW_CUSTOM_SOURCE:-0}" = 1 ] || {
+      preflight_error "检测到非官方安装来源 $REPO/$REF；如确需使用，请显式设置 VP_ALLOW_CUSTOM_SOURCE=1。"
+      return 1
+    }
+    preflight_warn "正在使用显式授权的非官方安装来源：$REPO/$REF"
+  fi
+}
+
 process_count() {
   process_name="$1"
   if command -v pgrep >/dev/null 2>&1; then
@@ -51,6 +71,10 @@ port_in_use_install() {
 
 system_preflight() {
   info "安装前环境预检"
+  if [ "$INSTALL_PATH" = "$INSTALL_BACKUP_PATH" ] || [ "$INSTALL_PATH" = "$INSTALL_BACKUP_SHA256" ] || \
+     [ "$INSTALL_BACKUP_PATH" = "$INSTALL_BACKUP_SHA256" ]; then
+    preflight_error "安装路径、回滚路径和回滚校验路径必须彼此不同。"
+  fi
   case "$(uname -m 2>/dev/null)" in
     x86_64|amd64|aarch64|arm64|armv7l|armv7|riscv64) ok "CPU 架构受支持。" ;;
     *) preflight_error "不支持的 CPU 架构：$(uname -m 2>/dev/null || printf unknown)。" ;;
@@ -132,6 +156,7 @@ system_preflight() {
 }
 
 network_preflight() {
+  validate_source_policy || return 0
   if [ "${VP_LOCAL_SOURCE:-0}" = "1" ]; then
     [ -f "./vp.sh" ] && [ -f "./vp.sh.sha256" ] || { preflight_error "本地测试源缺少 vp.sh 或 SHA-256。"; return 0; }
     ok "本地测试源文件存在；跳过 GitHub 连通性测试。"
@@ -207,12 +232,58 @@ sha256_file() {
   fi
 }
 
-if [ "${VP_LOCAL_SOURCE:-0}" = "1" ] && [ -f "./vp.sh" ]; then
+json_top_level_string() {
+  printf '%s' "$1" | awk -v wanted="$2" '
+    BEGIN { data="" }
+    { data=data $0 "\n" }
+    END {
+      depth=0; in_string=0; escaped=0
+      for (i=1; i<=length(data); i++) {
+        c=substr(data,i,1)
+        if (in_string) {
+          if (escaped) escaped=0
+          else if (c=="\\") escaped=1
+          else if (c=="\"") in_string=0
+          continue
+        }
+        if (c=="{") { depth++; continue }
+        if (c=="}") { depth--; continue }
+        if (c!="\"" || depth!=1) continue
+        start=i+1; escaped=0
+        for (j=start; j<=length(data); j++) {
+          c=substr(data,j,1)
+          if (escaped) escaped=0
+          else if (c=="\\") escaped=1
+          else if (c=="\"") break
+        }
+        key=substr(data,start,j-start); i=j+1
+        while (substr(data,i,1) ~ /[[:space:]]/) i++
+        if (substr(data,i,1)!=":") continue
+        i++; while (substr(data,i,1) ~ /[[:space:]]/) i++
+        if (substr(data,i,1)!="\"") {
+          if (substr(data,i,1)=="{") depth++
+          continue
+        }
+        start=i+1; escaped=0
+        for (j=start; j<=length(data); j++) {
+          c=substr(data,j,1)
+          if (escaped) escaped=0
+          else if (c=="\\") escaped=1
+          else if (c=="\"") break
+        }
+        value=substr(data,start,j-start); i=j
+        if (key==wanted) { print value; exit }
+      }
+    }
+  '
+}
+
+if [ "${VP_LOCAL_SOURCE:-0}" = "1" ] && [ "${VP_ALLOW_TEST_HOOKS:-0}" = 1 ] && [ -f "./vp.sh" ]; then
   cp ./vp.sh "$tmp"
   [ -f "./vp.sh.sha256" ] && cp ./vp.sh.sha256 "$checksum_tmp" || printf '%s  vp.sh\n' "$(sha256_file "$tmp")" > "$checksum_tmp"
 else
   commit_json="$(curl -fsSL --max-time 20 "https://api.github.com/repos/$REPO/commits/$REF")" || die "无法取得精确提交。"
-  commit_sha="$(printf '%s\n' "$commit_json" | sed -n 's/.*"sha"[[:space:]]*:[[:space:]]*"\([0-9a-fA-F]\{40\}\)".*/\1/p' | head -n 1)"
+  commit_sha="$(json_top_level_string "$commit_json" sha)"
   case "$commit_sha" in ''|*[!0-9a-fA-F]*) die "GitHub 返回的提交 SHA 无效。" ;; esac
   [ "${#commit_sha}" -eq 40 ] || die "GitHub 返回的提交 SHA 长度无效。"
   url="https://raw.githubusercontent.com/$REPO/$commit_sha"
@@ -227,17 +298,45 @@ case "$expected" in ''|*[!0-9a-f]*) die "SHA-256 文件格式无效。" ;; esac
 sh -n "$tmp" || die "脚本语法检查失败。"
 chmod 755 "$tmp"
 mkdir -p "$(dirname "$INSTALL_PATH")"
+install_stage="$(mktemp "$(dirname "$INSTALL_PATH")/.vp-install.XXXXXX")" || die "无法在安装目录创建临时文件。"
+cp "$tmp" "$install_stage" || { rm -f "$install_stage"; die "无法暂存管理脚本。"; }
+chmod 755 "$install_stage"
+prior_backup_tmp="$(mktemp /tmp/vp-prior-backup.XXXXXX)" || { rm -f "$install_stage"; die "无法创建回滚快照。"; }
+prior_sidecar_tmp="$(mktemp /tmp/vp-prior-sidecar.XXXXXX)" || { rm -f "$install_stage" "$prior_backup_tmp"; die "无法创建校验快照。"; }
+trap 'rm -f "$tmp" "$checksum_tmp" "$install_stage" "$prior_backup_tmp" "$prior_sidecar_tmp"' EXIT HUP INT TERM
+prior_backup_present=0
+prior_sidecar_present=0
+[ -f "$INSTALL_BACKUP_PATH" ] && { cp -p "$INSTALL_BACKUP_PATH" "$prior_backup_tmp" || die "无法保存原回滚脚本。"; prior_backup_present=1; }
+[ -f "$INSTALL_BACKUP_SHA256" ] && { cp -p "$INSTALL_BACKUP_SHA256" "$prior_sidecar_tmp" || die "无法保存原回滚校验。"; prior_sidecar_present=1; }
+restore_prior_rollback_files() {
+  if [ "$prior_backup_present" = 1 ]; then cp -p "$prior_backup_tmp" "$INSTALL_BACKUP_PATH"; else rm -f "$INSTALL_BACKUP_PATH"; fi
+  if [ "$prior_sidecar_present" = 1 ]; then cp -p "$prior_sidecar_tmp" "$INSTALL_BACKUP_SHA256"; else rm -f "$INSTALL_BACKUP_SHA256"; fi
+}
+had_current=0
 if [ -f "$INSTALL_PATH" ]; then
-  cp "$INSTALL_PATH" "$INSTALL_BACKUP_PATH" || die "无法备份现有管理脚本。"
-  backup_hash="$(sha256_file "$INSTALL_BACKUP_PATH")" || die "无法校验现有管理脚本备份。"
-  printf '%s  %s\n' "$backup_hash" "$(basename "$INSTALL_BACKUP_PATH")" > "$INSTALL_BACKUP_SHA256"
-  chmod 600 "$INSTALL_BACKUP_SHA256"
+  had_current=1
+  cp "$INSTALL_PATH" "$INSTALL_BACKUP_PATH" || { restore_prior_rollback_files; die "无法备份现有管理脚本。"; }
+  backup_hash="$(sha256_file "$INSTALL_BACKUP_PATH")" || { restore_prior_rollback_files; die "无法校验现有管理脚本备份。"; }
+  printf '%s  %s\n' "$backup_hash" "$(basename "$INSTALL_BACKUP_PATH")" > "$INSTALL_BACKUP_SHA256" || { restore_prior_rollback_files; die "无法写入回滚校验。"; }
+  chmod 600 "$INSTALL_BACKUP_SHA256" || { restore_prior_rollback_files; die "无法保护回滚校验。"; }
 else
   rm -f "$INSTALL_BACKUP_PATH" "$INSTALL_BACKUP_SHA256"
 fi
-mv "$tmp" "$INSTALL_PATH"
+mv "$install_stage" "$INSTALL_PATH" || { restore_prior_rollback_files; die "无法原子替换管理脚本。"; }
+rm -f "$tmp"
 rm -f "$checksum_tmp"
+if ! "$INSTALL_PATH" init; then
+  if [ "$had_current" = 1 ] && [ -f "$INSTALL_BACKUP_PATH" ]; then
+    restore_stage="$(mktemp "$(dirname "$INSTALL_PATH")/.vp-restore.XXXXXX")" || die "初始化失败，且无法创建恢复临时文件；当前备份保留在 $INSTALL_BACKUP_PATH。"
+    cp -p "$INSTALL_BACKUP_PATH" "$restore_stage" && mv "$restore_stage" "$INSTALL_PATH" || die "初始化失败，且旧管理脚本自动恢复失败；备份保留在 $INSTALL_BACKUP_PATH。"
+  else
+    rm -f "$INSTALL_PATH"
+  fi
+  restore_prior_rollback_files
+  rm -f "$prior_backup_tmp" "$prior_sidecar_tmp"
+  trap - EXIT HUP INT TERM
+  die "新版本初始化失败，管理脚本和原回滚文件已恢复。"
+fi
+rm -f "$prior_backup_tmp" "$prior_sidecar_tmp"
 trap - EXIT HUP INT TERM
-
-"$INSTALL_PATH" init
 ok "安装完成。输入 vp 打开管理面板。"

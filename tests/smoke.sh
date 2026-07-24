@@ -45,6 +45,10 @@ if VP_ALLOW_TEST_HOOKS=1 sh "$ROOT/vp.sh" _test-select-release-record "$duplicat
   echo 'ambiguous duplicate release assets were accepted' >&2
   exit 1
 fi
+commit_json="$TMP/commit.json"
+printf '%s\n' '{"nested":{"sha":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},"sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}' > "$commit_json"
+[ "$(VP_ALLOW_TEST_HOOKS=1 sh "$ROOT/vp.sh" _test-json-top-level "$commit_json" sha)" = \
+  aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa ]
 
 VP_CONFIG_DIR="$TMP/etc" \
 VP_DATA_DIR="$TMP/lib" \
@@ -629,16 +633,49 @@ if VP_CONFIG_DIR=/etc VP_DATA_DIR="$TMP/safe-lib" VP_LOG_DIR="$TMP/safe-log" \
 fi
 
 update_root="$TMP/update"
-mkdir -p "$update_root/good" "$update_root/bad"
+mkdir -p "$update_root/good" "$update_root/bad" "$update_root/lower" "$update_root/same"
 cp "$ROOT/vp.sh" "$update_root/installed-vp"
 chmod 755 "$update_root/installed-vp"
-sed 's/^VP_VERSION=.*/VP_VERSION="0.2.0-update-test"/' "$ROOT/vp.sh" > "$update_root/good/vp.sh"
+sed 's/^VP_VERSION=.*/VP_VERSION="0.2.0-dev.99"/' "$ROOT/vp.sh" > "$update_root/good/vp.sh"
 printf '%s  vp.sh\n' "$(sha256sum "$update_root/good/vp.sh" | awk '{print $1}')" > "$update_root/good/vp.sh.sha256"
 cp "$update_root/good/vp.sh" "$update_root/bad/vp.sh"
 printf '%064d  vp.sh\n' 0 > "$update_root/bad/vp.sh.sha256"
+sed 's/^VP_VERSION=.*/VP_VERSION="0.2.0-dev.1"/' "$ROOT/vp.sh" > "$update_root/lower/vp.sh"
+printf '%s  vp.sh\n' "$(sha256sum "$update_root/lower/vp.sh" | awk '{print $1}')" > "$update_root/lower/vp.sh.sha256"
+cp "$ROOT/vp.sh" "$update_root/same/vp.sh"
+printf '\n# same-version-different-content\n' >> "$update_root/same/vp.sh"
+printf '%s  vp.sh\n' "$(sha256sum "$update_root/same/vp.sh" | awk '{print $1}')" > "$update_root/same/vp.sh.sha256"
 installed_hash="$(sha256sum "$update_root/installed-vp" | awk '{print $1}')"
 if VP_CONFIG_DIR="$TMP/etc" VP_CLI_PATH="$update_root/installed-vp" \
+  VP_CLI_BACKUP_PATH="$update_root/installed-vp.previous" VP_UPDATE_SOURCE_DIR="$update_root/good" \
+  sh "$ROOT/vp.sh" update >/dev/null 2>&1; then
+  printf 'unguarded local update source unexpectedly accepted\n' >&2
+  exit 1
+fi
+if VP_CONFIG_DIR="$TMP/etc" VP_CLI_PATH="$update_root/installed-vp" \
+  VP_CLI_BACKUP_PATH="$update_root/installed-vp.previous" VP_UPDATE_SOURCE_DIR="$update_root/same" \
+  VP_ALLOW_TEST_HOOKS=1 sh "$ROOT/vp.sh" update >/dev/null 2>&1; then
+  printf 'same-version different update unexpectedly accepted\n' >&2
+  exit 1
+fi
+if VP_CONFIG_DIR="$TMP/etc" VP_CLI_PATH="$update_root/installed-vp" \
+  VP_CLI_BACKUP_PATH="$update_root/installed-vp.previous" VP_UPDATE_SOURCE_DIR="$update_root/lower" \
+  VP_ALLOW_TEST_HOOKS=1 sh "$ROOT/vp.sh" update >/dev/null 2>&1; then
+  printf 'implicit downgrade unexpectedly accepted\n' >&2
+  exit 1
+fi
+[ "$(sha256sum "$update_root/installed-vp" | awk '{print $1}')" = "$installed_hash" ]
+downgrade_cli="$update_root/downgrade-vp"
+cp "$ROOT/vp.sh" "$downgrade_cli"
+chmod 755 "$downgrade_cli"
+VP_CONFIG_DIR="$TMP/etc" VP_CLI_PATH="$downgrade_cli" \
+VP_CLI_BACKUP_PATH="$downgrade_cli.previous" VP_UPDATE_SOURCE_DIR="$update_root/lower" \
+VP_ALLOW_TEST_HOOKS=1 sh "$ROOT/vp.sh" update --allow-downgrade >/dev/null
+[ "$(sh "$downgrade_cli" version)" = '0.2.0-dev.1' ]
+(cd "$update_root" && sha256sum -c downgrade-vp.previous.sha256 >/dev/null)
+if VP_CONFIG_DIR="$TMP/etc" VP_CLI_PATH="$update_root/installed-vp" \
   VP_CLI_BACKUP_PATH="$update_root/installed-vp.previous" VP_UPDATE_SOURCE_DIR="$update_root/bad" \
+  VP_ALLOW_TEST_HOOKS=1 \
   sh "$ROOT/vp.sh" update >/dev/null 2>&1; then
   printf 'bad update checksum unexpectedly accepted\n' >&2
   exit 1
@@ -646,14 +683,16 @@ fi
 [ "$(sha256sum "$update_root/installed-vp" | awk '{print $1}')" = "$installed_hash" ]
 VP_CONFIG_DIR="$TMP/etc" VP_CLI_PATH="$update_root/installed-vp" \
 VP_CLI_BACKUP_PATH="$update_root/installed-vp.previous" VP_UPDATE_SOURCE_DIR="$update_root/good" \
+VP_ALLOW_TEST_HOOKS=1 \
 sh "$ROOT/vp.sh" update >/dev/null
-[ "$(sh "$update_root/installed-vp" version)" = '0.2.0-update-test' ]
+[ "$(sh "$update_root/installed-vp" version)" = '0.2.0-dev.99' ]
 (cd "$update_root" && sha256sum -c installed-vp.previous.sha256 >/dev/null)
 VP_CONFIG_DIR="$TMP/etc" VP_CLI_PATH="$update_root/installed-vp" \
 VP_CLI_BACKUP_PATH="$update_root/installed-vp.previous" sh "$ROOT/vp.sh" rollback >/dev/null
 [ "$(sh "$update_root/installed-vp" version)" = "$CURRENT_VERSION" ]
 VP_CONFIG_DIR="$TMP/etc" VP_CLI_PATH="$update_root/installed-vp" \
 VP_CLI_BACKUP_PATH="$update_root/installed-vp.previous" VP_UPDATE_SOURCE_DIR="$update_root/good" \
+VP_ALLOW_TEST_HOOKS=1 \
 sh "$ROOT/vp.sh" update >/dev/null
 printf '\n# harmless syntax-preserving corruption\n' >> "$update_root/installed-vp.previous"
 if VP_CONFIG_DIR="$TMP/etc" VP_CLI_PATH="$update_root/installed-vp" \
@@ -661,7 +700,7 @@ if VP_CONFIG_DIR="$TMP/etc" VP_CLI_PATH="$update_root/installed-vp" \
   printf 'corrupted rollback script unexpectedly accepted\n' >&2
   exit 1
 fi
-[ "$(sh "$update_root/installed-vp" version)" = '0.2.0-update-test' ]
+[ "$(sh "$update_root/installed-vp" version)" = '0.2.0-dev.99' ]
 
 printf 'TEST_VALUE=before\n' >> "$TMP/etc/state.env"
 VP_CONFIG_DIR="$TMP/etc" VP_DATA_DIR="$TMP/lib" VP_LOG_DIR="$TMP/log" VP_LIB_DIR="$TMP/usr-lib" \

@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.0-dev.33
+
+- Installer and self-update reject local test sources unless test hooks are explicitly enabled; non-official repository/ref sources now require a visible `VP_ALLOW_CUSTOM_SOURCE=1` opt-in.
+- Commit resolution reads only the top-level GitHub commit SHA, avoiding accidental selection of nested tree or parent SHAs from compact or reordered JSON.
+- Online update accepts only stable or `dev.N` project versions, rejects same-version/different-content replacements and blocks implicit downgrades; deliberate downgrade requires `vp update --allow-downgrade`.
+- The candidate management script is staged inside the destination directory before atomic replacement, avoiding cross-filesystem `/tmp` moves.
+- Installer replacement is transactional: initialization failure restores the previous CLI plus the exact pre-existing rollback script and checksum; failure-injection tests prove all three hashes remain unchanged.
+
 ## 0.2.0-dev.32
 
 - Release asset parsing is independent of JSON line breaks and field order, including compact GitHub API responses and nested uploader objects.

@@ -2,7 +2,7 @@
 
 set -u
 
-VP_VERSION="0.2.0-dev.32"
+VP_VERSION="0.2.0-dev.33"
 VP_CONFIG_DIR="${VP_CONFIG_DIR:-/etc/vps-node}"
 VP_DATA_DIR="${VP_DATA_DIR:-/var/lib/vps-node}"
 VP_LOG_DIR="${VP_LOG_DIR:-/var/log/vps-node}"
@@ -50,6 +50,7 @@ VP_CLI_BACKUP_PATH="${VP_CLI_BACKUP_PATH:-$VP_CLI_PATH.previous}"
 VP_CLI_BACKUP_SHA256="${VP_CLI_BACKUP_SHA256:-$VP_CLI_BACKUP_PATH.sha256}"
 VP_REPO="${VP_REPO:-tanying-spec/VPS-Node}"
 VP_REF="${VP_REF:-main}"
+VP_OFFICIAL_REPO="tanying-spec/VPS-Node"
 VP_CURL_BIN="${VP_CURL_BIN:-curl}"
 VP_SYSCTL_BIN="${VP_SYSCTL_BIN:-sysctl}"
 VP_SYSCTL_CONFIG="${VP_SYSCTL_CONFIG:-/etc/sysctl.d/99-vps-node-network.conf}"
@@ -93,6 +94,10 @@ ensure_runtime_dependencies() {
 
 init_layout() {
   need_root || return 1
+  if [ "${VP_ALLOW_TEST_HOOKS:-0}" = 1 ] && [ "${VP_TEST_INIT_FAIL:-0}" = 1 ]; then
+    error "测试注入：状态目录初始化失败。"
+    return 1
+  fi
   umask 077
   mkdir -p "$VP_CONFIG_DIR" "$VP_DATA_DIR" "$VP_LOG_DIR" "$VP_LIB_DIR" \
     "$VP_SECRETS_DIR" "$VP_GENERATED_DIR" "$VP_TX_DIR"
@@ -2717,9 +2722,73 @@ diagnostic_report() {
   ok "脱敏诊断报告已创建：$destination"
 }
 
+json_top_level_string() {
+  printf '%s' "$1" | awk -v wanted="$2" '
+    BEGIN { data="" }
+    { data=data $0 "\n" }
+    END {
+      depth=0; in_string=0; escaped=0
+      for (i=1; i<=length(data); i++) {
+        c=substr(data,i,1)
+        if (in_string) {
+          if (escaped) escaped=0
+          else if (c=="\\") escaped=1
+          else if (c=="\"") in_string=0
+          continue
+        }
+        if (c=="{") { depth++; continue }
+        if (c=="}") { depth--; continue }
+        if (c!="\"" || depth!=1) continue
+        start=i+1; escaped=0
+        for (j=start; j<=length(data); j++) {
+          c=substr(data,j,1)
+          if (escaped) escaped=0
+          else if (c=="\\") escaped=1
+          else if (c=="\"") break
+        }
+        key=substr(data,start,j-start); i=j+1
+        while (substr(data,i,1) ~ /[[:space:]]/) i++
+        if (substr(data,i,1)!=":") continue
+        i++; while (substr(data,i,1) ~ /[[:space:]]/) i++
+        if (substr(data,i,1)!="\"") {
+          if (substr(data,i,1)=="{") depth++
+          continue
+        }
+        start=i+1; escaped=0
+        for (j=start; j<=length(data); j++) {
+          c=substr(data,j,1)
+          if (escaped) escaped=0
+          else if (c=="\\") escaped=1
+          else if (c=="\"") break
+        }
+        value=substr(data,start,j-start); i=j
+        if (key==wanted) { print value; exit }
+      }
+    }
+  '
+}
+
+test_json_top_level_string() {
+  [ "${VP_ALLOW_TEST_HOOKS:-0}" = 1 ] || return 2
+  [ -r "${1:-}" ] || return 2
+  json_top_level_string "$(cat "$1")" "${2:-}"
+}
+
 resolve_repo_commit() {
+  case "$VP_REPO" in
+    *[!A-Za-z0-9_.\/-]*|/*|*/|*//*|*/*/*|'') error "更新仓库格式无效。"; return 1 ;;
+  esac
+  case "$VP_REPO" in */*) ;; *) error "更新仓库必须使用 owner/repository 格式。"; return 1 ;; esac
+  case "$VP_REF" in *[!A-Za-z0-9._\/-]*|/*|*/|*//*|'') error "更新引用格式无效。"; return 1 ;; esac
+  if [ "$VP_REPO" != "$VP_OFFICIAL_REPO" ] || [ "$VP_REF" != main ]; then
+    [ "${VP_ALLOW_CUSTOM_SOURCE:-0}" = 1 ] || {
+      error "检测到非官方更新来源 $VP_REPO/$VP_REF；如确需使用，请显式设置 VP_ALLOW_CUSTOM_SOURCE=1。"
+      return 1
+    }
+    warn "正在使用显式授权的非官方更新来源：$VP_REPO/$VP_REF"
+  fi
   commit_json="$(curl -fsSL --max-time 20 "https://api.github.com/repos/$VP_REPO/commits/$VP_REF")" || return 1
-  commit_sha="$(printf '%s\n' "$commit_json" | sed -n 's/.*"sha"[[:space:]]*:[[:space:]]*"\([0-9a-fA-F]\{40\}\)".*/\1/p' | head -n 1)"
+  commit_sha="$(json_top_level_string "$commit_json" sha)"
   case "$commit_sha" in ''|*[!0-9a-fA-F]*) return 1 ;; esac
   [ "${#commit_sha}" -eq 40 ] || return 1
   printf '%s' "$commit_sha"
@@ -2729,6 +2798,7 @@ download_update_candidate() {
   script_target="$1"
   checksum_target="$2"
   if [ -n "${VP_UPDATE_SOURCE_DIR:-}" ]; then
+    [ "${VP_ALLOW_TEST_HOOKS:-0}" = 1 ] || { error "本地更新源仅允许用于测试。"; return 1; }
     cp "$VP_UPDATE_SOURCE_DIR/vp.sh" "$script_target" || return 1
     cp "$VP_UPDATE_SOURCE_DIR/vp.sh.sha256" "$checksum_target" || return 1
     printf 'local-test-source'
@@ -2741,6 +2811,23 @@ download_update_candidate() {
   printf '%s' "$commit_sha"
 }
 
+version_key() {
+  printf '%s\n' "$1" | awk '
+    /^[0-9]+[.][0-9]+[.][0-9]+$/ {
+      split($0,v,"."); printf "v%09d%09d%09d2%09d\n",v[1],v[2],v[3],0; found=1
+    }
+    /^[0-9]+[.][0-9]+[.][0-9]+-dev[.][0-9]+$/ {
+      split($0,p,"-"); split(p[1],v,"."); split(p[2],d,".")
+      printf "v%09d%09d%09d1%09d\n",v[1],v[2],v[3],d[2]; found=1
+    }
+    END { if (!found) exit 1 }
+  '
+}
+
+version_key_is_older() {
+  awk -v candidate="$1" -v current="$2" 'BEGIN { exit !(candidate < current) }'
+}
+
 verify_script_sidecar() {
   script_file="$1"
   sidecar_file="$2"
@@ -2751,6 +2838,8 @@ verify_script_sidecar() {
 }
 
 update_cli() {
+  update_option="${1:-}"
+  case "$update_option" in ''|--allow-downgrade) ;; *) error "用法：vp update [--allow-downgrade]"; return 2 ;; esac
   need_root || return 1
   command -v curl >/dev/null 2>&1 || { error "缺少 curl。"; return 1; }
   candidate="$(mktemp /tmp/vp-update.XXXXXX)" || return 1
@@ -2761,13 +2850,31 @@ update_cli() {
   verify_script_sidecar "$candidate" "$sidecar" || { cleanup_update; trap - EXIT HUP INT TERM; error "更新脚本 SHA-256 校验失败。"; return 1; }
   sh -n "$candidate" || { cleanup_update; trap - EXIT HUP INT TERM; error "更新脚本语法检查失败。"; return 1; }
   candidate_version="$(VP_CONFIG_DIR="$VP_CONFIG_DIR" sh "$candidate" version 2>/dev/null)"
-  [ -n "$candidate_version" ] || { cleanup_update; trap - EXIT HUP INT TERM; error "无法读取候选版本。"; return 1; }
+  candidate_key="$(version_key "$candidate_version" 2>/dev/null)" || { cleanup_update; trap - EXIT HUP INT TERM; error "候选版本号格式无效。"; return 1; }
   if [ -f "$VP_CLI_PATH" ] && [ "$(sha256_file "$VP_CLI_PATH" 2>/dev/null)" = "$(sha256_file "$candidate" 2>/dev/null)" ]; then
     cleanup_update; trap - EXIT HUP INT TERM
     ok "当前已经是最新版本 $candidate_version。"
     return 0
   fi
+  current_version=""
+  if [ -f "$VP_CLI_PATH" ]; then
+    current_version="$(VP_CONFIG_DIR="$VP_CONFIG_DIR" sh "$VP_CLI_PATH" version 2>/dev/null || true)"
+    current_key="$(version_key "$current_version" 2>/dev/null)" || { cleanup_update; trap - EXIT HUP INT TERM; error "当前管理脚本版本号无效，拒绝在线覆盖；请先诊断或手工恢复。"; return 1; }
+    if [ "$candidate_key" = "$current_key" ]; then
+      cleanup_update; trap - EXIT HUP INT TERM
+      error "候选脚本与当前版本号相同但内容不同，拒绝覆盖。"
+      return 1
+    fi
+    if version_key_is_older "$candidate_key" "$current_key" && [ "$update_option" != --allow-downgrade ]; then
+      cleanup_update; trap - EXIT HUP INT TERM
+      error "候选版本 $candidate_version 低于当前版本 $current_version；如确认需要降级，请执行 vp update --allow-downgrade。"
+      return 1
+    fi
+  fi
   mkdir -p "$(dirname "$VP_CLI_PATH")"
+  install_stage="$(mktemp "$(dirname "$VP_CLI_PATH")/.vp-update.XXXXXX")" || { cleanup_update; trap - EXIT HUP INT TERM; return 1; }
+  cp "$candidate" "$install_stage" || { rm -f "$install_stage"; cleanup_update; trap - EXIT HUP INT TERM; return 1; }
+  chmod 755 "$install_stage" || { rm -f "$install_stage"; cleanup_update; trap - EXIT HUP INT TERM; return 1; }
   if [ -f "$VP_CLI_PATH" ]; then
     cp -p "$VP_CLI_PATH" "$VP_CLI_BACKUP_PATH" || { cleanup_update; trap - EXIT HUP INT TERM; return 1; }
     previous_hash="$(sha256_file "$VP_CLI_BACKUP_PATH" 2>/dev/null)"
@@ -2777,8 +2884,8 @@ update_cli() {
   else
     rm -f "$VP_CLI_BACKUP_PATH" "$VP_CLI_BACKUP_SHA256"
   fi
-  chmod 755 "$candidate"
-  mv "$candidate" "$VP_CLI_PATH"
+  mv "$install_stage" "$VP_CLI_PATH" || { rm -f "$install_stage"; cleanup_update; trap - EXIT HUP INT TERM; return 1; }
+  rm -f "$candidate"
   rm -f "$sidecar"
   trap - EXIT HUP INT TERM
   ok "管理脚本已更新到 $candidate_version（来源 $source_revision）。"
@@ -3578,7 +3685,7 @@ case "${1:-}" in
   self-heal|selfheal) shift; self_heal_once "$@" ;;
   monitor-install|watchdog-install) install_stability_monitor ;;
   stability|monitor-status) show_stability ;;
-  update) update_cli ;;
+  update) shift; update_cli "$@" ;;
   rollback) rollback_cli ;;
   core-rollback) core_binary_rollback ;;
   tunnel-rollback) tunnel_binary_rollback ;;
@@ -3593,6 +3700,7 @@ case "${1:-}" in
   _test-release-records) shift; test_release_asset_records "$@" ;;
   _test-validate-release-record) shift; test_validate_release_asset_record "$@" ;;
   _test-select-release-record) shift; test_select_release_asset_record "$@" ;;
+  _test-json-top-level) shift; test_json_top_level_string "$@" ;;
   help|-h|--help)
     printf '用法：vp [status|doctor|health|repair|report|self-heal|monitor-install|stability|network|network-optimize|network-rollback|test-all|optimize|maintain|update|rollback|init|core-install|reality-add|tunnel-install|argo-add|nodes|subscription|edit|delete|link|test-node|rotate|rotations|rotate-finalize|backup|restore|migrate-mh|uninstall|version]\n'
     ;;
