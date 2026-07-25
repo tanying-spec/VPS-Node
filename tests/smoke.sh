@@ -947,6 +947,8 @@ grep -q '^network_optimization_state=none$' "$diagnostic"
 grep -q '^network_target_cc=not-managed$' "$diagnostic"
 grep -q '^network_target_qdisc=not-managed$' "$diagnostic"
 grep -q '^network_recommended_action=none$' "$diagnostic"
+grep -q '^watchdog_runner_state=not-installed$' "$diagnostic"
+grep -q '^watchdog_schedule_state=not-installed$' "$diagnostic"
 ! grep -Fq 'sensitive-test-token-should-not-leak' "$diagnostic"
 ! grep -Fq 'www.microsoft.com' "$diagnostic"
 ! grep -Fq 'new.example.com' "$diagnostic"
@@ -1451,16 +1453,46 @@ run_network_monitor
 [ "$(sha256sum "$network_monitor_snapshot" | awk '{print $1}')" = "$active_monitor_snapshot_hash" ]
 [ "$(sha256sum "$network_monitor_sysctl_state" | awk '{print $1}')" = "$active_monitor_sysctl_hash" ]
 monitor_runner="$TMP/dns-usr/bin/watchdog-run"
+monitor_cli="$TMP/monitor-installed-vp"
+cp "$ROOT/vp.sh" "$monitor_cli"
+chmod 755 "$monitor_cli"
+monitor_missing_cli_root="$TMP/monitor-missing-cli"
+if VP_CONFIG_DIR="$monitor_missing_cli_root/etc" VP_DATA_DIR="$monitor_missing_cli_root/lib" \
+  VP_LOG_DIR="$monitor_missing_cli_root/log" VP_LIB_DIR="$monitor_missing_cli_root/usr" \
+  VP_WATCHDOG_RUNNER="$monitor_missing_cli_root/usr/bin/watchdog-run" \
+  VP_CLI_PATH="$monitor_missing_cli_root/missing-vp" VP_SKIP_SERVICE=1 \
+  VP_MONITOR_INSTALL_CONFIRM=ENABLE sh "$ROOT/vp.sh" monitor-install >/dev/null 2>&1; then
+  printf 'watchdog installation accepted a missing CLI target\n' >&2
+  exit 1
+fi
+[ ! -e "$monitor_missing_cli_root/etc" ]
+[ ! -e "$monitor_missing_cli_root/lib" ]
+[ ! -e "$monitor_missing_cli_root/log" ]
+[ ! -e "$monitor_missing_cli_root/usr" ]
+monitor_cancel_root="$TMP/monitor-cancel-fresh"
+cancelled_fresh_monitor="$(VP_CONFIG_DIR="$monitor_cancel_root/etc" VP_DATA_DIR="$monitor_cancel_root/lib" \
+  VP_LOG_DIR="$monitor_cancel_root/log" VP_LIB_DIR="$monitor_cancel_root/usr" \
+  VP_WATCHDOG_RUNNER="$monitor_cancel_root/usr/bin/watchdog-run" VP_CLI_PATH="$monitor_cli" \
+  VP_SKIP_SERVICE=1 VP_MONITOR_INSTALL_CONFIRM=CANCEL sh "$ROOT/vp.sh" monitor-install 2>&1 || true)"
+printf '%s\n' "$cancelled_fresh_monitor" | grep -q '已取消后台监测安装'
+[ ! -e "$monitor_cancel_root/etc" ]
+[ ! -e "$monitor_cancel_root/lib" ]
+[ ! -e "$monitor_cancel_root/log" ]
+[ ! -e "$monitor_cancel_root/usr" ]
 cancelled_monitor_install="$(VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log" \
-  VP_LIB_DIR="$TMP/dns-usr" VP_CLI_PATH="$ROOT/vp.sh" VP_SKIP_SERVICE=1 \
+  VP_LIB_DIR="$TMP/dns-usr" VP_CLI_PATH="$monitor_cli" VP_SKIP_SERVICE=1 \
   VP_MONITOR_INSTALL_CONFIRM=CANCEL sh "$ROOT/vp.sh" monitor-install 2>&1 || true)"
 printf '%s\n' "$cancelled_monitor_install" | grep -q '已取消后台监测安装'
 [ ! -e "$monitor_runner" ]
 mkdir -p "$(dirname "$monitor_runner")"
 printf '#!/bin/sh\n# external watchdog\n' > "$monitor_runner"
 external_monitor_hash="$(sha256sum "$monitor_runner" | awk '{print $1}')"
+external_monitor_status="$(VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log" \
+  VP_LIB_DIR="$TMP/dns-usr" VP_CLI_PATH="$monitor_cli" VP_SKIP_SERVICE=1 sh "$ROOT/vp.sh" stability)"
+printf '%s\n' "$external_monitor_status" | grep -q '后台自愈运行器：异常：无法证明属于 VPS-Node'
+printf '%s\n' "$external_monitor_status" | grep -q '定时调度：异常：运行器是外部文件、符号链接或内容无效'
 if VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log" \
-  VP_LIB_DIR="$TMP/dns-usr" VP_CLI_PATH="$ROOT/vp.sh" VP_SKIP_SERVICE=1 \
+  VP_LIB_DIR="$TMP/dns-usr" VP_CLI_PATH="$monitor_cli" VP_SKIP_SERVICE=1 \
   VP_MONITOR_INSTALL_CONFIRM=ENABLE sh "$ROOT/vp.sh" monitor-install >/dev/null 2>&1; then
   printf 'external watchdog runner was unexpectedly overwritten\n' >&2
   exit 1
@@ -1469,11 +1501,37 @@ fi
 rm -f "$monitor_runner"
 VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log" \
 VP_LIB_DIR="$TMP/dns-usr" VP_CORE_BIN="$TMP/dns-usr/bin/mihomo" \
-VP_CORE_BACKUP_BIN="$TMP/dns-usr/bin/mihomo.previous" VP_CLI_PATH="$ROOT/vp.sh" VP_SKIP_SERVICE=1 \
+VP_CORE_BACKUP_BIN="$TMP/dns-usr/bin/mihomo.previous" VP_CLI_PATH="$monitor_cli" VP_SKIP_SERVICE=1 \
 VP_MONITOR_INSTALL_CONFIRM=ENABLE sh "$ROOT/vp.sh" monitor-install >/dev/null
 [ -x "$TMP/dns-usr/bin/watchdog-run" ]
 grep -Fqx '# Managed by VPS-Node watchdog' "$TMP/dns-usr/bin/watchdog-run"
-grep -Fq "exec \"$ROOT/vp.sh\" self-heal --quiet" "$TMP/dns-usr/bin/watchdog-run"
+grep -Fq "exec \"$monitor_cli\" self-heal --quiet" "$TMP/dns-usr/bin/watchdog-run"
+isolated_monitor_status="$(VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log" \
+  VP_LIB_DIR="$TMP/dns-usr" VP_CLI_PATH="$monitor_cli" VP_SKIP_SERVICE=1 sh "$ROOT/vp.sh" stability)"
+printf '%s\n' "$isolated_monitor_status" | grep -q '定时调度：仅隔离运行器，未注册系统定时任务'
+chmod 600 "$TMP/dns-usr/bin/watchdog-run"
+nonexec_monitor_status="$(VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log" \
+  VP_LIB_DIR="$TMP/dns-usr" VP_CLI_PATH="$monitor_cli" VP_SKIP_SERVICE=1 sh "$ROOT/vp.sh" stability)"
+printf '%s\n' "$nonexec_monitor_status" | grep -q '后台自愈运行器：异常：没有执行权限'
+printf '%s\n' "$nonexec_monitor_status" | grep -q '定时调度：异常：运行器没有执行权限'
+chmod 700 "$TMP/dns-usr/bin/watchdog-run"
+cp "$TMP/dns-usr/bin/watchdog-run" "$TMP/watchdog-run.valid"
+printf '# marker-preserving tamper\n' >> "$TMP/dns-usr/bin/watchdog-run"
+tampered_monitor_hash="$(sha256sum "$TMP/dns-usr/bin/watchdog-run" | awk '{print $1}')"
+tampered_monitor_status="$(VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log" \
+  VP_LIB_DIR="$TMP/dns-usr" VP_CLI_PATH="$monitor_cli" VP_SKIP_SERVICE=1 sh "$ROOT/vp.sh" stability)"
+printf '%s\n' "$tampered_monitor_status" | grep -q '后台自愈运行器：异常：无法证明属于 VPS-Node'
+if VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log" \
+  VP_LIB_DIR="$TMP/dns-usr" VP_CLI_PATH="$monitor_cli" VP_SKIP_SERVICE=1 \
+  VP_MONITOR_INSTALL_CONFIRM=ENABLE sh "$ROOT/vp.sh" monitor-install >/dev/null 2>&1; then
+  printf 'marker-preserving watchdog tamper was unexpectedly overwritten\n' >&2
+  exit 1
+fi
+[ "$(sha256sum "$TMP/dns-usr/bin/watchdog-run" | awk '{print $1}')" = "$tampered_monitor_hash" ]
+mv "$TMP/watchdog-run.valid" "$TMP/dns-usr/bin/watchdog-run"
+isolated_monitor_dashboard="$(VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log" \
+  VP_LIB_DIR="$TMP/dns-usr" VP_CLI_PATH="$monitor_cli" VP_SKIP_SERVICE=1 sh "$ROOT/vp.sh" status)"
+printf '%s\n' "$isolated_monitor_dashboard" | grep -q '后台自愈监测：仅隔离运行器，未注册系统定时任务'
 
 monitor_systemd_root="$TMP/monitor-systemd"
 monitor_systemd_runner="$monitor_systemd_root/usr/watchdog-run"
@@ -1483,7 +1541,8 @@ mkdir -p "$monitor_systemd_root/bin"
 cat > "$monitor_systemd_root/bin/systemctl" <<'FAKE_MONITOR_SYSTEMCTL'
 #!/bin/sh
 case "$*" in
-  'is-active --quiet '*) exit 3 ;;
+  'is-active --quiet '*) [ "${VP_FAKE_MONITOR_TIMER_ACTIVE:-0}" = 1 ] ;;
+  'is-enabled --quiet '*) [ "${VP_FAKE_MONITOR_TIMER_ENABLED:-0}" = 1 ] ;;
   'daemon-reload') exit 0 ;;
   'enable --now '*) [ "${VP_FAKE_MONITOR_ENABLE_FAIL:-0}" = 1 ] && exit 1; exit 0 ;;
   'disable --now '*) exit 0 ;;
@@ -1496,11 +1555,19 @@ PATH="$monitor_systemd_root/bin:$PATH" VP_CONFIG_DIR="$monitor_systemd_root/etc"
 VP_DATA_DIR="$monitor_systemd_root/lib" VP_LOG_DIR="$monitor_systemd_root/log" \
 VP_LIB_DIR="$monitor_systemd_root/usr-lib" VP_WATCHDOG_RUNNER="$monitor_systemd_runner" \
 VP_WATCHDOG_SYSTEMD_SERVICE="$monitor_systemd_service" VP_WATCHDOG_SYSTEMD_TIMER="$monitor_systemd_timer" \
-VP_CLI_PATH="$ROOT/vp.sh" VP_ALLOW_TEST_HOOKS=1 VP_SERVICE_MANAGER_OVERRIDE=systemd \
+VP_CLI_PATH="$monitor_cli" VP_ALLOW_TEST_HOOKS=1 VP_SERVICE_MANAGER_OVERRIDE=systemd \
 VP_MONITOR_INSTALL_CONFIRM=ENABLE sh "$ROOT/vp.sh" monitor-install >/dev/null
 grep -Fqx '# Managed by VPS-Node watchdog' "$monitor_systemd_runner"
 grep -Fqx '# Managed by VPS-Node watchdog' "$monitor_systemd_service"
 grep -Fqx '# Managed by VPS-Node watchdog' "$monitor_systemd_timer"
+monitor_systemd_status="$(PATH="$monitor_systemd_root/bin:$PATH" VP_CONFIG_DIR="$monitor_systemd_root/etc" \
+  VP_DATA_DIR="$monitor_systemd_root/lib" VP_LOG_DIR="$monitor_systemd_root/log" \
+  VP_LIB_DIR="$monitor_systemd_root/usr-lib" VP_WATCHDOG_RUNNER="$monitor_systemd_runner" \
+  VP_WATCHDOG_SYSTEMD_SERVICE="$monitor_systemd_service" VP_WATCHDOG_SYSTEMD_TIMER="$monitor_systemd_timer" \
+  VP_CLI_PATH="$monitor_cli" \
+  VP_FAKE_MONITOR_TIMER_ACTIVE=1 VP_FAKE_MONITOR_TIMER_ENABLED=1 \
+  VP_ALLOW_TEST_HOOKS=1 VP_SERVICE_MANAGER_OVERRIDE=systemd sh "$ROOT/vp.sh" stability)"
+printf '%s\n' "$monitor_systemd_status" | grep -q '定时调度：已调度（systemd，每 5 分钟）'
 [ "$(stat -c '%a' "$monitor_systemd_runner")" = 700 ]
 [ "$(stat -c '%a' "$monitor_systemd_service")" = 600 ]
 [ "$(stat -c '%a' "$monitor_systemd_timer")" = 600 ]
@@ -1511,7 +1578,7 @@ if PATH="$monitor_systemd_root/bin:$PATH" VP_CONFIG_DIR="$monitor_systemd_root/e
   VP_DATA_DIR="$monitor_systemd_root/lib" VP_LOG_DIR="$monitor_systemd_root/log" \
   VP_LIB_DIR="$monitor_systemd_root/usr-lib" VP_WATCHDOG_RUNNER="$monitor_systemd_runner" \
   VP_WATCHDOG_SYSTEMD_SERVICE="$monitor_systemd_service" VP_WATCHDOG_SYSTEMD_TIMER="$monitor_systemd_timer" \
-  VP_CLI_PATH="$monitor_systemd_root/changed-vp" VP_ALLOW_TEST_HOOKS=1 VP_SERVICE_MANAGER_OVERRIDE=systemd \
+  VP_CLI_PATH="$monitor_cli" VP_ALLOW_TEST_HOOKS=1 VP_SERVICE_MANAGER_OVERRIDE=systemd \
   VP_FAKE_MONITOR_ENABLE_FAIL=1 VP_MONITOR_INSTALL_CONFIRM=ENABLE \
   sh "$ROOT/vp.sh" monitor-install >/dev/null 2>&1; then
   printf 'failed systemd monitor enable unexpectedly succeeded\n' >&2
@@ -1526,13 +1593,117 @@ if PATH="$monitor_systemd_root/bin:$PATH" VP_CONFIG_DIR="$monitor_systemd_root/e
   VP_DATA_DIR="$monitor_systemd_root/lib" VP_LOG_DIR="$monitor_systemd_root/log" \
   VP_LIB_DIR="$monitor_systemd_root/usr-lib" VP_WATCHDOG_RUNNER="$monitor_systemd_runner" \
   VP_WATCHDOG_SYSTEMD_SERVICE="$monitor_systemd_service" VP_WATCHDOG_SYSTEMD_TIMER="$monitor_systemd_timer" \
-  VP_CLI_PATH="$ROOT/vp.sh" VP_ALLOW_TEST_HOOKS=1 VP_SERVICE_MANAGER_OVERRIDE=systemd \
+  VP_CLI_PATH="$monitor_cli" VP_ALLOW_TEST_HOOKS=1 VP_SERVICE_MANAGER_OVERRIDE=systemd \
   VP_MONITOR_INSTALL_CONFIRM=ENABLE sh "$ROOT/vp.sh" monitor-install >/dev/null 2>&1; then
   printf 'external systemd timer was unexpectedly overwritten\n' >&2
   exit 1
 fi
 [ "$(sha256sum "$monitor_systemd_timer" | awk '{print $1}')" = "$external_timer_hash" ]
 ! find "$monitor_systemd_root" -name '.watchdog-*' -type f | grep -q .
+
+monitor_openrc_root="$TMP/monitor-openrc"
+monitor_openrc_runner="$monitor_openrc_root/usr/watchdog-run"
+monitor_openrc_periodic="$monitor_openrc_root/periodic/vps-node-watchdog"
+monitor_openrc_log="$monitor_openrc_root/openrc.log"
+mkdir -p "$monitor_openrc_root/bin"
+cat > "$monitor_openrc_root/bin/rc-service" <<'FAKE_MONITOR_RC_SERVICE'
+#!/bin/sh
+printf 'service %s\n' "$*" >> "$VP_FAKE_OPENRC_LOG"
+case "$*" in
+  'crond status') [ "${VP_FAKE_CROND_ACTIVE:-0}" = 1 ] ;;
+  'crond start') [ "${VP_FAKE_CROND_START_FAIL:-0}" != 1 ] ;;
+  'crond stop') exit 0 ;;
+  *) exit 1 ;;
+esac
+FAKE_MONITOR_RC_SERVICE
+cat > "$monitor_openrc_root/bin/rc-update" <<'FAKE_MONITOR_RC_UPDATE'
+#!/bin/sh
+printf 'update %s\n' "$*" >> "$VP_FAKE_OPENRC_LOG"
+case "$*" in
+  'show default') [ "${VP_FAKE_CROND_ENABLED:-0}" = 1 ] && printf 'crond\n'; exit 0 ;;
+  'add crond default') [ "${VP_FAKE_CROND_ADD_FAIL:-0}" != 1 ] ;;
+  'del crond default') exit 0 ;;
+  *) exit 1 ;;
+esac
+FAKE_MONITOR_RC_UPDATE
+cat > "$monitor_openrc_root/bin/curl" <<'FAKE_MONITOR_CURL'
+#!/bin/sh
+case "$*" in
+  *"%{http_code}"*) printf '204'; exit 0 ;;
+  *) exit 1 ;;
+esac
+FAKE_MONITOR_CURL
+chmod 755 "$monitor_openrc_root/bin/rc-service" "$monitor_openrc_root/bin/rc-update" "$monitor_openrc_root/bin/curl"
+PATH="$monitor_openrc_root/bin:$PATH" VP_CONFIG_DIR="$monitor_openrc_root/etc" \
+VP_DATA_DIR="$monitor_openrc_root/lib" VP_LOG_DIR="$monitor_openrc_root/log" \
+VP_LIB_DIR="$monitor_openrc_root/usr-lib" VP_WATCHDOG_RUNNER="$monitor_openrc_runner" \
+VP_WATCHDOG_PERIODIC="$monitor_openrc_periodic" VP_CLI_PATH="$monitor_cli" \
+VP_FAKE_OPENRC_LOG="$monitor_openrc_log" VP_ALLOW_TEST_HOOKS=1 VP_SERVICE_MANAGER_OVERRIDE=openrc \
+VP_MONITOR_INSTALL_CONFIRM=ENABLE sh "$ROOT/vp.sh" monitor-install >/dev/null
+grep -Fqx '# Managed by VPS-Node watchdog' "$monitor_openrc_runner"
+grep -Fqx '# Managed by VPS-Node watchdog' "$monitor_openrc_periodic"
+grep -Fqx 'service crond start' "$monitor_openrc_log"
+grep -Fqx 'update add crond default' "$monitor_openrc_log"
+monitor_openrc_status="$(PATH="$monitor_openrc_root/bin:$PATH" VP_CONFIG_DIR="$monitor_openrc_root/etc" \
+  VP_DATA_DIR="$monitor_openrc_root/lib" VP_LOG_DIR="$monitor_openrc_root/log" \
+  VP_LIB_DIR="$monitor_openrc_root/usr-lib" VP_WATCHDOG_RUNNER="$monitor_openrc_runner" \
+  VP_WATCHDOG_PERIODIC="$monitor_openrc_periodic" VP_CLI_PATH="$monitor_cli" VP_FAKE_OPENRC_LOG="$monitor_openrc_log" \
+  VP_FAKE_CROND_ACTIVE=1 VP_FAKE_CROND_ENABLED=1 VP_ALLOW_TEST_HOOKS=1 VP_SERVICE_MANAGER_OVERRIDE=openrc \
+  sh "$ROOT/vp.sh" stability)"
+printf '%s\n' "$monitor_openrc_status" | grep -q '定时调度：已调度（OpenRC，每 15 分钟）'
+monitor_openrc_health="$(PATH="$monitor_openrc_root/bin:$PATH" VP_CONFIG_DIR="$monitor_openrc_root/etc" \
+  VP_DATA_DIR="$monitor_openrc_root/lib" VP_LOG_DIR="$monitor_openrc_root/log" \
+  VP_LIB_DIR="$monitor_openrc_root/usr-lib" VP_WATCHDOG_RUNNER="$monitor_openrc_runner" \
+  VP_WATCHDOG_PERIODIC="$monitor_openrc_periodic" VP_CLI_PATH="$monitor_cli" VP_FAKE_OPENRC_LOG="$monitor_openrc_log" \
+  VP_FAKE_CROND_ACTIVE=1 VP_FAKE_CROND_ENABLED=1 VP_ALLOW_TEST_HOOKS=1 VP_SERVICE_MANAGER_OVERRIDE=openrc \
+  sh "$ROOT/vp.sh" health 2>&1 || true)"
+printf '%s\n' "$monitor_openrc_health" | grep -q '监控层：后台自愈已真实调度'
+monitor_openrc_diagnostic="$monitor_openrc_root/diagnostic.txt"
+PATH="$monitor_openrc_root/bin:$PATH" VP_CONFIG_DIR="$monitor_openrc_root/etc" \
+VP_DATA_DIR="$monitor_openrc_root/lib" VP_LOG_DIR="$monitor_openrc_root/log" \
+VP_LIB_DIR="$monitor_openrc_root/usr-lib" VP_WATCHDOG_RUNNER="$monitor_openrc_runner" \
+VP_WATCHDOG_PERIODIC="$monitor_openrc_periodic" VP_CLI_PATH="$monitor_cli" VP_FAKE_OPENRC_LOG="$monitor_openrc_log" \
+VP_FAKE_CROND_ACTIVE=1 VP_FAKE_CROND_ENABLED=1 VP_CURL_BIN=false \
+VP_ALLOW_TEST_HOOKS=1 VP_SERVICE_MANAGER_OVERRIDE=openrc \
+sh "$ROOT/vp.sh" report "$monitor_openrc_diagnostic" >/dev/null
+grep -q '^watchdog_runner_state=ready$' "$monitor_openrc_diagnostic"
+grep -q '^watchdog_schedule_state=scheduled$' "$monitor_openrc_diagnostic"
+[ -s "$monitor_openrc_diagnostic.sha256" ]
+(cd "$monitor_openrc_root" && sha256sum -c "$(basename "$monitor_openrc_diagnostic").sha256" >/dev/null)
+monitor_openrc_inactive_status="$(PATH="$monitor_openrc_root/bin:$PATH" VP_CONFIG_DIR="$monitor_openrc_root/etc" \
+  VP_DATA_DIR="$monitor_openrc_root/lib" VP_LOG_DIR="$monitor_openrc_root/log" \
+  VP_LIB_DIR="$monitor_openrc_root/usr-lib" VP_WATCHDOG_RUNNER="$monitor_openrc_runner" \
+  VP_WATCHDOG_PERIODIC="$monitor_openrc_periodic" VP_CLI_PATH="$monitor_cli" VP_FAKE_OPENRC_LOG="$monitor_openrc_log" \
+  VP_FAKE_CROND_ACTIVE=0 VP_FAKE_CROND_ENABLED=1 VP_ALLOW_TEST_HOOKS=1 VP_SERVICE_MANAGER_OVERRIDE=openrc \
+  sh "$ROOT/vp.sh" stability)"
+printf '%s\n' "$monitor_openrc_inactive_status" | grep -q '定时调度：异常：crond 未运行'
+monitor_openrc_inactive_health="$(PATH="$monitor_openrc_root/bin:$PATH" VP_CONFIG_DIR="$monitor_openrc_root/etc" \
+  VP_DATA_DIR="$monitor_openrc_root/lib" VP_LOG_DIR="$monitor_openrc_root/log" \
+  VP_LIB_DIR="$monitor_openrc_root/usr-lib" VP_WATCHDOG_RUNNER="$monitor_openrc_runner" \
+  VP_WATCHDOG_PERIODIC="$monitor_openrc_periodic" VP_CLI_PATH="$monitor_cli" VP_FAKE_OPENRC_LOG="$monitor_openrc_log" \
+  VP_FAKE_CROND_ACTIVE=0 VP_FAKE_CROND_ENABLED=1 VP_ALLOW_TEST_HOOKS=1 VP_SERVICE_MANAGER_OVERRIDE=openrc \
+  sh "$ROOT/vp.sh" health 2>&1 || true)"
+printf '%s\n' "$monitor_openrc_inactive_health" | grep -q '监控层：异常：crond 未运行'
+monitor_openrc_runner_hash="$(sha256sum "$monitor_openrc_runner" | awk '{print $1}')"
+monitor_openrc_periodic_hash="$(sha256sum "$monitor_openrc_periodic" | awk '{print $1}')"
+: > "$monitor_openrc_log"
+if PATH="$monitor_openrc_root/bin:$PATH" VP_CONFIG_DIR="$monitor_openrc_root/etc" \
+  VP_DATA_DIR="$monitor_openrc_root/lib" VP_LOG_DIR="$monitor_openrc_root/log" \
+  VP_LIB_DIR="$monitor_openrc_root/usr-lib" VP_WATCHDOG_RUNNER="$monitor_openrc_runner" \
+  VP_WATCHDOG_PERIODIC="$monitor_openrc_periodic" VP_CLI_PATH="$monitor_cli" \
+  VP_FAKE_OPENRC_LOG="$monitor_openrc_log" VP_FAKE_CROND_ADD_FAIL=1 \
+  VP_ALLOW_TEST_HOOKS=1 VP_SERVICE_MANAGER_OVERRIDE=openrc VP_MONITOR_INSTALL_CONFIRM=ENABLE \
+  sh "$ROOT/vp.sh" monitor-install >/dev/null 2>&1; then
+  printf 'failed OpenRC monitor enable unexpectedly succeeded\n' >&2
+  exit 1
+fi
+[ "$(sha256sum "$monitor_openrc_runner" | awk '{print $1}')" = "$monitor_openrc_runner_hash" ]
+[ "$(sha256sum "$monitor_openrc_periodic" | awk '{print $1}')" = "$monitor_openrc_periodic_hash" ]
+grep -Fqx 'service crond start' "$monitor_openrc_log"
+grep -Fqx 'update add crond default' "$monitor_openrc_log"
+grep -Fqx 'update del crond default' "$monitor_openrc_log"
+grep -Fqx 'service crond stop' "$monitor_openrc_log"
+! find "$monitor_openrc_root" -name '.watchdog-*' -type f | grep -q .
 
 delete_race_root="$TMP/delete-race"
 VP_CONFIG_DIR="$delete_race_root/etc" VP_DATA_DIR="$delete_race_root/lib" \

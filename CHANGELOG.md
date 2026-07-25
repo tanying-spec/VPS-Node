@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.2.0-dev.92
+
+- The isolated authorized-host acceptance now proves that `vp update --check` is zero-write, a checksum-verified local candidate can be installed and rolled back, and a tampered rollback point is rejected without changing the active CLI.
+- CLI update and rollback acceptance also binds isolated state, node database, generated configuration and all Mihomo PIDs, while the existing final gate continues to bind formal service state, process images, command lines and sensitive file digests.
+- The Windows evidence verifier requires all three update/rollback results and its synthetic evidence self-test covers the expanded schema.
+- OpenRC watchdog installation no longer reports success when `crond` cannot start or cannot be registered for boot; failure restores the previous watchdog files, scheduler enablement and scheduler runtime state.
+- Regression coverage now includes successful OpenRC scheduling and a failed registration after `crond` startup, proving both file rollback and scheduler-state compensation.
+- `vp status` and `vp stability` now report the effective watchdog schedule instead of inferring health from a runner file alone, distinguishing a verified systemd/OpenRC schedule, isolated runner, missing/foreign definitions, disabled scheduling and an inactive scheduler.
+- Watchdog layout initialization is deferred until after `ENABLE`; cancelling a first-time monitor installation now leaves configuration, data, log and library paths completely absent.
+- Monitor installation refuses a missing, symlinked, non-executable, syntactically invalid or version-invalid CLI target before preview-side writes, preventing a scheduler from repeatedly invoking a broken management path.
+- Stability output now evaluates watchdog runner ownership and execute permission consistently; external, symlinked, malformed and non-executable runners are reported as explicit anomalies instead of appearing installed in one line and absent in another.
+- Redacted diagnostics now include machine-readable `watchdog_runner_state` and `watchdog_schedule_state` values derived from the same inspection as the dashboard; reports expose no scheduler paths or command contents and are checksum-verified in scheduled OpenRC coverage.
+- Layered health checks now include a dedicated monitor layer: a verified schedule is healthy, an absent or isolated optional monitor is a warning, and broken ownership, permissions, definitions, enablement or scheduler runtime is an actionable error.
+- Watchdog ownership now requires exact expected content for the runner, systemd service/timer and OpenRC periodic task, not merely a copyable marker line; altered definitions are reported, refused during reinstall and preserved during uninstall.
+- Authorized-host acceptance now creates a watchdog runner entirely inside the isolated prefix, verifies exact ownership/status plus checksum-bound diagnostic mapping, and explicitly avoids registering OpenRC or touching the host scheduler.
+- The locked-host runner now executes portable smoke and installer tests before real-kernel acceptance and returns a bounded trace tail only on failure; acceptance evidence sidecars use flat filenames so downloaded SHA-256 verification is portable.
+
 ## 0.2.0-dev.91
 
 - `vp maintain --dry-run` now previews the recovery point, interrupted-transaction handling, safe repair scope, expired credential removal, oversized log trimming and fixed-prefix stale temporary cleanup without writes.

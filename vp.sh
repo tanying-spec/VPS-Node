@@ -2,7 +2,7 @@
 
 set -u
 
-VP_VERSION="0.2.0-dev.91"
+VP_VERSION="0.2.0-dev.92"
 VP_CONFIG_DIR="${VP_CONFIG_DIR:-/etc/vps-node}"
 VP_DATA_DIR="${VP_DATA_DIR:-/var/lib/vps-node}"
 VP_LOG_DIR="${VP_LOG_DIR:-/var/log/vps-node}"
@@ -3784,9 +3784,40 @@ watchdog_file_owned() {
   grep -Fqx '# Managed by VPS-Node watchdog' "$watchdog_owned_path" 2>/dev/null
 }
 
+watchdog_definition_valid() {
+  watchdog_definition_path="$1"
+  watchdog_file_owned "$watchdog_definition_path" || return 1
+  watchdog_actual="$(cat "$watchdog_definition_path" 2>/dev/null)" || return 1
+  case "$watchdog_definition_path" in
+    "$VP_WATCHDOG_RUNNER")
+      watchdog_expected="$(printf '#!/bin/sh\n# Managed by VPS-Node watchdog\nexec "%s" self-heal --quiet\n' "$VP_CLI_PATH")"
+      ;;
+    "$VP_WATCHDOG_SYSTEMD_SERVICE")
+      watchdog_expected="$(printf '# Managed by VPS-Node watchdog\n[Unit]\nDescription=VPS-Node low-overhead self-heal check\n\n[Service]\nType=oneshot\nExecStart=%s\n' "$VP_WATCHDOG_RUNNER")"
+      ;;
+    "$VP_WATCHDOG_SYSTEMD_TIMER")
+      watchdog_expected="$(printf '# Managed by VPS-Node watchdog\n[Unit]\nDescription=Run VPS-Node self-heal every 5 minutes\n\n[Timer]\nOnBootSec=2min\nOnUnitActiveSec=5min\nPersistent=true\n\n[Install]\nWantedBy=timers.target\n')"
+      ;;
+    "$VP_WATCHDOG_PERIODIC")
+      watchdog_expected="$(printf '#!/bin/sh\n# Managed by VPS-Node watchdog\nexec "%s"\n' "$VP_WATCHDOG_RUNNER")"
+      ;;
+    *) return 1 ;;
+  esac
+  [ "$watchdog_actual" = "$watchdog_expected" ]
+}
+
 install_stability_monitor() {
   need_root || return 1
-  init_layout >/dev/null || return 1
+  if [ ! -f "$VP_CLI_PATH" ] || [ -L "$VP_CLI_PATH" ] || [ ! -x "$VP_CLI_PATH" ] || \
+     ! sh -n "$VP_CLI_PATH" >/dev/null 2>&1; then
+    error "管理入口不存在或不可安全执行：$VP_CLI_PATH。请先完成 VPS-Node 安装。"
+    return 1
+  fi
+  monitor_cli_version="$(VP_CONFIG_DIR="$VP_CONFIG_DIR" sh "$VP_CLI_PATH" version 2>/dev/null || true)"
+  if ! version_key "$monitor_cli_version" >/dev/null 2>&1; then
+    error "管理入口版本信息无效，拒绝安装无法验证的后台任务。"
+    return 1
+  fi
   if [ "${VP_SKIP_SERVICE:-0}" = "1" ]; then
     monitor_manager=isolated
     monitor_secondary=""
@@ -3811,7 +3842,7 @@ install_stability_monitor() {
   for monitor_target in "$VP_WATCHDOG_RUNNER" "$monitor_secondary" "$monitor_tertiary"; do
     [ -n "$monitor_target" ] || continue
     if [ -e "$monitor_target" ] || [ -L "$monitor_target" ]; then
-      watchdog_file_owned "$monitor_target" || { error "监测安装目标已被其他任务占用，拒绝覆盖：$monitor_target"; return 1; }
+      watchdog_definition_valid "$monitor_target" || { error "监测安装目标内容不完整、已被修改或属于其他任务，拒绝覆盖：$monitor_target"; return 1; }
     fi
   done
   approved_monitor_runner_state="$(managed_file_state "$VP_WATCHDOG_RUNNER")"
@@ -3835,6 +3866,7 @@ install_stability_monitor() {
   [ "$(managed_file_state "$VP_WATCHDOG_RUNNER")" = "$approved_monitor_runner_state" ] || { error "监测运行器在确认期间发生变化，已中止。"; return 1; }
   [ "$(managed_file_state "$monitor_secondary")" = "$approved_monitor_secondary_state" ] || { error "监测定时定义在确认期间发生变化，已中止。"; return 1; }
   [ "$(managed_file_state "$monitor_tertiary")" = "$approved_monitor_tertiary_state" ] || { error "监测定时器定义在确认期间发生变化，已中止。"; return 1; }
+  init_layout >/dev/null || return 1
 
   monitor_tx="$(mktemp -d /tmp/vp-monitor-install.XXXXXX)" || return 1
   monitor_runner_existed=0; monitor_secondary_existed=0; monitor_tertiary_existed=0
@@ -3842,7 +3874,13 @@ install_stability_monitor() {
   [ -z "$monitor_secondary" ] || [ "$approved_monitor_secondary_state" = missing ] || { cp -p "$monitor_secondary" "$monitor_tx/secondary.before" || { rm -rf "$monitor_tx"; return 1; }; monitor_secondary_existed=1; }
   [ -z "$monitor_tertiary" ] || [ "$approved_monitor_tertiary_state" = missing ] || { cp -p "$monitor_tertiary" "$monitor_tx/tertiary.before" || { rm -rf "$monitor_tx"; return 1; }; monitor_tertiary_existed=1; }
   monitor_timer_was_active=0
+  monitor_crond_was_active=0
+  monitor_crond_was_enabled=0
   [ "$monitor_manager" != systemd ] || ! systemctl is-active --quiet "${VP_WATCHDOG_SERVICE}.timer" >/dev/null 2>&1 || monitor_timer_was_active=1
+  if [ "$monitor_manager" = openrc ]; then
+    rc-service crond status >/dev/null 2>&1 && monitor_crond_was_active=1
+    rc-update show default 2>/dev/null | awk '{print $1}' | grep -qx crond && monitor_crond_was_enabled=1
+  fi
   monitor_committed=0
   restore_monitor_install() {
     if [ "$monitor_committed" -eq 1 ]; then
@@ -3859,6 +3897,9 @@ install_stability_monitor() {
     if [ "$monitor_manager" = systemd ]; then
       systemctl daemon-reload >/dev/null 2>&1 || true
       if [ "$monitor_timer_was_active" -eq 1 ]; then systemctl start "${VP_WATCHDOG_SERVICE}.timer" >/dev/null 2>&1 || true; else systemctl disable --now "${VP_WATCHDOG_SERVICE}.timer" >/dev/null 2>&1 || true; fi
+    elif [ "$monitor_manager" = openrc ]; then
+      if [ "$monitor_crond_was_enabled" -eq 1 ]; then rc-update add crond default >/dev/null 2>&1 || true; else rc-update del crond default >/dev/null 2>&1 || true; fi
+      if [ "$monitor_crond_was_active" -eq 1 ]; then rc-service crond start >/dev/null 2>&1 || true; else rc-service crond stop >/dev/null 2>&1 || true; fi
     fi
     rm -rf "$monitor_tx"
   }
@@ -3899,8 +3940,12 @@ install_stability_monitor() {
   if [ "$monitor_manager" = systemd ]; then
     systemctl daemon-reload >/dev/null 2>&1 && systemctl enable --now "${VP_WATCHDOG_SERVICE}.timer" >/dev/null || { restore_monitor_install; trap - EXIT HUP INT TERM; error "systemd 定时监测启用失败，已恢复安装前文件和状态。"; return 1; }
   elif [ "$monitor_manager" = openrc ]; then
-    rc-service crond start >/dev/null 2>&1 || true
-    rc-update add crond default >/dev/null 2>&1 || true
+    rc-service crond start >/dev/null 2>&1 && rc-update add crond default >/dev/null 2>&1 || {
+      restore_monitor_install
+      trap - EXIT HUP INT TERM
+      error "OpenRC 定时监测启用失败，已恢复安装前文件和 crond 状态。"
+      return 1
+    }
   fi
   monitor_committed=1
   restore_monitor_install
@@ -3909,8 +3954,78 @@ install_stability_monitor() {
   [ "$monitor_manager" = isolated ] && ok "后台自愈运行器已在隔离模式生成。" || ok "低开销后台自愈已启用。"
 }
 
+inspect_monitor_schedule() {
+  MONITOR_SCHEDULE_STATE=not-installed
+  MONITOR_SCHEDULE_SUMMARY="未安装"
+  MONITOR_RUNNER_STATE=not-installed
+  MONITOR_RUNNER_SUMMARY="未安装"
+  if [ ! -e "$VP_WATCHDOG_RUNNER" ] && [ ! -L "$VP_WATCHDOG_RUNNER" ]; then
+    return 0
+  fi
+  if ! watchdog_definition_valid "$VP_WATCHDOG_RUNNER"; then
+    MONITOR_RUNNER_STATE=ownership-invalid
+    MONITOR_SCHEDULE_STATE=runner-invalid
+    MONITOR_SCHEDULE_SUMMARY="异常：运行器是外部文件、符号链接或内容无效"
+    MONITOR_RUNNER_SUMMARY="异常：无法证明属于 VPS-Node"
+    return 0
+  fi
+  if [ ! -x "$VP_WATCHDOG_RUNNER" ]; then
+    MONITOR_RUNNER_STATE=not-executable
+    MONITOR_SCHEDULE_STATE=runner-not-executable
+    MONITOR_SCHEDULE_SUMMARY="异常：运行器没有执行权限"
+    MONITOR_RUNNER_SUMMARY="异常：没有执行权限"
+    return 0
+  fi
+  MONITOR_RUNNER_STATE=ready
+  MONITOR_RUNNER_SUMMARY="已安装且所有权有效"
+  if [ "${VP_SKIP_SERVICE:-0}" = "1" ]; then
+    MONITOR_SCHEDULE_STATE=isolated
+    MONITOR_SCHEDULE_SUMMARY="仅隔离运行器，未注册系统定时任务"
+    return 0
+  fi
+  monitor_status_manager="$(service_manager)"
+  case "$monitor_status_manager" in
+    systemd)
+      if ! watchdog_definition_valid "$VP_WATCHDOG_SYSTEMD_SERVICE" || ! watchdog_definition_valid "$VP_WATCHDOG_SYSTEMD_TIMER"; then
+        MONITOR_SCHEDULE_STATE=definition-invalid
+        MONITOR_SCHEDULE_SUMMARY="异常：systemd 定时定义缺失或不属于 VPS-Node"
+      elif ! systemctl is-enabled --quiet "${VP_WATCHDOG_SERVICE}.timer" >/dev/null 2>&1; then
+        MONITOR_SCHEDULE_STATE=disabled
+        MONITOR_SCHEDULE_SUMMARY="异常：systemd 定时器未启用"
+      elif ! systemctl is-active --quiet "${VP_WATCHDOG_SERVICE}.timer" >/dev/null 2>&1; then
+        MONITOR_SCHEDULE_STATE=inactive
+        MONITOR_SCHEDULE_SUMMARY="异常：systemd 定时器未运行"
+      else
+        MONITOR_SCHEDULE_STATE=scheduled
+        MONITOR_SCHEDULE_SUMMARY="已调度（systemd，每 5 分钟）"
+      fi
+      ;;
+    openrc)
+      if ! watchdog_definition_valid "$VP_WATCHDOG_PERIODIC"; then
+        MONITOR_SCHEDULE_STATE=definition-invalid
+        MONITOR_SCHEDULE_SUMMARY="异常：OpenRC 周期任务缺失或不属于 VPS-Node"
+      elif ! rc-update show default 2>/dev/null | awk '{print $1}' | grep -qx crond; then
+        MONITOR_SCHEDULE_STATE=disabled
+        MONITOR_SCHEDULE_SUMMARY="异常：crond 未加入默认运行级别"
+      elif ! rc-service crond status >/dev/null 2>&1; then
+        MONITOR_SCHEDULE_STATE=inactive
+        MONITOR_SCHEDULE_SUMMARY="异常：crond 未运行"
+      else
+        MONITOR_SCHEDULE_STATE=scheduled
+        MONITOR_SCHEDULE_SUMMARY="已调度（OpenRC，每 15 分钟）"
+      fi
+      ;;
+    *)
+      MONITOR_SCHEDULE_STATE=unsupported
+      MONITOR_SCHEDULE_SUMMARY="异常：无法识别系统定时调度器"
+      ;;
+  esac
+}
+
 show_stability() {
-  printf '后台自愈运行器：%s\n' "$([ -x "$VP_WATCHDOG_RUNNER" ] && printf '已安装' || printf '未安装')"
+  inspect_monitor_schedule
+  printf '后台自愈运行器：%s\n' "$MONITOR_RUNNER_SUMMARY"
+  printf '定时调度：%s\n' "$MONITOR_SCHEDULE_SUMMARY"
   if self_heal_lock_active; then
     printf '当前检查：运行中\n'
   elif [ -d "$VP_SELF_HEAL_LOCK" ]; then
@@ -3958,6 +4073,7 @@ diagnostic_report() {
   ipv4_result=unavailable; public_ipv4 >/dev/null 2>&1 && ipv4_result=available
   ipv6_result=unavailable; public_ipv6 >/dev/null 2>&1 && ipv6_result=available
   inspect_network_optimization
+  inspect_monitor_schedule
   diagnostic_network_target_cc=not-managed
   diagnostic_network_target_qdisc=not-managed
   case "$NETWORK_OPT_STATE" in
@@ -3985,6 +4101,8 @@ diagnostic_report() {
     printf 'service_manager=%s\n' "$(service_manager)"
     printf 'core_state=%s\n' "$(service_state "$VP_CORE_SERVICE")"
     printf 'tunnel_state=%s\n' "$(service_state "$VP_TUNNEL_SERVICE")"
+    printf 'watchdog_runner_state=%s\n' "$MONITOR_RUNNER_STATE"
+    printf 'watchdog_schedule_state=%s\n' "$MONITOR_SCHEDULE_STATE"
     printf 'core_config=%s\n' "$config_result"
     printf 'dns_probe=%s\n' "$dns_result"
     printf 'public_ipv4=%s\n' "$ipv4_result"
@@ -4627,6 +4745,8 @@ show_status() {
   printf '%s\n' '----------------------------------------'
   printf '代理核心：%s\n' "$(service_state "$VP_CORE_SERVICE")"
   printf 'Cloudflare Tunnel：%s\n' "$(service_state "$VP_TUNNEL_SERVICE")"
+  inspect_monitor_schedule
+  printf '后台自愈监测：%s\n' "$MONITOR_SCHEDULE_SUMMARY"
   printf 'Tunnel 本地指标端口：%s\n' "$VP_TUNNEL_METRICS_PORT"
   printf '节点数量：%s\n' "$(node_count)"
   printf '进行中凭据轮换：%s\n' "$(rotation_count active)"
@@ -5014,6 +5134,14 @@ layered_health_check() {
     health_warn "Tunnel 层：尚未配置备用线路。"
   fi
 
+  inspect_monitor_schedule
+  case "$MONITOR_SCHEDULE_STATE" in
+    scheduled) health_ok "监控层：后台自愈已真实调度。" ;;
+    isolated) health_warn "监控层：仅有隔离运行器，未注册系统定时任务。" ;;
+    not-installed) health_warn "监控层：尚未启用后台自愈，可执行 vp monitor-install。" ;;
+    *) health_error "监控层：$MONITOR_SCHEDULE_SUMMARY；请重新执行 vp monitor-install，程序会拒绝覆盖外部定义。" ;;
+  esac
+
   oom_snapshot
   if [ "$OOM_DELTA" -gt 0 ]; then
     health_error "资源层：自上次确认后新增 $OOM_DELTA 次 OOM Kill（累计 $OOM_CURRENT）。"
@@ -5300,10 +5428,10 @@ uninstall_project() {
           if tunnel_service_file_owned "$VP_TUNNEL_SYSTEMD_SERVICE"; then uninstall_tunnel_service_owned=1; else warn "保留非 VPS-Node 所有的同名 Tunnel 服务：$VP_TUNNEL_SYSTEMD_SERVICE"; fi
         fi
         if [ -e "$VP_WATCHDOG_SYSTEMD_SERVICE" ] || [ -L "$VP_WATCHDOG_SYSTEMD_SERVICE" ]; then
-          if watchdog_file_owned "$VP_WATCHDOG_SYSTEMD_SERVICE"; then uninstall_watchdog_service_owned=1; else warn "保留非 VPS-Node 所有的同名监测服务：$VP_WATCHDOG_SYSTEMD_SERVICE"; fi
+          if watchdog_definition_valid "$VP_WATCHDOG_SYSTEMD_SERVICE"; then uninstall_watchdog_service_owned=1; else warn "保留内容异常或非 VPS-Node 所有的同名监测服务：$VP_WATCHDOG_SYSTEMD_SERVICE"; fi
         fi
         if [ -e "$VP_WATCHDOG_SYSTEMD_TIMER" ] || [ -L "$VP_WATCHDOG_SYSTEMD_TIMER" ]; then
-          if watchdog_file_owned "$VP_WATCHDOG_SYSTEMD_TIMER"; then uninstall_watchdog_timer_owned=1; else warn "保留非 VPS-Node 所有的同名监测定时器：$VP_WATCHDOG_SYSTEMD_TIMER"; fi
+          if watchdog_definition_valid "$VP_WATCHDOG_SYSTEMD_TIMER"; then uninstall_watchdog_timer_owned=1; else warn "保留内容异常或非 VPS-Node 所有的同名监测定时器：$VP_WATCHDOG_SYSTEMD_TIMER"; fi
         fi
         ;;
       openrc)
@@ -5314,7 +5442,7 @@ uninstall_project() {
           if tunnel_service_file_owned "$VP_TUNNEL_OPENRC_SERVICE"; then uninstall_tunnel_service_owned=1; else warn "保留非 VPS-Node 所有的同名 Tunnel 服务：$VP_TUNNEL_OPENRC_SERVICE"; fi
         fi
         if [ -e "$VP_WATCHDOG_PERIODIC" ] || [ -L "$VP_WATCHDOG_PERIODIC" ]; then
-          if watchdog_file_owned "$VP_WATCHDOG_PERIODIC"; then uninstall_watchdog_periodic_owned=1; else warn "保留非 VPS-Node 所有的同名周期任务：$VP_WATCHDOG_PERIODIC"; fi
+          if watchdog_definition_valid "$VP_WATCHDOG_PERIODIC"; then uninstall_watchdog_periodic_owned=1; else warn "保留内容异常或非 VPS-Node 所有的同名周期任务：$VP_WATCHDOG_PERIODIC"; fi
         fi
         ;;
     esac

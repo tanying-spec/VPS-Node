@@ -67,3 +67,17 @@
 - Reality IPv4 `2/2`、轮换、备份恢复、自愈、脱敏报告、维护和可恢复卸载完整闭环均通过。
 - 正式 Mihomo/Tunnel 的状态、PID、二进制、命令行、配置、init 定义及敏感摘要前后不变；代理与 Tunnel 指标 HTTP 检查均为 200。
 - 原始脱敏证据 SHA-256：`f4929f21a21016b7c5bda073305daedff4bb054135a8837a63baac92658f84e3`。
+
+## 0.2.0-dev.92
+
+- 执行时间：2026-07-25 03:39–03:42 UTC。
+- 当前脚本 SHA-256：`4650759d9d4c8bc498b69dccba890358f009ea212d114e759331431ce8c337d9`。
+- 完整 `tests/smoke.sh`、`tests/install_smoke.sh`、真实 DNS 档位和隔离实机验收均通过。
+- Reality IPv4 回环真实认证与两路并发：`2/2`。
+- CLI 更新只读检查保持零写入；校验候选更新、回滚和回滚点篡改拒绝均通过，节点状态、生成配置和全部 Mihomo PID 未变化。
+- 隔离后台监控运行器的精确内容、执行权限、状态页和脱敏诊断映射通过；没有注册 OpenRC 周期任务，也没有修改正式 `crond` 状态。
+- 一键维护、凭据轮换、备份恢复、配置漂移自愈、脱敏诊断和可恢复卸载闭环均通过。
+- 正式 Mihomo PID 保持 `321849`，正式 cloudflared PID 保持 `321562`；服务、二进制镜像、命令行、配置/init 和敏感状态摘要前后不变。
+- 验收后正式代理 HTTP 为 `204`，Tunnel 指标 HTTP 为 `200`，相关 `/tmp` 测试残留为 `0`。
+- 原始脱敏证据 SHA-256：`23079985bf2b713892bdff6ddf05b89b020f0988333c20feead5794bf4c86a3d`。
+- 公网 IPv6 仍为 `not-available`；独立 Cloudflare Tunnel 因未提供独立测试 Token/域名仍为 `not-requested`，两项均未冒充通过。

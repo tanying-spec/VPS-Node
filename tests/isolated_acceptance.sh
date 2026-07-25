@@ -148,6 +148,51 @@ tested_version="$(vp_env "$CLI" version)"
 
 vp_env "$CLI" init >/dev/null
 vp_env "$CLI" core-install >/dev/null
+
+update_candidate_dir="$BASE/update-candidate"
+mkdir -p "$update_candidate_dir"
+sed 's/^VP_VERSION=.*/VP_VERSION="0.2.0-dev.999999"/' "$CLI" > "$update_candidate_dir/vp.sh"
+chmod 755 "$update_candidate_dir/vp.sh"
+printf '%s  vp.sh\n' "$(sha256sum "$update_candidate_dir/vp.sh" | awk '{print $1}')" > "$update_candidate_dir/vp.sh.sha256"
+
+cli_before_update_hash="$(file_digest "$CLI")"
+isolated_state_before_update="$(file_digest "$BASE/etc/state.env")"
+isolated_nodes_before_update="$(file_digest "$BASE/etc/nodes.db")"
+isolated_config_before_update="$(file_digest "$BASE/etc/generated/mihomo.yaml")"
+all_mihomo_pids_before_update="$(process_ids mihomo)"
+VP_ALLOW_TEST_HOOKS=1 VP_UPDATE_SOURCE_DIR="$update_candidate_dir" \
+  vp_env "$CLI" update --check >/dev/null
+[ "$cli_before_update_hash" = "$(file_digest "$CLI")" ]
+[ ! -e "$CLI.previous" ]
+[ ! -e "$CLI.previous.sha256" ]
+
+VP_ALLOW_TEST_HOOKS=1 VP_UPDATE_SOURCE_DIR="$update_candidate_dir" VP_UPDATE_CONFIRM=UPDATE \
+  vp_env "$CLI" update >/dev/null
+[ "$(vp_env "$CLI" version)" = '0.2.0-dev.999999' ]
+[ "$(vp_env "$CLI.previous" version)" = "$tested_version" ]
+(cd "$(dirname "$CLI.previous")" && sha256sum -c "$(basename "$CLI.previous.sha256")" >/dev/null)
+[ "$isolated_state_before_update" = "$(file_digest "$BASE/etc/state.env")" ]
+[ "$isolated_nodes_before_update" = "$(file_digest "$BASE/etc/nodes.db")" ]
+[ "$isolated_config_before_update" = "$(file_digest "$BASE/etc/generated/mihomo.yaml")" ]
+[ "$all_mihomo_pids_before_update" = "$(process_ids mihomo)" ]
+
+VP_ROLLBACK_CONFIRM=ROLLBACK vp_env "$CLI" rollback >/dev/null
+[ "$(vp_env "$CLI" version)" = "$tested_version" ]
+[ "$(vp_env "$CLI.previous" version)" = '0.2.0-dev.999999' ]
+(cd "$(dirname "$CLI.previous")" && sha256sum -c "$(basename "$CLI.previous.sha256")" >/dev/null)
+cli_after_rollback_hash="$(file_digest "$CLI")"
+printf '\n# isolated acceptance tamper\n' >> "$CLI.previous"
+if VP_ROLLBACK_CONFIRM=ROLLBACK vp_env "$CLI" rollback >/dev/null 2>&1; then
+  printf 'tampered CLI rollback point unexpectedly accepted\n' >&2
+  exit 1
+fi
+[ "$cli_after_rollback_hash" = "$(file_digest "$CLI")" ]
+[ "$(vp_env "$CLI" version)" = "$tested_version" ]
+[ "$isolated_state_before_update" = "$(file_digest "$BASE/etc/state.env")" ]
+[ "$isolated_nodes_before_update" = "$(file_digest "$BASE/etc/nodes.db")" ]
+[ "$isolated_config_before_update" = "$(file_digest "$BASE/etc/generated/mihomo.yaml")" ]
+[ "$all_mihomo_pids_before_update" = "$(process_ids mihomo)" ]
+
 vp_env "$CLI" reality-add acceptance-reality '' www.amd.com ipv4 >/dev/null
 vp_env env VP_TEST_SERVER=127.0.0.1 VP_TEST_BYTES=1048576 "$CLI" test-node acceptance-reality 2 | grep -q '2/2 路成功'
 ipv6_result=not-available
@@ -218,8 +263,6 @@ expected_config_hash="$(file_digest "$BASE/etc/generated/mihomo.yaml")"
 printf '\n# isolated acceptance drift\n' >> "$BASE/etc/generated/mihomo.yaml"
 vp_env "$CLI" self-heal --quiet
 [ "$expected_config_hash" = "$(file_digest "$BASE/etc/generated/mihomo.yaml")" ]
-vp_env "$CLI" report "$BASE/diagnostic.txt" >/dev/null
-! grep -Eq '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' "$BASE/diagnostic.txt"
 vp_env "$CLI" network-optimize --dry-run >/dev/null
 
 mkdir -p "$BASE/maintenance-tmp"
@@ -235,6 +278,18 @@ vp_env env VP_MAINTENANCE_TMP_ROOT="$BASE/maintenance-tmp" VP_MAINTENANCE_CONFIR
 [ "$(wc -c < "$BASE/log/maintenance-large.log")" -eq 1048576 ]
 [ ! -e "$BASE/maintenance-tmp/vp-node-test.acceptance" ]
 find "$BASE/lib/backups" -name 'vps-node-*.tar.gz' -type f | grep -q .
+
+VP_MONITOR_INSTALL_CONFIRM=ENABLE vp_env env VP_SKIP_SERVICE=1 "$CLI" monitor-install >/dev/null
+[ -x "$BASE/usr/bin/watchdog-run" ]
+monitor_status="$(vp_env env VP_SKIP_SERVICE=1 "$CLI" stability)"
+printf '%s\n' "$monitor_status" | grep -q '后台自愈运行器：已安装且所有权有效'
+printf '%s\n' "$monitor_status" | grep -q '定时调度：仅隔离运行器，未注册系统定时任务'
+vp_env env VP_SKIP_SERVICE=1 "$CLI" report "$BASE/diagnostic.txt" >/dev/null
+! grep -Eq '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' "$BASE/diagnostic.txt"
+grep -q '^watchdog_runner_state=ready$' "$BASE/diagnostic.txt"
+grep -q '^watchdog_schedule_state=isolated$' "$BASE/diagnostic.txt"
+[ -s "$BASE/diagnostic.txt.sha256" ]
+(cd "$BASE" && sha256sum -c diagnostic.txt.sha256 >/dev/null)
 
 VP_UNINSTALL_CONFIRM=DELETE vp_env "$CLI" uninstall >/dev/null
 [ ! -e "$BASE/etc" ]
@@ -278,7 +333,12 @@ evidence_file="$EVIDENCE_DIR/vps-node-acceptance-$(date -u '+%Y%m%dT%H%M%SZ').tx
   printf 'backup_restore_roundtrip=passed\n'
   printf 'config_drift_self_heal=passed\n'
   printf 'diagnostic_redaction=passed\n'
+  printf 'diagnostic_watchdog_state=passed\n'
+  printf 'isolated_watchdog_definition=passed\n'
   printf 'safe_maintenance_preview_backup_and_cleanup=passed\n'
+  printf 'cli_update_check_zero_write=passed\n'
+  printf 'cli_update_and_rollback=passed\n'
+  printf 'tampered_rollback_rejected=passed\n'
   printf 'recoverable_uninstall=passed\n'
   printf 'formal_mihomo_state=%s\n' "$formal_mihomo_after"
   printf 'formal_tunnel_state=%s\n' "$formal_tunnel_after"
@@ -289,7 +349,7 @@ evidence_file="$EVIDENCE_DIR/vps-node-acceptance-$(date -u '+%Y%m%dT%H%M%SZ').tx
   printf 'formal_process_images_and_cmdlines_unchanged=yes\n'
 } > "$evidence_file"
 chmod 600 "$evidence_file"
-sha256sum "$evidence_file" > "$evidence_file.sha256"
+(cd "$EVIDENCE_DIR" && sha256sum "$(basename "$evidence_file")" > "$(basename "$evidence_file").sha256")
 chmod 600 "$evidence_file.sha256"
 
 trap - EXIT HUP INT TERM

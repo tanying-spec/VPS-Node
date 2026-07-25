@@ -124,6 +124,12 @@ function Assert-AcceptanceEvidence([string]$Directory, [bool]$TunnelRequested) {
         backup_restore_roundtrip = 'passed'
         config_drift_self_heal = 'passed'
         diagnostic_redaction = 'passed'
+        diagnostic_watchdog_state = 'passed'
+        isolated_watchdog_definition = 'passed'
+        safe_maintenance_preview_backup_and_cleanup = 'passed'
+        cli_update_check_zero_write = 'passed'
+        cli_update_and_rollback = 'passed'
+        tampered_rollback_rejected = 'passed'
         recoverable_uninstall = 'passed'
         formal_mihomo_pids_unchanged = 'yes'
         formal_tunnel_pids_unchanged = 'yes'
@@ -367,6 +373,12 @@ if ($SelfTestEvidence) {
             'backup_restore_roundtrip=passed',
             'config_drift_self_heal=passed',
             'diagnostic_redaction=passed',
+            'diagnostic_watchdog_state=passed',
+            'isolated_watchdog_definition=passed',
+            'safe_maintenance_preview_backup_and_cleanup=passed',
+            'cli_update_check_zero_write=passed',
+            'cli_update_and_rollback=passed',
+            'tampered_rollback_rejected=passed',
             'recoverable_uninstall=passed',
             'formal_mihomo_pids_unchanged=yes',
             'formal_tunnel_pids_unchanged=yes',
@@ -729,7 +741,7 @@ if ($PreflightOnly) {
 }
 
 try {
-    & tar -czf $LocalArchive -C $RepoRoot vp.sh vp.sh.sha256 tests/isolated_acceptance.sh tests/memory_profiles.sh tests/cpu_profiles.sh tests/dns_profiles.sh
+    & tar -czf $LocalArchive -C $RepoRoot vp.sh vp.sh.sha256 install.sh tests/smoke.sh tests/install_smoke.sh tests/isolated_acceptance.sh tests/memory_profiles.sh tests/cpu_profiles.sh tests/dns_profiles.sh
     if ($LASTEXITCODE -ne 0) { throw 'Failed to package the current acceptance source.' }
 
     Invoke-AuthorizedSsh "set -eu; umask 077; mkdir -p $(Quote-Sh $RemoteRoot)/source $(Quote-Sh $RemoteRoot)/evidence" | Out-Null
@@ -753,7 +765,16 @@ exit 1
     $MihomoPath = [string]($discovery.Output | Where-Object { $_ -match '^/' } | Select-Object -First 1)
     $MihomoPath = $MihomoPath.Trim()
     if ([string]::IsNullOrWhiteSpace($MihomoPath)) { throw 'Unable to discover the formal Mihomo executable read-only.' }
-    Write-Host 'Mihomo discovered; starting isolated acceptance without reading or changing formal credentials.'
+    Write-Host 'Mihomo discovered; running portable smoke and installer tests in temporary paths.'
+
+    $smokeCommand = "set -eu; cd $(Quote-Sh "$RemoteRoot/source"); " +
+        "if ! VP_TEST_MIHOMO_BIN=$(Quote-Sh $MihomoPath) sh -x tests/smoke.sh >smoke.trace 2>&1; then tail -n 160 smoke.trace; exit 1; fi; " +
+        "rm -f smoke.trace; " +
+        "if ! sh -x tests/install_smoke.sh >install-smoke.trace 2>&1; then tail -n 160 install-smoke.trace; exit 1; fi; " +
+        "rm -f install-smoke.trace"
+    $smoke = Invoke-AuthorizedSsh $smokeCommand
+    $smoke.Output | ForEach-Object { Write-Host $_ }
+    Write-Host 'Portable smoke and installer tests passed; starting isolated real-kernel acceptance.'
 
     $acceptanceEnvironment = "VP_TEST_MIHOMO_BIN=$(Quote-Sh $MihomoPath) " +
         "VP_ACCEPTANCE_EVIDENCE_DIR=$(Quote-Sh "$RemoteRoot/evidence") "
