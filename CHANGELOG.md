@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.0-dev.96
+
+- Improved the ordinary-user Cloudflare menu with a readiness summary showing Token state, Tunnel/CDN counts and the exact CDN prerequisites.
+- Added a direct menu entry for configuring or replacing the scoped Cloudflare API Token, with required permissions printed before input and an explicit Global API Key warning.
+- CDN nodes no longer enter the generic Reality/Tunnel edit form; the menu now explains that public-port changes use option 7 and hostname/path changes require the safe delete-and-recreate flow.
+- Added regression coverage for the Cloudflare readiness menu and the CDN-specific edit guidance.
+
 ## 0.2.0-dev.95
 
 - Added an opt-in real Cloudflare CDN acceptance path locked to the authorized host, with seven all-or-nothing inputs for a dedicated API Token, test hostname/path, one internal origin port, two working NAT mappings and one deliberately unmapped rollback port.

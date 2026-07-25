@@ -911,6 +911,24 @@ menu_output="$(printf '3\n1\n1\n\n0\n' | \
   sh "$ROOT/vp.sh")"
 printf '%s\n' "$menu_output" | grep -q 'vless://'
 
+cloudflare_menu_output="$(printf '2\n0\n\n0\n' | \
+  VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log" \
+  VP_LIB_DIR="$TMP/dns-usr" VP_CORE_BIN="$TMP/dns-usr/bin/mihomo" VP_SKIP_SERVICE=1 \
+  sh "$ROOT/vp.sh")"
+printf '%s\n' "$cloudflare_menu_output" | grep -q 'API Token：未配置'
+printf '%s\n' "$cloudflare_menu_output" | grep -q '配置或更换 Cloudflare API Token'
+
+printf '%s\n' 'cdn|menu-cdn|28888|88888888-8888-4888-8888-888888888888|/menu-cdn|menu-cdn.example.com|nat|38888|zone_menu|dns_menu|rule_menu' >> "$TMP/dns-etc/nodes.db"
+printf '%s\n' 'menu-cdn|zone_menu|dns_menu|created|A|0.0.0.0|false|ruleset_menu|rule_menu|created|menu-cdn.example.com' >> "$TMP/dns-etc/cloudflare-cdn.db"
+cdn_edit_menu_output="$(printf '3\nmenu-cdn\n3\n\n0\n' | \
+  VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log" \
+  VP_LIB_DIR="$TMP/dns-usr" VP_CORE_BIN="$TMP/dns-usr/bin/mihomo" VP_SKIP_SERVICE=1 \
+  sh "$ROOT/vp.sh")"
+printf '%s\n' "$cdn_edit_menu_output" | grep -q '公网端口请使用选项 7'
+printf '%s\n' "$cdn_edit_menu_output" | grep -q '删除后按 CDN 向导重新创建'
+sed -i '/^cdn|menu-cdn|/d' "$TMP/dns-etc/nodes.db"
+sed -i '/^menu-cdn|/d' "$TMP/dns-etc/cloudflare-cdn.db"
+
 mkdir -p "$TMP/dns-etc/secrets"
 printf 'sensitive-test-token-should-not-leak\n' > "$TMP/dns-etc/secrets/cloudflared.token"
 chmod 600 "$TMP/dns-etc/secrets/cloudflared.token"

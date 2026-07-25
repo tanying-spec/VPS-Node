@@ -2,7 +2,7 @@
 
 set -u
 
-VP_VERSION="0.2.0-dev.95"
+VP_VERSION="0.2.0-dev.96"
 VP_CONFIG_DIR="${VP_CONFIG_DIR:-/etc/vps-node}"
 VP_DATA_DIR="${VP_DATA_DIR:-/var/lib/vps-node}"
 VP_LOG_DIR="${VP_LOG_DIR:-/var/log/vps-node}"
@@ -1438,6 +1438,8 @@ cf_response_ok() { jq -e '.success == true' >/dev/null 2>&1; }
 configure_cf_api_token() {
   need_root || return 1
   ensure_runtime_dependencies || return 1
+  printf 'Cloudflare API Token 要求：仅目标 Zone，权限为 Zone Read、Zone Settings Read、DNS Edit、Rulesets Edit。\n' >&2
+  printf '不接受 Global API Key；Token 内容不会显示在状态页、诊断报告或节点链接中。\n' >&2
   token_source="${1:-}"
   if [ -n "$token_source" ] && [ -r "$token_source" ]; then token="$(awk 'NR==1{print;exit}' "$token_source")"
   elif [ -n "${VP_CF_API_TOKEN:-}" ]; then token="$VP_CF_API_TOKEN"
@@ -6099,6 +6101,8 @@ interactive_argo_setup() {
 
 interactive_cdn_setup() {
   ensure_core_interactive || return 1
+  printf 'CDN 直连需要：专用 Flexible SSL Zone、仅目标 Zone 的 API Token，以及可从公网映射到本机的端口。\n'
+  printf '程序不会修改 Zone 全局 SSL、安全等级或 Bot 设置；创建前还会显示完整预览并要求输入 CREATE。\n'
   if ! cf_api_token >/dev/null 2>&1; then
     configure_cf_api_token || return 1
   fi
@@ -6115,12 +6119,27 @@ interactive_cdn_setup() {
   cdn_add "$name" "$port" "$host" "$path" "$mode" "$external_port"
 }
 
+interactive_cloudflare_readiness() {
+  printf 'Cloudflare 备用线路准备状态：\n'
+  if cf_api_token >/dev/null 2>&1; then
+    printf '  API Token：已配置（内容不会显示）\n'
+  else
+    printf '  API Token：未配置；需要 Zone Read、Zone Settings Read、DNS Edit、Rulesets Edit\n'
+  fi
+  tunnel_count="$(awk -F'|' '$1=="argo"{n++}END{print n+0}' "$VP_NODES_DB" 2>/dev/null)"
+  cdn_count="$(awk -F'|' '$1=="cdn"{n++}END{print n+0}' "$VP_NODES_DB" 2>/dev/null)"
+  printf '  Tunnel 节点：%s 个\n  CDN 节点：%s 个\n' "$tunnel_count" "$cdn_count"
+  printf '  CDN 条件：独立 Flexible Zone、专用子域名、NAT 时需要公网映射端口\n'
+}
+
 interactive_cloudflare_setup() {
-  printf '1. Cloudflare Tunnel 备用节点（适应性最好）\n2. Cloudflare CDN 直连节点（无 cloudflared，要求独立 Flexible Zone）\n0. 返回\n请选择：'
+  interactive_cloudflare_readiness
+  printf '\n1. Cloudflare Tunnel 备用节点（适应性最好）\n2. Cloudflare CDN 直连节点（无 cloudflared，要求独立 Flexible Zone）\n3. 配置或更换 Cloudflare API Token\n0. 返回\n请选择：'
   read -r cf_choice || true
   case "$cf_choice" in
     1) interactive_argo_setup ;;
     2) interactive_cdn_setup ;;
+    3) configure_cf_api_token ;;
     0) return 0 ;;
     *) warn "无效选择。" ;;
   esac
@@ -6141,12 +6160,17 @@ interactive_node_action() {
   esac
   target="$(resolve_node_selector "$selector")"
   [ -n "$target" ] || { error "未找到节点：$selector。"; return 1; }
+  selected_proto="$(awk -F'|' -v n="$target" '$2==n{print $1;exit}' "$VP_NODES_DB")"
   printf '1. 显示链接\n2. 端到端测试\n3. 修改节点\n4. 轮换凭据\n5. 完成凭据切换\n6. 删除节点\n7. 设置直连/NAT 或更新公网端口\n0. 返回\n请选择：'
   read -r action || true
   case "$action" in
     1) show_node_link "$target" ;;
     2) test_node_end_to_end "$target" ;;
     3)
+      if [ "$selected_proto" = cdn ]; then
+        warn "CDN 节点的公网端口请使用选项 7；域名或 WebSocket 路径变化会同时影响 Cloudflare DNS/Origin Rule，请删除后按 CDN 向导重新创建。"
+        return 0
+      fi
       record="$(awk -F'|' -v n="$target" '$2==n{print;exit}' "$VP_NODES_DB")"
       IFS='|' read -r proto old_name old_port f4 f5 f6 f7 f8 f9 f10 <<EOF
 $record
