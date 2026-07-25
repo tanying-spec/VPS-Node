@@ -8,6 +8,7 @@
 |---|---|---|---|
 | Reality 主线路 | 支持 | 支持，事务化创建、编辑、轮换、测试 | VPS-Node 更完整 |
 | VLESS-WS + Cloudflare Tunnel | 支持 | 支持，独立服务、诊断和自愈 | VPS-Node 更完整 |
+| NAT VPS 与 CDN 直连 | 无独立模型 | 内外端口分离、检测可纠正、无重启公网端口事务；可选无 cloudflared 的 CDN 节点和最小权限 API 对象回滚 | VPS-Node 已新增，公网 CDN 证据待补 |
 | 首页状态 | 服务、节点、内存、OOM、DNS | 结论、下一步、主备组成、内存、CPU、OOM、DNS | VPS-Node 更易判断 |
 | 内存自适应 | cgroup 内存档位 | cgroup 工作内存、预算、连续档位 | VPS-Node 更精细 |
 | CPU 自适应 | CPU quota/cpuset | CPU quota/cpuset，并限制 GOMAXPROCS | 已补齐 |

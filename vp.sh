@@ -2,13 +2,14 @@
 
 set -u
 
-VP_VERSION="0.2.0-dev.92"
+VP_VERSION="0.2.0-dev.93"
 VP_CONFIG_DIR="${VP_CONFIG_DIR:-/etc/vps-node}"
 VP_DATA_DIR="${VP_DATA_DIR:-/var/lib/vps-node}"
 VP_LOG_DIR="${VP_LOG_DIR:-/var/log/vps-node}"
 VP_LIB_DIR="${VP_LIB_DIR:-/usr/local/lib/vps-node}"
 VP_NODES_DB="$VP_CONFIG_DIR/nodes.db"
 VP_ROTATIONS_DB="$VP_CONFIG_DIR/credential-rotations.db"
+VP_CF_CDN_DB="$VP_CONFIG_DIR/cloudflare-cdn.db"
 VP_STATE_FILE="$VP_CONFIG_DIR/state.env"
 VP_SECRETS_DIR="$VP_CONFIG_DIR/secrets"
 VP_GENERATED_DIR="$VP_CONFIG_DIR/generated"
@@ -36,6 +37,8 @@ VP_TUNNEL_BIN="${VP_TUNNEL_BIN:-$VP_LIB_DIR/bin/cloudflared}"
 VP_TUNNEL_BACKUP_BIN="${VP_TUNNEL_BACKUP_BIN:-$VP_LIB_DIR/bin/cloudflared.previous}"
 VP_TUNNEL_SERVICE="${VP_TUNNEL_SERVICE:-vps-node-tunnel}"
 VP_TUNNEL_TOKEN_FILE="$VP_SECRETS_DIR/cloudflared.token"
+VP_CF_API_TOKEN_FILE="$VP_SECRETS_DIR/cloudflare-api.token"
+VP_CF_API_BASE="${VP_CF_API_BASE:-https://api.cloudflare.com/client/v4}"
 VP_TUNNEL_RUNNER="$VP_LIB_DIR/bin/cloudflared-run"
 VP_TUNNEL_SYSTEMD_SERVICE="${VP_TUNNEL_SYSTEMD_SERVICE:-/etc/systemd/system/${VP_TUNNEL_SERVICE}.service}"
 VP_TUNNEL_OPENRC_SERVICE="${VP_TUNNEL_OPENRC_SERVICE:-/etc/init.d/$VP_TUNNEL_SERVICE}"
@@ -91,12 +94,12 @@ install_packages() {
 
 ensure_runtime_dependencies() {
   missing=""
-  for command_name in curl gzip openssl tar; do
+  for command_name in curl gzip openssl tar jq; do
     command -v "$command_name" >/dev/null 2>&1 || missing="$missing $command_name"
   done
   [ -z "$missing" ] && return 0
   info "正在安装运行依赖。"
-  install_packages ca-certificates curl gzip openssl tar
+  install_packages ca-certificates curl gzip openssl tar jq
 }
 
 init_layout() {
@@ -110,9 +113,10 @@ init_layout() {
     "$VP_SECRETS_DIR" "$VP_GENERATED_DIR" "$VP_TX_DIR"
   [ -f "$VP_NODES_DB" ] || : > "$VP_NODES_DB"
   [ -f "$VP_ROTATIONS_DB" ] || : > "$VP_ROTATIONS_DB"
+  [ -f "$VP_CF_CDN_DB" ] || : > "$VP_CF_CDN_DB"
   [ -f "$VP_STATE_FILE" ] || printf 'SCHEMA_VERSION=1\nACTIVE_CORE=none\n' > "$VP_STATE_FILE"
   chmod 700 "$VP_CONFIG_DIR" "$VP_SECRETS_DIR" "$VP_TX_DIR"
-  chmod 600 "$VP_NODES_DB" "$VP_ROTATIONS_DB" "$VP_STATE_FILE"
+  chmod 600 "$VP_NODES_DB" "$VP_ROTATIONS_DB" "$VP_CF_CDN_DB" "$VP_STATE_FILE"
   recover_state_transaction || return 1
   ok "VPS-Node 状态目录已初始化。"
 }
@@ -138,7 +142,7 @@ copy_path_if_present() {
 }
 
 transaction_managed_paths() {
-  printf '%s\n' "$VP_NODES_DB" "$VP_ROTATIONS_DB" "$VP_STATE_FILE" "$VP_GENERATED_DIR"
+  printf '%s\n' "$VP_NODES_DB" "$VP_ROTATIONS_DB" "$VP_CF_CDN_DB" "$VP_STATE_FILE" "$VP_GENERATED_DIR"
 }
 
 transaction_snapshot() {
@@ -156,9 +160,10 @@ transaction_candidate() {
   mkdir -p "$candidate_root"
   [ -f "$VP_NODES_DB" ] && cp -p "$VP_NODES_DB" "$candidate_root/nodes.db" || : > "$candidate_root/nodes.db"
   [ -f "$VP_ROTATIONS_DB" ] && cp -p "$VP_ROTATIONS_DB" "$candidate_root/credential-rotations.db" || : > "$candidate_root/credential-rotations.db"
+  [ -f "$VP_CF_CDN_DB" ] && cp -p "$VP_CF_CDN_DB" "$candidate_root/cloudflare-cdn.db" || : > "$candidate_root/cloudflare-cdn.db"
   [ -f "$VP_STATE_FILE" ] && cp -p "$VP_STATE_FILE" "$candidate_root/state.env" || printf 'SCHEMA_VERSION=1\nACTIVE_CORE=none\n' > "$candidate_root/state.env"
   [ -d "$VP_GENERATED_DIR" ] && cp -R -p "$VP_GENERATED_DIR" "$candidate_root/generated" || mkdir -p "$candidate_root/generated"
-  chmod 600 "$candidate_root/nodes.db" "$candidate_root/credential-rotations.db" "$candidate_root/state.env"
+  chmod 600 "$candidate_root/nodes.db" "$candidate_root/credential-rotations.db" "$candidate_root/cloudflare-cdn.db" "$candidate_root/state.env"
 }
 
 transaction_restore() {
@@ -229,13 +234,20 @@ validate_nodes_database() {
     {
       if (invalid_common($2, $3, $4) || seen_name[$2]++ || seen_port[$3]++) bad=1
       if ($1 == "reality") {
-        if (NF != 10 || $5 == "" || $5 ~ /[[:space:]]/ || $6 == "" || $6 ~ /[[:space:]]/ ||
+        if ((NF != 10 && NF != 12) || $5 == "" || $5 ~ /[[:space:]]/ || $6 == "" || $6 ~ /[[:space:]]/ ||
             $7 == "" || $7 ~ /[^A-Za-z0-9_-]/ || $8 == "" || $8 ~ /[^A-Za-z0-9_-]/ ||
             $9 == "" || $9 ~ /[^0-9A-Fa-f]/ || length($9) > 16 || length($9) % 2 != 0 ||
             ($10 != "ipv4" && $10 != "ipv6")) bad=1
+        if (NF == 12 && (($11 != "direct" && $11 != "nat") || $12 !~ /^[0-9]+$/ ||
+            $12 + 0 < 1 || $12 + 0 > 65535 || ($11 == "direct" && $12 != $3))) bad=1
       } else if ($1 == "argo") {
         if (NF != 6 || $5 !~ /^\// || $5 ~ /[[:space:]\047\042]/ ||
             $6 !~ /^[A-Za-z0-9.-]+$/ || $6 !~ /\./) bad=1
+      } else if ($1 == "cdn") {
+        if (NF != 11 || $5 !~ /^\// || $5 ~ /[[:space:]\047\042]/ ||
+            $6 !~ /^[A-Za-z0-9.-]+$/ || $6 !~ /\./ || ($7 != "direct" && $7 != "nat") ||
+            $8 !~ /^[0-9]+$/ || $8 + 0 < 1 || $8 + 0 > 65535 ||
+            $9 !~ /^[A-Za-z0-9_-]+$/ || $10 !~ /^[A-Za-z0-9_-]+$/ || $11 !~ /^[A-Za-z0-9_-]+$/) bad=1
       } else {
         bad=1
       }
@@ -264,11 +276,30 @@ validate_rotations_database() {
   ' "$nodes_to_validate" "$rotations_to_validate"
 }
 
+validate_cf_cdn_database() {
+  cf_db_to_validate="$1"
+  nodes_to_validate="$2"
+  awk -F'|' '
+    FILENAME == ARGV[1] { if ($1=="cdn") cdn_node[$2]=1; next }
+    NF == 0 { next }
+    {
+      if (NF != 11 || !($1 in cdn_node) || seen[$1]++ ||
+          $2 !~ /^[A-Za-z0-9_-]+$/ || $3 !~ /^[A-Za-z0-9_-]+$/ ||
+          ($4 != "created" && $4 != "updated") || $5 !~ /^[A-Za-z]+$/ ||
+          $6 ~ /[|[:space:]]/ || ($7 != "true" && $7 != "false") ||
+          $8 !~ /^[A-Za-z0-9_-]+$/ || $9 !~ /^[A-Za-z0-9_-]+$/ ||
+          ($10 != "created" && $10 != "existing") || $11 !~ /^[A-Za-z0-9.-]+$/) bad=1
+    }
+    END { for (n in cdn_node) if (!seen[n]) bad=1; exit bad ? 1 : 0 }
+  ' "$nodes_to_validate" "$cf_db_to_validate"
+}
+
 validate_state_candidate() {
   candidate_root="$VP_TX_ACTIVE/candidate"
   [ -f "$candidate_root/state.env" ] || { error "候选状态文件不存在。"; return 1; }
   [ -f "$candidate_root/nodes.db" ] || { error "候选节点数据库不存在。"; return 1; }
   [ -f "$candidate_root/credential-rotations.db" ] || { error "候选轮换数据库不存在。"; return 1; }
+  [ -f "$candidate_root/cloudflare-cdn.db" ] || { error "候选 Cloudflare CDN 状态不存在。"; return 1; }
   if grep -Ev '^[A-Z][A-Z0-9_]*=[A-Za-z0-9._:/+-]*$|^$' "$candidate_root/state.env" >/dev/null 2>&1; then
     error "候选状态文件格式错误。"
     return 1
@@ -281,6 +312,10 @@ validate_state_candidate() {
     error "候选凭据轮换数据库格式错误或与当前节点不一致。"
     return 1
   fi
+  if ! validate_cf_cdn_database "$candidate_root/cloudflare-cdn.db" "$candidate_root/nodes.db"; then
+    error "候选 Cloudflare CDN 状态无效或与节点不一致。"
+    return 1
+  fi
   printf 'validated\n' > "$VP_TX_ACTIVE/stage"
 }
 
@@ -290,13 +325,16 @@ activate_state_candidate() {
   state_tmp="$VP_CONFIG_DIR/.state.env.$$"
   nodes_tmp="$VP_CONFIG_DIR/.nodes.db.$$"
   rotations_tmp="$VP_CONFIG_DIR/.credential-rotations.db.$$"
+  cf_cdn_tmp="$VP_CONFIG_DIR/.cloudflare-cdn.db.$$"
   cp "$candidate_root/state.env" "$state_tmp" || return 1
   cp "$candidate_root/nodes.db" "$nodes_tmp" || { rm -f "$state_tmp"; return 1; }
   cp "$candidate_root/credential-rotations.db" "$rotations_tmp" || { rm -f "$state_tmp" "$nodes_tmp"; return 1; }
-  chmod 600 "$state_tmp" "$nodes_tmp" "$rotations_tmp"
+  cp "$candidate_root/cloudflare-cdn.db" "$cf_cdn_tmp" || { rm -f "$state_tmp" "$nodes_tmp" "$rotations_tmp"; return 1; }
+  chmod 600 "$state_tmp" "$nodes_tmp" "$rotations_tmp" "$cf_cdn_tmp"
   mv "$state_tmp" "$VP_STATE_FILE"
   mv "$nodes_tmp" "$VP_NODES_DB"
   mv "$rotations_tmp" "$VP_ROTATIONS_DB"
+  mv "$cf_cdn_tmp" "$VP_CF_CDN_DB"
   rm -rf "$VP_GENERATED_DIR"
   cp -R -p "$candidate_root/generated" "$VP_GENERATED_DIR"
   printf 'activated\n' > "$VP_TX_ACTIVE/stage"
@@ -988,7 +1026,7 @@ render_mihomo_config() {
         ;;
     esac
     printf 'listeners:\n'
-    while IFS='|' read -r proto name port uuid sni dest private_key public_key short_id address_family; do
+    while IFS='|' read -r proto name port uuid sni dest private_key public_key short_id address_family network_mode external_port; do
       [ -n "$proto" ] || continue
       old_uuid="$(awk -F'|' -v n="$name" -v now="$render_now" '$1==n && $5+0>now {print $3; exit}' "$rotations_file" 2>/dev/null)"
       case "$proto" in
@@ -1005,6 +1043,13 @@ render_mihomo_config() {
         argo)
           printf "  - name: '%s'\n" "$(yaml_quote "$name")"
           printf '    type: vless\n    port: %s\n    listen: 127.0.0.1\n    allow-insecure: true\n' "$port"
+          printf "    users:\n      - username: '%s'\n        uuid: '%s'\n" "$(yaml_quote "$name")" "$(yaml_quote "$uuid")"
+          [ -n "$old_uuid" ] && printf "      - username: '%s-old'\n        uuid: '%s'\n" "$(yaml_quote "$name")" "$(yaml_quote "$old_uuid")"
+          printf "    ws-path: '%s'\n" "$(yaml_quote "$sni")"
+          ;;
+        cdn)
+          printf "  - name: '%s'\n" "$(yaml_quote "$name")"
+          printf '    type: vless\n    port: %s\n    listen: 0.0.0.0\n    allow-insecure: true\n' "$port"
           printf "    users:\n      - username: '%s'\n        uuid: '%s'\n" "$(yaml_quote "$name")" "$(yaml_quote "$uuid")"
           [ -n "$old_uuid" ] && printf "      - username: '%s-old'\n        uuid: '%s'\n" "$(yaml_quote "$name")" "$(yaml_quote "$old_uuid")"
           printf "    ws-path: '%s'\n" "$(yaml_quote "$sni")"
@@ -1365,6 +1410,217 @@ tunnel_install() {
   rm -f "$token_backup" "$runner_backup"
   trap - EXIT HUP INT TERM
   ok "Cloudflare Tunnel 已安装。"
+}
+
+cf_api_token() {
+  if [ -n "${VP_CF_API_TOKEN:-}" ]; then printf '%s' "$VP_CF_API_TOKEN"
+  elif [ -r "$VP_CF_API_TOKEN_FILE" ]; then awk 'NR==1{printf "%s",$0;exit}' "$VP_CF_API_TOKEN_FILE"
+  else return 1
+  fi
+}
+
+cf_api_call() {
+  cf_method="$1"; cf_endpoint="$2"; cf_payload="${3:-}"
+  cf_token="$(cf_api_token)" || { error "尚未配置 Cloudflare API Token。"; return 1; }
+  if [ -n "$cf_payload" ]; then
+    "$VP_CURL_BIN" -fsS --max-time 25 -X "$cf_method" \
+      -H "Authorization: Bearer $cf_token" -H 'Content-Type: application/json' \
+      --data "$cf_payload" "$VP_CF_API_BASE$cf_endpoint"
+  else
+    "$VP_CURL_BIN" -fsS --max-time 25 -X "$cf_method" \
+      -H "Authorization: Bearer $cf_token" -H 'Content-Type: application/json' \
+      "$VP_CF_API_BASE$cf_endpoint"
+  fi
+}
+
+cf_response_ok() { jq -e '.success == true' >/dev/null 2>&1; }
+
+configure_cf_api_token() {
+  need_root || return 1
+  ensure_runtime_dependencies || return 1
+  token_source="${1:-}"
+  if [ -n "$token_source" ] && [ -r "$token_source" ]; then token="$(awk 'NR==1{print;exit}' "$token_source")"
+  elif [ -n "${VP_CF_API_TOKEN:-}" ]; then token="$VP_CF_API_TOKEN"
+  else printf '请输入最小权限 Cloudflare API Token：' >&2; read -r token || true
+  fi
+  case "$token" in ''|*[!A-Za-z0-9._-]*) error "API Token 格式无效。"; return 1 ;; esac
+  verify_response="$(VP_CF_API_TOKEN="$token" cf_api_call GET /user/tokens/verify 2>/dev/null || true)"
+  printf '%s' "$verify_response" | cf_response_ok || { error "Cloudflare API Token 验证失败。"; return 1; }
+  if [ -r "$VP_CF_CDN_DB" ] && [ -s "$VP_CF_CDN_DB" ]; then
+    while IFS='|' read -r managed_name managed_zone managed_dns _ _ _ _ managed_ruleset managed_rule _ _; do
+      managed_dns_response="$(VP_CF_API_TOKEN="$token" cf_api_call GET "/zones/$managed_zone/dns_records/$managed_dns" 2>/dev/null || true)"
+      managed_rules_response="$(VP_CF_API_TOKEN="$token" cf_api_call GET "/zones/$managed_zone/rulesets/$managed_ruleset" 2>/dev/null || true)"
+      if ! printf '%s' "$managed_dns_response" | cf_response_ok ||
+         ! printf '%s' "$managed_rules_response" | jq -e --arg id "$managed_rule" '.success and any(.result.rules[]?; .id==$id)' >/dev/null 2>&1; then
+        error "新 Token 无法管理现有 CDN 节点 $managed_name，已保留旧 Token。"
+        return 1
+      fi
+    done < "$VP_CF_CDN_DB"
+  fi
+  init_layout >/dev/null || return 1
+  token_candidate="$(mktemp "$VP_SECRETS_DIR/.cloudflare-api-token.XXXXXX")" || return 1
+  printf '%s\n' "$token" > "$token_candidate" && chmod 600 "$token_candidate" && mv "$token_candidate" "$VP_CF_API_TOKEN_FILE" || {
+    rm -f "$token_candidate"; return 1;
+  }
+  ok "Cloudflare API Token 已验证并安全保存。"
+}
+
+cf_find_zone_for_host() {
+  cf_host="$1"; cf_candidate="$cf_host"
+  while :; do
+    cf_zone_response="$(cf_api_call GET "/zones?name=$cf_candidate&status=active&per_page=1" 2>/dev/null || true)"
+    cf_zone_id="$(printf '%s' "$cf_zone_response" | jq -r 'if .success and (.result|length)>0 then .result[0].id else empty end' 2>/dev/null)"
+    [ -z "$cf_zone_id" ] || { printf '%s' "$cf_zone_id"; return 0; }
+    case "$cf_candidate" in *.*) cf_candidate="${cf_candidate#*.}" ;; *) return 1 ;; esac
+  done
+}
+
+cf_restore_cdn_objects() {
+  cf_zone_id="$1"; cf_dns_id="$2"; cf_dns_disposition="$3"; cf_previous_type="$4"
+  cf_previous_content="$5"; cf_previous_proxied="$6"; cf_ruleset_id="$7"; cf_rule_id="$8"
+  cf_ruleset_disposition="$9"; cf_host="${10}"
+  restore_status=0
+  if [ "$cf_ruleset_disposition" = created ]; then
+    cf_api_call DELETE "/zones/$cf_zone_id/rulesets/$cf_ruleset_id" >/dev/null 2>&1 || restore_status=1
+  else
+    cf_api_call DELETE "/zones/$cf_zone_id/rulesets/$cf_ruleset_id/rules/$cf_rule_id" >/dev/null 2>&1 || restore_status=1
+  fi
+  if [ "$cf_dns_disposition" = created ]; then
+    cf_api_call DELETE "/zones/$cf_zone_id/dns_records/$cf_dns_id" >/dev/null 2>&1 || restore_status=1
+  else
+    restore_payload="$(jq -nc --arg type "$cf_previous_type" --arg name "$cf_host" --arg content "$cf_previous_content" \
+      --argjson proxied "$cf_previous_proxied" '{type:$type,name:$name,content:$content,proxied:$proxied,ttl:1}')"
+    cf_api_call PUT "/zones/$cf_zone_id/dns_records/$cf_dns_id" "$restore_payload" >/dev/null 2>&1 || restore_status=1
+  fi
+  return "$restore_status"
+}
+
+cf_create_origin_rule() {
+  cf_zone_id="$1"; cf_host="$2"; cf_path="$3"; cf_external_port="$4"; cf_node_name="$5"
+  entry_response="$(cf_api_call GET "/zones/$cf_zone_id/rulesets/phases/http_request_origin/entrypoint" 2>/dev/null || true)"
+  ruleset_id="$(printf '%s' "$entry_response" | jq -r 'if .success then .result.id else empty end' 2>/dev/null)"
+  expression="(http.host eq \"$cf_host\" and http.request.uri.path eq \"$cf_path\")"
+  rule_payload="$(jq -nc --arg description "VPS-Node CDN $cf_node_name" --arg expression "$expression" \
+    --argjson port "$cf_external_port" '{description:$description,expression:$expression,action:"route",action_parameters:{origin:{port:$port}},enabled:true}')"
+  if [ -n "$ruleset_id" ]; then
+    rule_response="$(cf_api_call POST "/zones/$cf_zone_id/rulesets/$ruleset_id/rules" "$rule_payload")" || return 1
+    rule_id="$(printf '%s' "$rule_response" | jq -r --arg d "VPS-Node CDN $cf_node_name" 'if .success then ([.result.rules[]? | select(.description==$d) | .id] | last // empty) else empty end')"
+    [ -n "$rule_id" ] || return 1
+    printf '%s|%s|existing' "$ruleset_id" "$rule_id"
+  else
+    ruleset_payload="$(jq -nc --arg name "VPS-Node CDN Origin Rules" --argjson rule "$rule_payload" \
+      '{name:$name,description:"Managed by VPS-Node",kind:"zone",phase:"http_request_origin",rules:[$rule]}')"
+    ruleset_response="$(cf_api_call POST "/zones/$cf_zone_id/rulesets" "$ruleset_payload")" || return 1
+    ruleset_id="$(printf '%s' "$ruleset_response" | jq -r 'if .success then .result.id else empty end')"
+    rule_id="$(printf '%s' "$ruleset_response" | jq -r 'if .success then .result.rules[0].id else empty end')"
+    [ -n "$ruleset_id" ] && [ -n "$rule_id" ] || return 1
+    printf '%s|%s|created' "$ruleset_id" "$rule_id"
+  fi
+}
+
+cf_update_origin_rule() {
+  cf_zone_id="$1"; ruleset_id="$2"; rule_id="$3"; cf_host="$4"; cf_path="$5"; cf_external_port="$6"; cf_node_name="$7"
+  expression="(http.host eq \"$cf_host\" and http.request.uri.path eq \"$cf_path\")"
+  rule_payload="$(jq -nc --arg description "VPS-Node CDN $cf_node_name" --arg expression "$expression" \
+    --argjson port "$cf_external_port" '{description:$description,expression:$expression,action:"route",action_parameters:{origin:{port:$port}},enabled:true}')"
+  update_response="$(cf_api_call PUT "/zones/$cf_zone_id/rulesets/$ruleset_id/rules/$rule_id" "$rule_payload" 2>/dev/null || true)"
+  printf '%s' "$update_response" | cf_response_ok
+}
+
+cdn_add() {
+  need_root || return 1
+  ensure_runtime_dependencies || return 1
+  [ -x "$VP_CORE_BIN" ] || { error "请先安装代理核心。"; return 1; }
+  cf_api_token >/dev/null 2>&1 || { error "请先执行 vp cf-token-set 配置最小权限 API Token。"; return 1; }
+  name="${1:-cdn-1}"; requested_port="${2:-}"; host="${3:-}"; path="${4:-}"
+  network_mode="${5:-auto}"; requested_external_port="${6:-}"
+  case "$name$host$path" in *'|'*|*' '*|*\"*|*\'*) error "名称、域名或路径包含非法字符。"; return 1 ;; esac
+  case "$host" in *.*) ;; *) error "CDN 公网域名格式无效。"; return 1 ;; esac
+  case "$path" in '') path="/$(random_hex 12)" ;; /*) ;; *) path="/$path" ;; esac
+  if [ "$network_mode" = auto ]; then
+    network_mode="$(detect_network_mode 2>/dev/null || printf unknown)"
+    [ "$network_mode" != unknown ] || { error "无法判断直连或 NAT，请明确指定 direct 或 nat。"; return 1; }
+  fi
+  case "$network_mode" in direct|nat) ;; *) error "网络模式只能是 auto、direct 或 nat。"; return 1 ;; esac
+  listen_port="$(choose_port "$requested_port")" || { error "内部监听端口不可用。"; return 1; }
+  if [ "$network_mode" = direct ]; then external_port="$listen_port"
+  else
+    external_port="$requested_external_port"
+    case "$external_port" in ''|*[!0-9]*) error "NAT 模式必须提供公网映射端口。"; return 1 ;; esac
+    [ "$external_port" -ge 1 ] && [ "$external_port" -le 65535 ] || { error "公网映射端口必须是 1-65535。"; return 1; }
+  fi
+  awk -F'|' -v n="$name" '$2==n{found=1}END{exit found?0:1}' "$VP_NODES_DB" 2>/dev/null && { error "节点名称已存在。"; return 1; }
+  zone_id="$(cf_find_zone_for_host "$host")" || { error "Token 无权读取该域名所属 Zone。"; return 1; }
+  ssl_response="$(cf_api_call GET "/zones/$zone_id/settings/ssl" 2>/dev/null || true)"
+  ssl_mode="$(printf '%s' "$ssl_response" | jq -r 'if .success then .result.value else empty end' 2>/dev/null)"
+  [ "$ssl_mode" = flexible ] || {
+    error "当前 Zone SSL 模式为 ${ssl_mode:-未知}；安全策略禁止自动改成 Flexible。请使用独立 Zone 并自行确认，或继续使用 Cloudflare Tunnel。"
+    return 1
+  }
+  origin_ip="$(public_ipv4)" || { error "无法取得源站公网 IPv4。"; return 1; }
+  printf 'Cloudflare CDN 直连节点创建预览：\n'
+  printf '  名称：%s\n  域名：%s\n  路径：%s\n' "$name" "$host" "$path"
+  printf '  内部监听：%s\n  网络模式：%s\n  公网端口：%s\n' "$listen_port" "$network_mode" "$external_port"
+  printf '  Cloudflare：只修改该子域名 DNS，并增加一条带 VPS-Node 标记的 Origin Rule\n'
+  printf '  明确不会：修改 Zone SSL、安全级别、Bot 设置或其他已有规则\n'
+  if [ -n "${VP_CDN_CREATE_CONFIRM:-}" ]; then cdn_confirm="$VP_CDN_CREATE_CONFIRM"; else printf '输入 CREATE 确认：'; read -r cdn_confirm || true; fi
+  [ "$cdn_confirm" = CREATE ] || { warn "已取消，未修改本机或 Cloudflare。"; return 2; }
+  uuid="$(new_uuid)"
+  begin_state_transaction cdn-add || return 1
+  candidate_root="$VP_TX_ACTIVE/candidate"
+  printf 'cdn|%s|%s|%s|%s|%s|%s|%s|pending|pending|pending\n' \
+    "$name" "$listen_port" "$uuid" "$path" "$host" "$network_mode" "$external_port" >> "$candidate_root/nodes.db"
+  printf '%s|pending|pending|created|A|0.0.0.0|false|pending|pending|created|%s\n' "$name" "$host" >> "$candidate_root/cloudflare-cdn.db"
+  render_mihomo_config "$candidate_root/nodes.db" "$candidate_root/generated/mihomo.yaml" "$candidate_root/credential-rotations.db"
+  if ! validate_state_candidate || ! "$VP_CORE_BIN" -t -d "$VP_CONFIG_DIR" -f "$candidate_root/generated/mihomo.yaml" >/dev/null 2>&1; then
+    abort_state_transaction; error "CDN 候选配置验证失败。"; return 1
+  fi
+  dns_response="$(cf_api_call GET "/zones/$zone_id/dns_records?type=A&name=$host&per_page=1" 2>/dev/null || true)"
+  dns_id="$(printf '%s' "$dns_response" | jq -r 'if .success and (.result|length)>0 then .result[0].id else empty end')"
+  if [ -n "$dns_id" ]; then
+    dns_disposition=updated
+    previous_type="$(printf '%s' "$dns_response" | jq -r '.result[0].type')"
+    previous_content="$(printf '%s' "$dns_response" | jq -r '.result[0].content')"
+    previous_proxied="$(printf '%s' "$dns_response" | jq -r '.result[0].proxied')"
+    dns_payload="$(jq -nc --arg name "$host" --arg content "$origin_ip" '{type:"A",name:$name,content:$content,proxied:true,ttl:1}')"
+    changed_dns="$(cf_api_call PUT "/zones/$zone_id/dns_records/$dns_id" "$dns_payload" 2>/dev/null || true)"
+  else
+    dns_disposition=created; previous_type=A; previous_content=0.0.0.0; previous_proxied=false
+    dns_payload="$(jq -nc --arg name "$host" --arg content "$origin_ip" '{type:"A",name:$name,content:$content,proxied:true,ttl:1}')"
+    changed_dns="$(cf_api_call POST "/zones/$zone_id/dns_records" "$dns_payload" 2>/dev/null || true)"
+    dns_id="$(printf '%s' "$changed_dns" | jq -r 'if .success then .result.id else empty end')"
+  fi
+  printf '%s' "$changed_dns" | cf_response_ok || { abort_state_transaction; error "Cloudflare DNS 修改失败，未应用本机配置。"; return 1; }
+  rule_result="$(cf_create_origin_rule "$zone_id" "$host" "$path" "$external_port" "$name" 2>/dev/null || true)"
+  IFS='|' read -r ruleset_id rule_id ruleset_disposition <<EOF
+$rule_result
+EOF
+  if [ -z "$ruleset_id" ] || [ -z "$rule_id" ]; then
+    cf_restore_cdn_objects "$zone_id" "$dns_id" "$dns_disposition" "$previous_type" "$previous_content" "$previous_proxied" pending pending created "$host"
+    abort_state_transaction; error "Origin Rule 创建失败，Cloudflare DNS 已恢复。请检查 Rulesets Edit 权限和套餐支持。"; return 1
+  fi
+  sed "s/|pending|pending|pending$/|$zone_id|$dns_id|$rule_id/" "$candidate_root/nodes.db" > "$candidate_root/nodes.db.tmp" && mv "$candidate_root/nodes.db.tmp" "$candidate_root/nodes.db"
+  sed "s/|pending|pending|created|A|0.0.0.0|false|pending|pending|created|$host$/|$zone_id|$dns_id|$dns_disposition|$previous_type|$previous_content|$previous_proxied|$ruleset_id|$rule_id|$ruleset_disposition|$host/" \
+    "$candidate_root/cloudflare-cdn.db" > "$candidate_root/cloudflare-cdn.db.tmp" && mv "$candidate_root/cloudflare-cdn.db.tmp" "$candidate_root/cloudflare-cdn.db"
+  if ! activate_state_candidate || ! core_service_restart; then
+    cf_restore_cdn_objects "$zone_id" "$dns_id" "$dns_disposition" "$previous_type" "$previous_content" "$previous_proxied" "$ruleset_id" "$rule_id" "$ruleset_disposition" "$host"
+    abort_state_transaction; core_service_restart >/dev/null 2>&1 || true
+    error "CDN 节点启动失败，本机与 Cloudflare 均已恢复。"; return 1
+  fi
+  cdn_create_verified=0
+  if [ "${VP_ALLOW_TEST_HOOKS:-0}" = 1 ] && [ "${VP_TEST_CDN_VERIFICATION_RESULT:-}" = pass ]; then cdn_create_verified=1
+  elif [ "${VP_ALLOW_TEST_HOOKS:-0}" = 1 ] && [ "${VP_TEST_CDN_VERIFICATION_RESULT:-}" = fail ]; then cdn_create_verified=0
+  elif test_node_end_to_end "$name" "${VP_CDN_TEST_CONCURRENCY:-1}"; then cdn_create_verified=1
+  fi
+  if [ "$cdn_create_verified" -eq 1 ]; then
+    commit_state_transaction
+    ok "Cloudflare CDN 节点已创建并通过端到端验证：$name。"
+    return 0
+  fi
+  cf_restore_cdn_objects "$zone_id" "$dns_id" "$dns_disposition" "$previous_type" "$previous_content" "$previous_proxied" "$ruleset_id" "$rule_id" "$ruleset_disposition" "$host"
+  abort_state_transaction; core_service_restart >/dev/null 2>&1 || true
+  error "CDN 公网入口验证失败，本机与 Cloudflare 均已恢复。"
+  return 1
 }
 
 argo_add() {
@@ -1797,13 +2053,30 @@ reality_add() {
   requested_port="${2:-}"
   sni="${3:-www.amd.com}"
   address_family="${4:-ipv4}"
+  network_mode="${5:-direct}"
+  requested_external_port="${6:-}"
   case "$address_family" in ipv4|ipv6) ;; *) error "地址族只能是 ipv4 或 ipv6。"; return 1 ;; esac
+  if [ "$address_family" = ipv6 ]; then
+    [ "$network_mode" = auto ] && network_mode=direct
+    [ "$network_mode" = direct ] || { error "IPv6 Reality 节点当前只支持直连模式。"; return 1; }
+  elif [ "$network_mode" = auto ]; then
+    network_mode="$(detect_network_mode 2>/dev/null || printf unknown)"
+    [ "$network_mode" != unknown ] || { error "无法可靠判断直连或 NAT；请明确指定 direct 或 nat。"; return 1; }
+  fi
+  case "$network_mode" in direct|nat) ;; *) error "网络模式只能是 auto、direct 或 nat。"; return 1 ;; esac
   if [ "$address_family" = ipv6 ] && ! public_ipv6 >/dev/null 2>&1; then
     error "未检测到可用公网 IPv6，拒绝创建不可达的 IPv6 节点。"
     return 1
   fi
   case "$name$sni" in *'|'*|*' '*|*\"*|*\'*) error "名称或 SNI 包含非法字符。"; return 1 ;; esac
   port="$(choose_port "$requested_port")" || { error "端口不可用。"; return 1; }
+  if [ "$network_mode" = direct ]; then
+    external_port="$port"
+  else
+    external_port="$requested_external_port"
+    case "$external_port" in ''|*[!0-9]*) error "NAT 模式必须提供公网映射端口。"; return 1 ;; esac
+    [ "$external_port" -ge 1 ] && [ "$external_port" -le 65535 ] || { error "公网映射端口必须是 1-65535。"; return 1; }
+  fi
   created_name="$name"
   created_port="$port"
   if awk -F'|' -v n="$name" '$2==n{found=1} END{exit found?0:1}' "$VP_NODES_DB" 2>/dev/null; then
@@ -1813,6 +2086,8 @@ reality_add() {
   printf 'Reality 主节点创建预览：\n'
   printf '  名称：%s\n' "$name"
   printf '  监听端口：%s\n' "$port"
+  printf '  网络模式：%s\n' "$network_mode"
+  printf '  公网端口：%s\n' "$external_port"
   printf '  SNI：%s\n' "$sni"
   printf '  地址族：%s\n' "$address_family"
   printf '  影响范围：生成 UUID、Reality 密钥和 Short ID，写入节点并重启 Mihomo\n'
@@ -1828,7 +2103,7 @@ reality_add() {
   if awk -F'|' -v n="$name" '$2==n{found=1} END{exit found?0:1}' "$candidate_root/nodes.db"; then
     abort_state_transaction; error "节点名称已存在。"; return 1
   fi
-  printf 'reality|%s|%s|%s|%s|%s:443|%s|%s|%s|%s\n' "$name" "$port" "$uuid" "$sni" "$sni" "$private" "$public" "$short_id" "$address_family" >> "$candidate_root/nodes.db"
+  printf 'reality|%s|%s|%s|%s|%s:443|%s|%s|%s|%s|%s|%s\n' "$name" "$port" "$uuid" "$sni" "$sni" "$private" "$public" "$short_id" "$address_family" "$network_mode" "$external_port" >> "$candidate_root/nodes.db"
   render_mihomo_config "$candidate_root/nodes.db" "$candidate_root/generated/mihomo.yaml" "$candidate_root/credential-rotations.db"
   if ! validate_state_candidate || ! "$VP_CORE_BIN" -t -d "$VP_CONFIG_DIR" -f "$candidate_root/generated/mihomo.yaml" >/dev/null 2>&1; then
     abort_state_transaction; error "Reality 候选配置验证失败。"; return 1
@@ -1839,7 +2114,7 @@ reality_add() {
     error "新节点启动失败，已恢复原配置。"; return 1
   fi
   commit_state_transaction
-  ok "Reality 节点已创建：$created_name（端口 $created_port）。"
+  ok "Reality 节点已创建：$created_name（监听 $created_port，公网 $external_port，$network_mode）。"
 }
 
 public_ipv4() {
@@ -1848,6 +2123,24 @@ public_ipv4() {
   fi
   address="$(curl -4 -fsS --max-time 5 https://api.ipify.org 2>/dev/null || true)"
   case "$address" in *.*) printf '%s' "$address" ;; *) return 1 ;; esac
+}
+
+local_has_ipv4() {
+  wanted_ipv4="$1"
+  [ -n "$wanted_ipv4" ] || return 1
+  if [ -n "${VP_LOCAL_IPV4_LIST_OVERRIDE:-}" ]; then
+    printf '%s\n' "$VP_LOCAL_IPV4_LIST_OVERRIDE" | tr ', ' '\n\n' | grep -Fxq "$wanted_ipv4"
+    return
+  fi
+  command -v ip >/dev/null 2>&1 || return 1
+  ip -o -4 addr show 2>/dev/null | awk '{split($4,a,"/"); print a[1]}' | grep -Fxq "$wanted_ipv4"
+}
+
+detect_network_mode() {
+  case "${VP_NETWORK_MODE_OVERRIDE:-}" in direct|nat|unknown) printf '%s' "$VP_NETWORK_MODE_OVERRIDE"; return 0 ;; esac
+  detected_public_ipv4="$(public_ipv4 2>/dev/null || true)"
+  [ -n "$detected_public_ipv4" ] || { printf 'unknown'; return 1; }
+  if local_has_ipv4 "$detected_public_ipv4"; then printf 'direct'; else printf 'nat'; fi
 }
 
 public_ipv6() {
@@ -1877,7 +2170,14 @@ public_ip() {
 
 show_nodes() {
   [ -s "$VP_NODES_DB" ] || { warn "当前没有节点。"; return 0; }
-  awk -F'|' '{family=$1=="reality"?($10?$10:"ipv4"):"tunnel";printf "%d. %s  协议=%s  端口=%s  地址=%s\n",NR,$2,$1,$3,family}' "$VP_NODES_DB"
+  awk -F'|' '{
+    if ($1=="reality") {
+      family=($10?$10:"ipv4"); mode=($11?$11:"direct"); external=($12?$12:$3)
+      ports=(mode=="nat" && external!=$3)?$3" -> "external:$3
+      printf "%d. %s  协议=%s  端口=%s  网络=%s/%s\n",NR,$2,$1,ports,mode,family
+    } else if ($1=="cdn") printf "%d. %s  协议=cdn  端口=%s -> %s  地址=%s\n",NR,$2,$3,$8,$6
+    else printf "%d. %s  协议=%s  端口=%s  地址=tunnel\n",NR,$2,$1,$3
+  }' "$VP_NODES_DB"
 }
 
 resolve_node_selector() {
@@ -1903,7 +2203,7 @@ edit_node() {
   [ -n "$record" ] || { error "未找到节点：$target。"; return 1; }
   approved_edit_nodes_state="$(managed_file_state "$VP_NODES_DB")"
   approved_edit_rotations_state="$(managed_file_state "$VP_ROTATIONS_DB")"
-  IFS='|' read -r proto old_name old_port f4 f5 f6 f7 f8 f9 f10 <<EOF
+  IFS='|' read -r proto old_name old_port f4 f5 f6 f7 f8 f9 f10 f11 f12 <<EOF
 $record
 EOF
   [ -n "$new_name" ] || new_name="$old_name"
@@ -1928,7 +2228,10 @@ EOF
         return 1
       fi
       case "$endpoint" in *.*) ;; *) error "Reality SNI 格式无效。"; return 1 ;; esac
-      updated_record="reality|$new_name|$new_port|$f4|$endpoint|$endpoint:443|$f7|$f8|$f9|$address_family"
+      current_network_mode="${f11:-direct}"
+      current_external_port="${f12:-$old_port}"
+      [ "$current_network_mode" = direct ] && current_external_port="$new_port"
+      updated_record="reality|$new_name|$new_port|$f4|$endpoint|$endpoint:443|$f7|$f8|$f9|$address_family|$current_network_mode|$current_external_port"
       ;;
     argo)
       [ -n "$endpoint" ] || endpoint="$f6"
@@ -1993,6 +2296,156 @@ EOF
   ok "节点已更新：$old_name -> $new_name（端口 $new_port）。"
 }
 
+set_reality_network_mode() {
+  need_root || return 1
+  target="${1:-}"
+  requested_mode="${2:-}"
+  requested_external_port="${3:-}"
+  case "$requested_mode" in direct|nat) ;; *) error "网络模式只能是 direct 或 nat。"; return 2 ;; esac
+  record="$(awk -F'|' -v n="$target" '$2==n{print;exit}' "$VP_NODES_DB" 2>/dev/null)"
+  [ -n "$record" ] || { error "未找到节点：$target。"; return 1; }
+  IFS='|' read -r proto name listen_port uuid sni dest private public short_id family old_mode old_external_port <<EOF
+$record
+EOF
+  [ "$proto" = reality ] || { error "只有 Reality 节点支持直连/NAT 模式。"; return 1; }
+  old_mode="${old_mode:-direct}"
+  old_external_port="${old_external_port:-$listen_port}"
+  if [ "$requested_mode" = direct ]; then
+    [ "${family:-ipv4}" = ipv4 ] || requested_external_port="$listen_port"
+    new_external_port="$listen_port"
+  else
+    [ "${family:-ipv4}" = ipv4 ] || { error "IPv6 Reality 节点当前不支持 NAT 模式。"; return 1; }
+    new_external_port="$requested_external_port"
+    case "$new_external_port" in ''|*[!0-9]*) error "NAT 模式必须提供公网映射端口。"; return 2 ;; esac
+    [ "$new_external_port" -ge 1 ] && [ "$new_external_port" -le 65535 ] || { error "公网映射端口必须是 1-65535。"; return 2; }
+  fi
+  printf 'Reality 网络模式变更预览：\n'
+  printf '  节点：%s\n  内部监听：%s（不变）\n' "$name" "$listen_port"
+  printf '  模式：%s -> %s\n  公网端口：%s -> %s\n' "$old_mode" "$requested_mode" "$old_external_port" "$new_external_port"
+  printf '  验证：不重启 Mihomo；临时应用后执行真实节点测试，失败自动恢复\n'
+  if [ -n "${VP_NAT_UPDATE_CONFIRM:-}" ]; then nat_confirm="$VP_NAT_UPDATE_CONFIRM"; else printf '输入 APPLY 确认：'; read -r nat_confirm || true; fi
+  [ "$nat_confirm" = APPLY ] || { warn "已取消，节点记录未修改。"; return 2; }
+  approved_nat_nodes_state="$(managed_file_state "$VP_NODES_DB")"
+  begin_state_transaction reality-network-mode || return 1
+  candidate_root="$VP_TX_ACTIVE/candidate"
+  awk -F'|' -v OFS='|' -v n="$target" -v mode="$requested_mode" -v external="$new_external_port" '
+    $2==n {
+      if (NF==10) print $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,mode,external
+      else {$11=mode; $12=external; print}
+      next
+    }
+    {print}
+  ' "$candidate_root/nodes.db" > "$candidate_root/nodes.db.tmp" && mv "$candidate_root/nodes.db.tmp" "$candidate_root/nodes.db"
+  [ "$(managed_file_state "$VP_NODES_DB")" = "$approved_nat_nodes_state" ] || { abort_state_transaction; error "节点数据库在准备期间发生变化，已中止。"; return 1; }
+  validate_state_candidate || { abort_state_transaction; return 1; }
+  activate_state_candidate || { abort_state_transaction; return 1; }
+  nat_verification_passed=0
+  if [ "${VP_ALLOW_TEST_HOOKS:-0}" = 1 ] && [ "${VP_TEST_NAT_VERIFICATION_RESULT:-}" = pass ]; then
+    nat_verification_passed=1
+  elif [ "${VP_ALLOW_TEST_HOOKS:-0}" = 1 ] && [ "${VP_TEST_NAT_VERIFICATION_RESULT:-}" = fail ]; then
+    nat_verification_passed=0
+  elif test_node_end_to_end "$target" "${VP_NAT_TEST_CONCURRENCY:-1}"; then
+    nat_verification_passed=1
+  else
+    test_status=$?
+  fi
+  if [ "$nat_verification_passed" -eq 1 ]; then
+    commit_state_transaction
+    ok "节点 $target 已切换为 $requested_mode，公网端口 $new_external_port；Mihomo 未重启。"
+    return 0
+  fi
+  test_status="${test_status:-1}"
+  abort_state_transaction
+  error "新公网入口未通过端到端验证，已恢复 $old_mode/$old_external_port；Mihomo 未重启。"
+  return "$test_status"
+}
+
+update_nat_external_port() {
+  target="${1:-}"
+  new_external_port="${2:-}"
+  target_proto="$(awk -F'|' -v n="$target" '$2==n{print $1;exit}' "$VP_NODES_DB" 2>/dev/null)"
+  [ "$target_proto" != cdn ] || { update_cdn_external_port "$target" "$new_external_port"; return; }
+  current_mode="$(awk -F'|' -v n="$target" '$2==n{print ($11?$11:"direct");exit}' "$VP_NODES_DB" 2>/dev/null)"
+  [ "$current_mode" = nat ] || { error "节点 $target 当前不是 NAT 模式。"; return 1; }
+  set_reality_network_mode "$target" nat "$new_external_port"
+}
+
+update_cdn_external_port() {
+  need_root || return 1
+  target="$1"; new_external_port="$2"
+  case "$new_external_port" in ''|*[!0-9]*) error "公网端口必须是 1-65535。"; return 2 ;; esac
+  [ "$new_external_port" -ge 1 ] && [ "$new_external_port" -le 65535 ] || { error "公网端口必须是 1-65535。"; return 2; }
+  record="$(awk -F'|' -v n="$target" '$1=="cdn" && $2==n{print;exit}' "$VP_NODES_DB" 2>/dev/null)"
+  [ -n "$record" ] || { error "未找到 CDN 节点：$target。"; return 1; }
+  IFS='|' read -r proto name listen_port uuid path host network_mode old_external_port zone_id dns_id rule_id <<EOF
+$record
+EOF
+  cf_record="$(awk -F'|' -v n="$target" '$1==n{print;exit}' "$VP_CF_CDN_DB")"
+  IFS='|' read -r _ _ _ _ _ _ _ ruleset_id state_rule_id _ _ <<EOF
+$cf_record
+EOF
+  [ "$rule_id" = "$state_rule_id" ] || { error "CDN 节点与 Cloudflare 状态不一致。"; return 1; }
+  printf 'CDN 公网端口更新预览：\n  节点：%s\n  内部监听：%s（不变）\n  公网端口：%s -> %s\n' "$name" "$listen_port" "$old_external_port" "$new_external_port"
+  if [ -n "${VP_NAT_UPDATE_CONFIRM:-}" ]; then port_confirm="$VP_NAT_UPDATE_CONFIRM"; else printf '输入 APPLY 确认：'; read -r port_confirm || true; fi
+  [ "$port_confirm" = APPLY ] || { warn "已取消。"; return 2; }
+  begin_state_transaction cdn-port-update || return 1
+  candidate_root="$VP_TX_ACTIVE/candidate"
+  awk -F'|' -v OFS='|' -v n="$target" -v p="$new_external_port" '$1=="cdn"&&$2==n{$8=p}{print}' "$candidate_root/nodes.db" > "$candidate_root/nodes.db.tmp" && mv "$candidate_root/nodes.db.tmp" "$candidate_root/nodes.db"
+  validate_state_candidate || { abort_state_transaction; return 1; }
+  cf_update_origin_rule "$zone_id" "$ruleset_id" "$rule_id" "$host" "$path" "$new_external_port" "$name" || {
+    abort_state_transaction; error "Cloudflare Origin Rule 更新失败，本地记录未修改。"; return 1;
+  }
+  activate_state_candidate || {
+    cf_update_origin_rule "$zone_id" "$ruleset_id" "$rule_id" "$host" "$path" "$old_external_port" "$name" >/dev/null 2>&1 || true
+    abort_state_transaction; return 1;
+  }
+  cdn_verification_passed=0
+  if [ "${VP_ALLOW_TEST_HOOKS:-0}" = 1 ] && [ "${VP_TEST_CDN_VERIFICATION_RESULT:-}" = pass ]; then cdn_verification_passed=1
+  elif [ "${VP_ALLOW_TEST_HOOKS:-0}" = 1 ] && [ "${VP_TEST_CDN_VERIFICATION_RESULT:-}" = fail ]; then cdn_verification_passed=0
+  elif test_node_end_to_end "$target" "${VP_CDN_TEST_CONCURRENCY:-1}"; then cdn_verification_passed=1
+  fi
+  if [ "$cdn_verification_passed" -eq 1 ]; then
+    commit_state_transaction; ok "CDN 公网端口已更新并验证：$new_external_port；Mihomo 未重启。"; return 0
+  fi
+  cf_update_origin_rule "$zone_id" "$ruleset_id" "$rule_id" "$host" "$path" "$old_external_port" "$name" >/dev/null 2>&1 || true
+  abort_state_transaction
+  error "新 CDN 公网端口验证失败，Cloudflare 规则与本地记录均已恢复；Mihomo 未重启。"
+  return 1
+}
+
+delete_cdn_node() {
+  target="$1"
+  cf_record="$(awk -F'|' -v n="$target" '$1==n{print;exit}' "$VP_CF_CDN_DB" 2>/dev/null)"
+  [ -n "$cf_record" ] || { error "CDN 节点缺少 Cloudflare 回滚状态，拒绝不完整删除。"; return 1; }
+  IFS='|' read -r cf_name zone_id dns_id dns_disposition previous_type previous_content previous_proxied ruleset_id rule_id ruleset_disposition host <<EOF
+$cf_record
+EOF
+  cf_api_token >/dev/null 2>&1 || { error "缺少原 Cloudflare API Token，无法安全恢复远端配置。"; return 1; }
+  printf 'Cloudflare CDN 节点删除预览：\n  节点：%s\n  域名：%s\n' "$target" "$host"
+  printf '  操作：停止该本地入口，删除项目 Origin Rule，并恢复安装前 DNS\n'
+  if [ -n "${VP_DELETE_CONFIRM:-}" ]; then delete_confirm="$VP_DELETE_CONFIRM"; else printf '输入 DELETE 确认：'; read -r delete_confirm || true; fi
+  [ "$delete_confirm" = DELETE ] || { warn "已取消删除。"; return 2; }
+  begin_state_transaction cdn-delete || return 1
+  candidate_root="$VP_TX_ACTIVE/candidate"
+  awk -F'|' -v n="$target" '$2!=n' "$candidate_root/nodes.db" > "$candidate_root/nodes.db.tmp" && mv "$candidate_root/nodes.db.tmp" "$candidate_root/nodes.db"
+  awk -F'|' -v n="$target" '$1!=n' "$candidate_root/cloudflare-cdn.db" > "$candidate_root/cloudflare-cdn.db.tmp" && mv "$candidate_root/cloudflare-cdn.db.tmp" "$candidate_root/cloudflare-cdn.db"
+  awk -F'|' -v n="$target" '$1!=n' "$candidate_root/credential-rotations.db" > "$candidate_root/credential-rotations.db.tmp" && mv "$candidate_root/credential-rotations.db.tmp" "$candidate_root/credential-rotations.db"
+  render_mihomo_config "$candidate_root/nodes.db" "$candidate_root/generated/mihomo.yaml" "$candidate_root/credential-rotations.db"
+  if ! validate_state_candidate || ! "$VP_CORE_BIN" -t -d "$VP_CONFIG_DIR" -f "$candidate_root/generated/mihomo.yaml" >/dev/null 2>&1; then
+    abort_state_transaction; error "删除候选配置验证失败。"; return 1
+  fi
+  if ! activate_state_candidate || ! core_service_restart; then
+    abort_state_transaction; core_service_restart >/dev/null 2>&1 || true
+    error "本地 CDN 入口停止失败，未修改 Cloudflare。"; return 1
+  fi
+  if ! cf_restore_cdn_objects "$zone_id" "$dns_id" "$dns_disposition" "$previous_type" "$previous_content" "$previous_proxied" "$ruleset_id" "$rule_id" "$ruleset_disposition" "$host"; then
+    abort_state_transaction; core_service_restart >/dev/null 2>&1 || true
+    error "Cloudflare 恢复未完整成功，本地节点已恢复；请导出诊断后重试。"; return 1
+  fi
+  commit_state_transaction
+  ok "CDN 节点已删除，项目创建的 Cloudflare 对象已精确移除，原 DNS 已恢复。"
+}
+
 delete_node() {
   need_root || return 1
   target="${1:-}"
@@ -2004,6 +2457,7 @@ delete_node() {
   IFS='|' read -r delete_proto delete_name delete_port _delete_rest <<EOF
 $record
 EOF
+  [ "$delete_proto" != cdn ] || { delete_cdn_node "$target"; return; }
   delete_rotation_count="$(awk -F'|' -v n="$target" '$1==n{c++}END{print c+0}' "$VP_ROTATIONS_DB" 2>/dev/null)"
   printf '节点删除预览：\n'
   printf '  名称：%s\n' "$delete_name"
@@ -2052,7 +2506,7 @@ rotate_credential() {
   IFS='|' read -r proto name port old_uuid rest <<EOF
 $record
 EOF
-  case "$proto" in reality|argo) ;; *) error "该协议暂不支持凭据轮换。"; return 1 ;; esac
+  case "$proto" in reality|argo|cdn) ;; *) error "该协议暂不支持凭据轮换。"; return 1 ;; esac
   now="$(date +%s)"
   if awk -F'|' -v n="$target" -v now="$now" '$1==n && $5+0>now{found=1} END{exit found?0:1}' "$VP_ROTATIONS_DB" 2>/dev/null; then
     error "该节点已有进行中的轮换，请先验证并正式切换。"
@@ -2212,7 +2666,7 @@ valid_uuid() {
 
 validate_node_share_record() {
   share_record="$1"
-  IFS='|' read -r share_proto share_name share_port share_uuid share_sni share_dest share_private share_public share_sid share_family share_extra <<EOF
+  IFS='|' read -r share_proto share_name share_port share_uuid share_sni share_dest share_private share_public share_sid share_family share_mode share_external_port share_extra <<EOF
 $share_record
 EOF
   [ -z "$share_extra" ] || { error "节点记录字段数量异常，无法生成可靠链接。"; return 1; }
@@ -2226,10 +2680,21 @@ EOF
         error "节点 $share_name 缺少 Reality SNI、公钥或 Short ID。"; return 1;
       }
       case "${share_family:-ipv4}" in ipv4|ipv6) ;; *) error "节点 $share_name 的地址族无效。"; return 1 ;; esac
+      share_mode="${share_mode:-direct}"
+      share_external_port="${share_external_port:-$share_port}"
+      case "$share_mode" in direct|nat) ;; *) error "节点 $share_name 的网络模式无效。"; return 1 ;; esac
+      case "$share_external_port" in ''|*[!0-9]*) error "节点 $share_name 的公网端口无效。"; return 1 ;; esac
+      [ "$share_external_port" -ge 1 ] && [ "$share_external_port" -le 65535 ] || { error "节点 $share_name 的公网端口超出范围。"; return 1; }
       ;;
     argo)
       [ -n "$share_dest" ] || { error "节点 $share_name 缺少 Tunnel 公网域名。"; return 1; }
       case "$share_sni" in /*) ;; *) error "节点 $share_name 的 WebSocket 路径必须以 / 开头。"; return 1 ;; esac
+      ;;
+    cdn)
+      [ -n "$share_dest" ] || { error "节点 $share_name 缺少 CDN 公网域名。"; return 1; }
+      case "$share_sni" in /*) ;; *) error "节点 $share_name 的 WebSocket 路径必须以 / 开头。"; return 1 ;; esac
+      [ "$share_private" = nat ] || { error "CDN 节点网络模式无效。"; return 1; }
+      case "$share_public" in ''|*[!0-9]*) error "CDN 节点公网端口无效。"; return 1 ;; esac
       ;;
     *) error "暂不支持该协议的分享链接。"; return 1 ;;
   esac
@@ -2239,7 +2704,7 @@ node_share_link() {
   record="$1"
   credential_override="${2:-}"
   label_suffix="${3:-}"
-  IFS='|' read -r proto name port uuid sni dest private public short_id address_family <<EOF
+  IFS='|' read -r proto name port uuid sni dest private public short_id address_family network_mode external_port <<EOF
 $record
 EOF
   [ -n "$credential_override" ] && uuid="$credential_override"
@@ -2249,13 +2714,19 @@ EOF
   case "$proto" in
     reality)
       address="$(link_address "${address_family:-ipv4}")"
+      share_port="${external_port:-$port}"
       [ -n "$address" ] || { error "无法取得节点 $name 的公网 ${address_family:-ipv4} 地址，未输出残缺链接。"; return 1; }
       printf 'vless://%s@%s:%s?encryption=none&security=reality&sni=%s&fp=chrome&pbk=%s&sid=%s&type=tcp#%s\n' \
-        "$uuid" "$address" "$port" "$sni" "$public" "$short_id" "$encoded_label"
+        "$uuid" "$address" "$share_port" "$sni" "$public" "$short_id" "$encoded_label"
       ;;
     argo)
       path="$sni"
       host="$dest"
+      encoded_path="$(printf '%s' "$path" | urlencode_component)" || return 1
+      printf 'vless://%s@%s:443?encryption=none&security=tls&sni=%s&fp=chrome&type=ws&host=%s&path=%s#%s\n' "$uuid" "$host" "$host" "$host" "$encoded_path" "$encoded_label"
+      ;;
+    cdn)
+      path="$sni"; host="$dest"
       encoded_path="$(printf '%s' "$path" | urlencode_component)" || return 1
       printf 'vless://%s@%s:443?encryption=none&security=tls&sni=%s&fp=chrome&type=ws&host=%s&path=%s#%s\n' "$uuid" "$host" "$host" "$host" "$encoded_path" "$encoded_label"
       ;;
@@ -2302,7 +2773,7 @@ test_node_end_to_end() {
   [ -n "$target" ] || { error "请指定节点名称。"; return 1; }
   record="$(awk -F'|' -v n="$target" '$2==n{print;exit}' "$VP_NODES_DB" 2>/dev/null)"
   [ -n "$record" ] || { error "未找到节点。"; return 1; }
-  IFS='|' read -r proto name port uuid value1 value2 private public short_id address_family <<EOF
+  IFS='|' read -r proto name port uuid value1 value2 private public short_id address_family network_mode external_port <<EOF
 $record
 EOF
   client_port="$(choose_port)" || { error "无法分配测试端口。"; return 1; }
@@ -2323,12 +2794,19 @@ EOF
     case "$proto" in
       reality)
         server="${VP_TEST_SERVER:-$(public_address "${address_family:-ipv4}")}"
-        printf "  - name: 'target'\n    type: vless\n    server: '%s'\n    port: %s\n" "$(yaml_quote "$server")" "$port"
+        test_target_port="${VP_TEST_PORT_OVERRIDE:-${external_port:-$port}}"
+        printf "  - name: 'target'\n    type: vless\n    server: '%s'\n    port: %s\n" "$(yaml_quote "$server")" "$test_target_port"
         printf "    uuid: '%s'\n    network: tcp\n    tls: true\n" "$(yaml_quote "$uuid")"
         printf "    servername: '%s'\n    client-fingerprint: chrome\n" "$(yaml_quote "$value1")"
         printf "    reality-opts:\n      public-key: '%s'\n      short-id: '%s'\n" "$(yaml_quote "$public")" "$(yaml_quote "$short_id")"
         ;;
       argo)
+        path="$value1"; host="$value2"
+        printf "  - name: 'target'\n    type: vless\n    server: '%s'\n    port: 443\n" "$(yaml_quote "$host")"
+        printf "    uuid: '%s'\n    network: ws\n    tls: true\n    servername: '%s'\n    client-fingerprint: chrome\n" "$(yaml_quote "$uuid")" "$(yaml_quote "$host")"
+        printf "    ws-opts:\n      path: '%s'\n      headers:\n        Host: '%s'\n" "$(yaml_quote "$path")" "$(yaml_quote "$host")"
+        ;;
+      cdn)
         path="$value1"; host="$value2"
         printf "  - name: 'target'\n    type: vless\n    server: '%s'\n    port: 443\n" "$(yaml_quote "$host")"
         printf "    uuid: '%s'\n    network: ws\n    tls: true\n    servername: '%s'\n    client-fingerprint: chrome\n" "$(yaml_quote "$uuid")" "$(yaml_quote "$host")"
@@ -2394,7 +2872,7 @@ EOF
   cleanup_node_test
   trap - EXIT HUP INT TERM
   if [ "$proto" = "reality" ] && [ -z "${VP_TEST_SERVER:-}" ]; then
-    if VP_TEST_SERVER=127.0.0.1 VP_TEST_RESULT_FILE= VP_TEST_BYTES=1 VP_TEST_CONCURRENCY=1 test_node_end_to_end "$target" 1 >/dev/null 2>&1; then
+    if VP_TEST_SERVER=127.0.0.1 VP_TEST_PORT_OVERRIDE="$port" VP_TEST_RESULT_FILE= VP_TEST_BYTES=1 VP_TEST_CONCURRENCY=1 test_node_end_to_end "$target" 1 >/dev/null 2>&1; then
       warn "节点 $name 的本地协议认证正常，但 VPS 无法通过自身公网 IP 回环验证；请从外部网络确认公网端口可达。"
       return 2
     fi
@@ -3289,9 +3767,11 @@ restore_backup() {
   [ -f "$package/manifest.env" ] && grep -q '^FORMAT_VERSION=1$' "$package/manifest.env" || { cleanup_restore; trap - EXIT HUP INT TERM; error "不支持该备份格式。"; return 1; }
   [ -f "$package/config/nodes.db" ] && [ -f "$package/config/state.env" ] || { cleanup_restore; trap - EXIT HUP INT TERM; error "备份缺少必要状态文件。"; return 1; }
   [ -f "$package/config/credential-rotations.db" ] || : > "$package/config/credential-rotations.db"
+  [ -f "$package/config/cloudflare-cdn.db" ] || : > "$package/config/cloudflare-cdn.db"
   if grep -Ev '^[A-Z][A-Z0-9_]*=[A-Za-z0-9._:/+-]*$|^$' "$package/config/state.env" >/dev/null 2>&1 ||
      ! validate_nodes_database "$package/config/nodes.db" ||
-     ! validate_rotations_database "$package/config/nodes.db" "$package/config/credential-rotations.db"; then
+     ! validate_rotations_database "$package/config/nodes.db" "$package/config/credential-rotations.db" ||
+     ! validate_cf_cdn_database "$package/config/cloudflare-cdn.db" "$package/config/nodes.db"; then
     cleanup_restore; trap - EXIT HUP INT TERM
     error "备份状态数据库未通过完整性与关联约束检查。"
     return 1
@@ -3307,12 +3787,15 @@ restore_backup() {
   backup_nodes="$(awk 'NF{n++}END{print n+0}' "$package/config/nodes.db")"
   backup_reality="$(awk -F'|' '$1=="reality"{n++}END{print n+0}' "$package/config/nodes.db")"
   backup_argo="$(awk -F'|' '$1=="argo"{n++}END{print n+0}' "$package/config/nodes.db")"
+  backup_cdn="$(awk -F'|' '$1=="cdn"{n++}END{print n+0}' "$package/config/nodes.db")"
   backup_rotations="$(awk 'NF{n++}END{print n+0}' "$package/config/credential-rotations.db")"
   backup_token=no
+  backup_cf_token=no
   [ -s "$package/config/secrets/cloudflared.token" ] && backup_token=yes
+  [ -s "$package/config/secrets/cloudflare-api.token" ] && backup_cf_token=yes
   printf '恢复预览：版本=%s，创建时间=%s\n' "${backup_version:-未知}" "${backup_created:-未知}"
-  printf '  节点：%s（Reality %s / Argo %s）\n' "$backup_nodes" "$backup_reality" "$backup_argo"
-  printf '  凭据轮换记录：%s；Tunnel Token：%s（内容不显示）\n' "$backup_rotations" "$backup_token"
+  printf '  节点：%s（Reality %s / Argo %s / CDN %s）\n' "$backup_nodes" "$backup_reality" "$backup_argo" "$backup_cdn"
+  printf '  凭据轮换记录：%s；Tunnel Token：%s；CF API Token：%s（内容不显示）\n' "$backup_rotations" "$backup_token" "$backup_cf_token"
   printf '  将替换：VPS-Node 节点、轮换、运行参数与 Token。\n'
   printf '  主机状态保持：网络回滚快照、OOM 基线、自愈锁与本机备份不会从归档迁移或被删除。\n'
   printf '  不会修改：SSH、防火墙、其他代理项目或非 VPS-Node 文件。\n'
@@ -3349,6 +3832,7 @@ restore_backup() {
   else
     : > "$VP_TX_ACTIVE/candidate/credential-rotations.db"
   fi
+  cp -p "$package/config/cloudflare-cdn.db" "$VP_TX_ACTIVE/candidate/cloudflare-cdn.db"
   cp -p "$package/config/state.env" "$VP_TX_ACTIVE/candidate/state.env"
   rm -rf "$VP_TX_ACTIVE/candidate/generated"
   [ -d "$package/config/generated" ] && cp -R -p "$package/config/generated" "$VP_TX_ACTIVE/candidate/generated" || mkdir -p "$VP_TX_ACTIVE/candidate/generated"
@@ -4131,7 +4615,7 @@ diagnostic_report() {
     printf '\nredacted_nodes:\n'
     awk -F'|' 'NF{printf "node_%d protocol=%s port=%s endpoint=<redacted> credentials=<redacted>\n",++n,$1,$3}' "$VP_NODES_DB" 2>/dev/null
     printf '\nprotected_file_modes:\n'
-    for protected in "$VP_NODES_DB" "$VP_ROTATIONS_DB" "$VP_STATE_FILE" "$VP_CORE_ENV" "$VP_TUNNEL_TOKEN_FILE"; do
+    for protected in "$VP_NODES_DB" "$VP_ROTATIONS_DB" "$VP_CF_CDN_DB" "$VP_STATE_FILE" "$VP_CORE_ENV" "$VP_TUNNEL_TOKEN_FILE" "$VP_CF_API_TOKEN_FILE"; do
       [ -e "$protected" ] || continue
       printf '%s=%s\n' "$(basename "$protected")" "$(file_mode "$protected")"
     done
@@ -4671,6 +5155,7 @@ show_dashboard_summary() {
   total_nodes="$(node_count)"
   reality_nodes="$(awk -F'|' '$1=="reality"{n++}END{print n+0}' "$VP_NODES_DB" 2>/dev/null)"
   argo_nodes="$(awk -F'|' '$1=="argo"{n++}END{print n+0}' "$VP_NODES_DB" 2>/dev/null)"
+  cdn_nodes="$(awk -F'|' '$1=="cdn"{n++}END{print n+0}' "$VP_NODES_DB" 2>/dev/null)"
   ipv6_nodes="$(awk -F'|' '$1=="reality" && $10=="ipv6"{n++}END{print n+0}' "$VP_NODES_DB" 2>/dev/null)"
   core_state="$(service_state "$VP_CORE_SERVICE")"
   tunnel_state="$(service_state "$VP_TUNNEL_SERVICE")"
@@ -4681,7 +5166,8 @@ show_dashboard_summary() {
     overall="需要修复"
     next_action="发现未完成的配置事务，请依次选择 5 → 2（安全修复并复检）。"
   elif { [ -r "$VP_NODES_DB" ] && ! validate_nodes_database "$VP_NODES_DB" >/dev/null 2>&1; } ||
-       { [ -r "$VP_ROTATIONS_DB" ] && ! validate_rotations_database "$VP_NODES_DB" "$VP_ROTATIONS_DB" >/dev/null 2>&1; }; then
+       { [ -r "$VP_ROTATIONS_DB" ] && ! validate_rotations_database "$VP_NODES_DB" "$VP_ROTATIONS_DB" >/dev/null 2>&1; } ||
+       { [ "$cdn_nodes" -gt 0 ] && { [ ! -r "$VP_CF_CDN_DB" ] || ! validate_cf_cdn_database "$VP_CF_CDN_DB" "$VP_NODES_DB" >/dev/null 2>&1; }; }; then
     overall="状态数据异常"
     next_action="节点或轮换记录异常：先选择 5 → 3 导出诊断，再选择 7 → 5 从可信备份恢复。"
   elif [ ! -x "$VP_CORE_BIN" ]; then
@@ -4721,7 +5207,7 @@ show_dashboard_summary() {
   elif [ "$active_rotations" -gt 0 ]; then
     overall="凭据轮换中"
     next_action="先选择 3 → 选择节点 → 2 测试新链接；确认后重新选择 3 → 同一节点 → 5，再输入 FINALIZE。"
-  elif [ "$argo_nodes" -eq 0 ]; then
+  elif [ "$argo_nodes" -eq 0 ] && [ "$cdn_nodes" -eq 0 ]; then
     overall="主线路已就绪"
     next_action="可选择 2 增加 Cloudflare 备用节点；查看链接请选择 3 → 选择节点 → 1，测试请选择 3 → 选择节点 → 2。"
   else
@@ -4729,7 +5215,7 @@ show_dashboard_summary() {
     next_action="查看链接请选择 3 → 选择节点 → 1；真实测试请选择 3 → 选择节点 → 2。"
   fi
   printf '总体状态：%s\n' "$overall"
-  printf '节点组成：Reality %s 个（IPv6 %s）/ Cloudflare 备用 %s 个\n' "$reality_nodes" "$ipv6_nodes" "$argo_nodes"
+  printf '节点组成：Reality %s 个（IPv6 %s）/ Tunnel %s 个 / CDN %s 个\n' "$reality_nodes" "$ipv6_nodes" "$argo_nodes" "$cdn_nodes"
   printf '下一步：%s\n' "$next_action"
   printf '%s\n' '----------------------------------------'
 }
@@ -5030,7 +5516,7 @@ layered_health_check() {
   fi
 
   permission_bad=0
-  for protected in "$VP_NODES_DB" "$VP_ROTATIONS_DB" "$VP_STATE_FILE" "$VP_CORE_ENV" "$VP_TUNNEL_TOKEN_FILE"; do
+  for protected in "$VP_NODES_DB" "$VP_ROTATIONS_DB" "$VP_CF_CDN_DB" "$VP_STATE_FILE" "$VP_CORE_ENV" "$VP_TUNNEL_TOKEN_FILE" "$VP_CF_API_TOKEN_FILE"; do
     [ -e "$protected" ] || continue
     [ "$(file_mode "$protected")" = "600" ] || permission_bad=$((permission_bad + 1))
   done
@@ -5134,6 +5620,29 @@ layered_health_check() {
     health_warn "Tunnel 层：尚未配置备用线路。"
   fi
 
+  cdn_total="$(awk -F'|' '$1=="cdn"{n++}END{print n+0}' "$VP_NODES_DB" 2>/dev/null)"
+  if [ "$cdn_total" -gt 0 ]; then
+    if [ ! -s "$VP_CF_API_TOKEN_FILE" ] && [ -z "${VP_CF_API_TOKEN:-}" ]; then
+      health_error "CDN 管理层：存在 $cdn_total 个节点，但缺少 Cloudflare API Token。"
+    elif ! validate_cf_cdn_database "$VP_CF_CDN_DB" "$VP_NODES_DB" >/dev/null 2>&1; then
+      health_error "CDN 管理层：本地 Cloudflare 对象记录无效。"
+    else
+      cdn_remote_ok=0; cdn_remote_bad=0
+      while IFS='|' read -r _ zone_id dns_id _ _ _ _ ruleset_id rule_id _ _; do
+        [ -n "$zone_id" ] || continue
+        dns_check="$(cf_api_call GET "/zones/$zone_id/dns_records/$dns_id" 2>/dev/null || true)"
+        rule_check="$(cf_api_call GET "/zones/$zone_id/rulesets/$ruleset_id" 2>/dev/null || true)"
+        if printf '%s' "$dns_check" | cf_response_ok && printf '%s' "$rule_check" | jq -e --arg id "$rule_id" '.success and any(.result.rules[]?; .id==$id)' >/dev/null 2>&1; then
+          cdn_remote_ok=$((cdn_remote_ok + 1))
+        else cdn_remote_bad=$((cdn_remote_bad + 1))
+        fi
+      done < "$VP_CF_CDN_DB"
+      [ "$cdn_remote_bad" -eq 0 ] && health_ok "CDN 管理层：$cdn_remote_ok 个节点的 DNS 与 Origin Rule 均存在。" || health_error "CDN 管理层：$cdn_remote_bad/$cdn_total 个远端对象缺失或 Token 权限不足。"
+    fi
+  else
+    health_warn "CDN 层：尚未配置无 Tunnel 备用线路。"
+  fi
+
   inspect_monitor_schedule
   case "$MONITOR_SCHEDULE_STATE" in
     scheduled) health_ok "监控层：后台自愈已真实调度。" ;;
@@ -5170,7 +5679,7 @@ safe_repair() {
     recover_state_transaction || return 1
     repaired=$((repaired + 1))
   fi
-  for protected in "$VP_NODES_DB" "$VP_ROTATIONS_DB" "$VP_STATE_FILE" "$VP_CORE_ENV" "$VP_TUNNEL_TOKEN_FILE"; do
+  for protected in "$VP_NODES_DB" "$VP_ROTATIONS_DB" "$VP_CF_CDN_DB" "$VP_STATE_FILE" "$VP_CORE_ENV" "$VP_TUNNEL_TOKEN_FILE" "$VP_CF_API_TOKEN_FILE"; do
     [ -e "$protected" ] || continue
     if [ "$(file_mode "$protected")" != "600" ]; then
       chmod 600 "$protected"
@@ -5180,6 +5689,7 @@ safe_repair() {
   if [ -r "$VP_NODES_DB" ]; then
     validate_nodes_database "$VP_NODES_DB" || { error "节点数据库无效，拒绝从损坏状态重建配置。"; return 1; }
     validate_rotations_database "$VP_NODES_DB" "$VP_ROTATIONS_DB" || { error "凭据轮换数据库无效，拒绝重建配置。"; return 1; }
+    validate_cf_cdn_database "$VP_CF_CDN_DB" "$VP_NODES_DB" || { error "Cloudflare CDN 状态无效，拒绝重建配置。"; return 1; }
   fi
   if [ -x "$VP_CORE_BIN" ]; then
     runtime_existed=0
@@ -5516,7 +6026,23 @@ interactive_reality_add() {
   [ -n "$sni" ] || sni=www.amd.com
   printf '地址族（默认 ipv4，可选 ipv6）：'
   read -r address_family || true
-  reality_add "$name" "$port" "$sni" "${address_family:-ipv4}"
+  selected_family="${address_family:-ipv4}"
+  detected_mode=direct
+  if [ "$selected_family" = ipv4 ]; then
+    detected_mode="$(detect_network_mode 2>/dev/null || printf unknown)"
+    printf '检测到网络模式：%s。使用该结果请直接回车，也可输入 direct 或 nat：' "$detected_mode"
+    read -r network_mode || true
+    network_mode="${network_mode:-$detected_mode}"
+    [ "$network_mode" != unknown ] || { error "无法自动判断，请重新创建并明确输入 direct 或 nat。"; return 1; }
+  else
+    network_mode=direct
+  fi
+  external_port=""
+  if [ "$network_mode" = nat ]; then
+    printf '公网映射端口（服务商分配的外部端口）：'
+    read -r external_port || true
+  fi
+  reality_add "$name" "$port" "$sni" "$selected_family" "$network_mode" "$external_port"
   printf '是否显示新节点链接？[y/N]：'
   read -r answer || true
   case "$answer" in y|Y|yes|YES) show_node_link "$name" ;; esac
@@ -5540,6 +6066,35 @@ interactive_argo_setup() {
   argo_add "$name" "$port" "$host" "$path"
 }
 
+interactive_cdn_setup() {
+  ensure_core_interactive || return 1
+  if ! cf_api_token >/dev/null 2>&1; then
+    configure_cf_api_token || return 1
+  fi
+  printf 'CDN 节点名称（默认 cdn-1）：'; read -r name || true; [ -n "$name" ] || name=cdn-1
+  printf 'Cloudflare 代理子域名：'; read -r host || true
+  printf 'WebSocket 路径（留空自动生成）：'; read -r path || true
+  printf '内部监听端口（留空自动选择）：'; read -r port || true
+  detected_mode="$(detect_network_mode 2>/dev/null || printf unknown)"
+  printf '检测到网络模式：%s。直接回车采用，也可输入 direct 或 nat：' "$detected_mode"; read -r mode || true
+  mode="${mode:-$detected_mode}"
+  [ "$mode" != unknown ] || { error "请明确输入 direct 或 nat。"; return 1; }
+  external_port=""
+  [ "$mode" != nat ] || { printf '公网映射端口：'; read -r external_port || true; }
+  cdn_add "$name" "$port" "$host" "$path" "$mode" "$external_port"
+}
+
+interactive_cloudflare_setup() {
+  printf '1. Cloudflare Tunnel 备用节点（适应性最好）\n2. Cloudflare CDN 直连节点（无 cloudflared，要求独立 Flexible Zone）\n0. 返回\n请选择：'
+  read -r cf_choice || true
+  case "$cf_choice" in
+    1) interactive_argo_setup ;;
+    2) interactive_cdn_setup ;;
+    0) return 0 ;;
+    *) warn "无效选择。" ;;
+  esac
+}
+
 interactive_node_action() {
   show_nodes
   [ -s "$VP_NODES_DB" ] || return 0
@@ -5555,7 +6110,7 @@ interactive_node_action() {
   esac
   target="$(resolve_node_selector "$selector")"
   [ -n "$target" ] || { error "未找到节点：$selector。"; return 1; }
-  printf '1. 显示链接\n2. 端到端测试\n3. 修改节点\n4. 轮换凭据\n5. 完成凭据切换\n6. 删除节点\n0. 返回\n请选择：'
+  printf '1. 显示链接\n2. 端到端测试\n3. 修改节点\n4. 轮换凭据\n5. 完成凭据切换\n6. 删除节点\n7. 设置直连/NAT 或更新公网端口\n0. 返回\n请选择：'
   read -r action || true
   case "$action" in
     1) show_node_link "$target" ;;
@@ -5584,6 +6139,22 @@ EOF
       ;;
     5) finalize_rotation "$target" ;;
     6) delete_node "$target" ;;
+    7)
+      record="$(awk -F'|' -v n="$target" '$2==n{print;exit}' "$VP_NODES_DB")"
+      selected_proto="$(printf '%s\n' "$record" | awk -F'|' '{print $1}')"
+      if [ "$selected_proto" = cdn ]; then
+        printf '新的公网映射端口：'; read -r external_port || true
+        update_cdn_external_port "$target" "$external_port"
+        return
+      fi
+      [ "$selected_proto" = reality ] || { error "该功能只适用于 Reality 或 CDN 节点。"; return 1; }
+      current_mode="$(printf '%s\n' "$record" | awk -F'|' '{print ($11?$11:"direct")}' )"
+      printf '网络模式（当前 %s，可输入 direct 或 nat）：' "$current_mode"; read -r mode || true
+      [ -n "$mode" ] || mode="$current_mode"
+      external_port=""
+      [ "$mode" != nat ] || { printf '新的公网映射端口：'; read -r external_port || true; }
+      set_reality_network_mode "$target" "$mode" "$external_port"
+      ;;
     0) return 0 ;;
     *) warn "无效选择。" ;;
   esac
@@ -5635,7 +6206,7 @@ interactive_update() {
 }
 
 advanced_menu() {
-  printf '1. 安装前一键环境预检（只读）\n2. 已安装环境基础检查\n3. 初始化状态目录\n4. 安装/更新 Mihomo 内核\n5. 安装/更新 Cloudflare Tunnel\n6. 查看凭据轮换状态\n0. 返回\n请选择：'
+  printf '1. 安装前一键环境预检（只读）\n2. 已安装环境基础检查\n3. 初始化状态目录\n4. 安装/更新 Mihomo 内核\n5. 安装/更新 Cloudflare Tunnel\n6. 查看凭据轮换状态\n7. 配置/更换 Cloudflare API Token\n0. 返回\n请选择：'
   read -r action || true
   case "$action" in
     1) installation_preflight ;;
@@ -5644,6 +6215,7 @@ advanced_menu() {
     4) core_install ;;
     5) tunnel_install ;;
     6) show_rotations ;;
+    7) configure_cf_api_token ;;
     0) return 0 ;;
     *) warn "无效选择。" ;;
   esac
@@ -5677,7 +6249,7 @@ menu() {
   while true; do
     show_status
     printf '1. 创建 Reality 主节点\n'
-    printf '2. 配置 Cloudflare 备用节点\n'
+    printf '2. 配置 Cloudflare 备用线路（Tunnel/CDN）\n'
     printf '3. 查看与管理节点\n'
     printf '4. 网络状态、并发测速与自适应\n'
     printf '5. 健康检查与安全修复\n'
@@ -5692,7 +6264,7 @@ menu() {
     read -r choice || return 0
     case "$choice" in
       1) interactive_reality_add; pause_screen ;;
-      2) interactive_argo_setup; pause_screen ;;
+      2) interactive_cloudflare_setup; pause_screen ;;
       3) interactive_node_action; pause_screen ;;
       4) interactive_network; pause_screen ;;
       5) interactive_health; pause_screen ;;
@@ -5720,6 +6292,9 @@ case "${1:-}" in
   reality-add|add-reality) shift; reality_add "$@" ;;
   tunnel-install|install-tunnel) shift; tunnel_install "$@" ;;
   argo-add|add-argo) shift; argo_add "$@" ;;
+  cf-token-set) shift; configure_cf_api_token "$@" ;;
+  cdn-add|add-cdn) shift; cdn_add "$@" ;;
+  cdn-port-update) shift; update_cdn_external_port "$@" ;;
   nodes|list) show_nodes ;;
   subscription|sub) shift; export_subscription "$@" ;;
   delete|remove) shift; delete_node "$@" ;;
@@ -5731,6 +6306,9 @@ case "${1:-}" in
   network-optimize) shift; network_optimize_verified "$@" ;;
   network-repair) shift; network_repair_drift "$@" ;;
   network-rollback) shift; network_rollback "$@" ;;
+  network-mode-set) shift; set_reality_network_mode "$@" ;;
+  nat-port-update) shift; update_nat_external_port "$@" ;;
+  nat-detect) detect_network_mode; printf '\n' ;;
   rotate|rotate-credential) shift; rotate_credential "$@" ;;
   rotations|rotation-status) show_rotations ;;
   rotate-finalize|rotation-finalize) shift; finalize_rotation "$@" ;;
@@ -5762,7 +6340,7 @@ case "${1:-}" in
   _test-select-release-record) shift; test_select_release_asset_record "$@" ;;
   _test-json-top-level) shift; test_json_top_level_string "$@" ;;
   help|-h|--help)
-    printf '用法：vp [preflight|status|version-status|doctor|health|repair|report|self-heal|monitor-install|stability|network|network-optimize|network-repair|network-rollback|test-all|optimize|maintain|update|rollback|init|core-install|reality-add|tunnel-install|argo-add|nodes|subscription|edit|delete|link|test-node|rotate|rotations|rotate-finalize|backup|backups|backup-prune|restore|migrate-mh|uninstall|version]\n'
+    printf '用法：vp [preflight|status|version-status|doctor|health|repair|report|self-heal|monitor-install|stability|network|network-optimize|network-repair|network-rollback|network-mode-set|nat-port-update|nat-detect|test-all|optimize|maintain|update|rollback|init|core-install|reality-add|tunnel-install|argo-add|cf-token-set|cdn-add|cdn-port-update|nodes|subscription|edit|delete|link|test-node|rotate|rotations|rotate-finalize|backup|backups|backup-prune|restore|migrate-mh|uninstall|version]\n'
     ;;
   '') menu ;;
   *) error "未知命令：$1"; exit 2 ;;

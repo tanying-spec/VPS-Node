@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.2.0-dev.93
+
+- Added backward-compatible direct/NAT Reality records with separate internal listen and public mapped ports; legacy records remain direct without migration.
+- Added automatic network-mode detection with explicit user override, NAT-aware links and tests, and transactional public-port changes that never restart Mihomo and roll back failed verification.
+- Added Cloudflare CDN direct VLESS-WS nodes as an optional no-cloudflared path, including scoped API Token verification, exact-zone DNS management and path-specific Origin Rules.
+- CDN automation refuses to change zone-wide SSL, security or bot settings and requires an explicitly prepared Flexible zone instead of silently weakening an existing website zone.
+- Cloudflare DNS, ruleset and rule IDs plus prior DNS state are stored in a protected transactional database, enabling exact object deletion and restoration without overwriting unrelated rules.
+- CDN creation, public-port changes and deletion bind local Mihomo state to remote Cloudflare operations and restore both sides on normal validation or runtime failure.
+- Dashboard, health checks, backups, diagnostics, menus and advanced CLI documentation now understand NAT and CDN state without exposing API Tokens or node credentials.
+
 ## 0.2.0-dev.92
 
 - The isolated authorized-host acceptance now proves that `vp update --check` is zero-write, a checksum-verified local candidate can be installed and rolled back, and a tampered rollback point is rejected without changing the active CLI.

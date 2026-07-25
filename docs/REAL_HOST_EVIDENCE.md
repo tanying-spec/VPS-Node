@@ -2,6 +2,17 @@
 
 所有记录仅来自授权主机 `134.209.180.134`，证据内容经过脱敏且由 SHA-256 sidecar 校验。原始证据保存在测试机 `/root`，本文件只记录可公开复核的结论和摘要哈希。
 
+## 0.2.0-dev.93
+
+执行时间：2026-07-25 06:13 UTC。
+
+- 完整 `tests/smoke.sh` 与 `tests/install_smoke.sh` 通过，包括 NAT 自动检测/手动模型、内外端口配置、无重启端口成功提交、验证失败哈希恢复，以及伪 Cloudflare API 的 Token、DNS、Origin Rule、创建失败清理、端口更新和精确删除。
+- 隔离真实 Mihomo Reality IPv4 回环认证与两路并发：`2/2`；轮换、备份恢复、配置漂移自愈、诊断脱敏、维护、CLI 更新/回滚、篡改拒绝和可恢复卸载全部通过。
+- 正式 Mihomo 与 Cloudflare Tunnel 均保持 `active`，PID、进程镜像、命令行、配置/init 摘要及敏感状态摘要前后不变。
+- 公网 IPv6 不可用；独立 Tunnel 与真实 Cloudflare CDN API/边缘均未请求，不能把伪 API 测试记为公网通过。
+- 测试脚本 SHA-256：`dfbba3b57a12e0f9f8588563957dabfa39aa3574bfecfd172dcabdb1068d40b0`。
+- 原始脱敏证据 SHA-256：`15062655d2f8904820fa5809189536c3b0bc2d90294722ad31f6c36cb0d39bd3`。
+
 ## 0.2.0-dev.88
 
 执行时间：2026-07-24 22:48–22:51 UTC。

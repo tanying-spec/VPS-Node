@@ -8,7 +8,7 @@
 
 - 想用 VPS 搭建自用节点，但不想手写复杂配置。
 - 希望低内存 VPS 也能自动选择合适参数。
-- 需要 Reality 主线路，并可选 Cloudflare Tunnel 备用线路。
+- 需要 Reality 主线路，并可选 Cloudflare Tunnel 或 CDN 直连备用线路。
 - 希望修改前有备份，失败时能回滚。
 
 目前支持使用 `apk` 或 `apt-get` 的 Linux 系统，例如 Alpine、Debian 和 Ubuntu。安装时需要使用 `root` 用户。
@@ -61,7 +61,7 @@ vp
 | 想做什么 | 首页选择 |
 | --- | ---: |
 | 创建 Reality 主节点 | `1` |
-| 配置 Cloudflare 备用节点 | `2` |
+| 配置 Cloudflare Tunnel/CDN 备用节点 | `2` |
 | 查看节点、链接、测速或删除 | `3` |
 | 查看网络状态、一键测速和优化 | `4` |
 | 健康检查与安全修复 | `5` |
@@ -76,13 +76,29 @@ vp
 
 Reality 主节点不需要 Cloudflare Token。
 
-只有在配置 Cloudflare 备用节点时，才需要提前准备：
+菜单提供两种方式：
+
+- Tunnel：兼容性最好，需要 Tunnel Token 和公网主机名。
+- CDN 直连：不运行 `cloudflared`，适合低内存或 NAT VPS，但需要一个专用的 Flexible SSL Zone。
+
+配置 Tunnel 时需要提前准备：
 
 - Cloudflare Tunnel Token。
 - 已接入 Cloudflare 的域名。
 - Tunnel 中已经配置好的公网主机名。
 
 没有这些内容可以先跳过，不影响 Reality 主节点使用。
+
+配置 CDN 直连时，请创建最小权限 Cloudflare API Token，仅授予目标 Zone：
+
+- Zone Read。
+- DNS Edit。
+- Rulesets Edit。
+- Zone Settings Read。
+
+程序只修改指定子域名 DNS，并创建带 `VPS-Node CDN` 标记的路径级 Origin Rule。不会修改整个 Zone 的 SSL、安全等级、Bot 设置或其他规则。为避免程序偷偷降低安全级别，当前 Zone 不是 `Flexible` 时会拒绝创建；建议使用不承载网站的独立 Zone。
+
+如果 VPS 使用端口映射，程序会自动提示 NAT 模式，分别保存内部监听端口和公网映射端口。检测错误时可在创建页面手动输入 `direct` 或 `nat`；以后可在节点管理中只更新公网端口，Mihomo 不会重启，验证失败会恢复旧端口。
 
 ## 更新与卸载
 
@@ -133,6 +149,10 @@ curl -I https://raw.githubusercontent.com
 ### 低内存 VPS 能用吗
 
 项目会读取 VPS 或容器实际可用的内存与 CPU 限额，为 Mihomo 选择相应参数，而不是给所有机器写入同一套限制。极低内存环境仍可能受系统中其他程序影响，首页状态和健康检查会显示实际结果。
+
+### 公网 VPS 被识别成 NAT 怎么办
+
+自动检测只提供建议，创建 Reality 或 CDN 节点时可以直接把模式改成 `direct`。已创建节点可输入 `vp` → `3` → 选择节点 → `7` 纠正模式或更新公网映射端口。
 
 ### 会不会修改其他服务
 

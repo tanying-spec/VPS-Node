@@ -6,6 +6,8 @@ ROOT="$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)"
 TMP="$(mktemp -d /tmp/vps-node-test.XXXXXX)"
 trap 'rm -rf "$TMP"' EXIT HUP INT TERM
 CURRENT_VERSION="$(sh "$ROOT/vp.sh" version)"
+[ "$(VP_PUBLIC_IPV4_OVERRIDE=198.51.100.10 VP_LOCAL_IPV4_LIST_OVERRIDE=198.51.100.10 sh "$ROOT/vp.sh" nat-detect)" = direct ]
+[ "$(VP_PUBLIC_IPV4_OVERRIDE=198.51.100.10 VP_LOCAL_IPV4_LIST_OVERRIDE=10.0.0.2 sh "$ROOT/vp.sh" nat-detect)" = nat ]
 export VP_CORE_INSTALL_CONFIRM=INSTALL
 export VP_TUNNEL_INSTALL_CONFIRM=INSTALL
 export VP_ROTATION_START_CONFIRM=ROTATE
@@ -401,7 +403,7 @@ VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log
 VP_LIB_DIR="$TMP/dns-usr" VP_CORE_BIN="$TMP/dns-usr/bin/mihomo" \
 VP_CORE_BACKUP_BIN="$TMP/dns-usr/bin/mihomo.previous" VP_PUBLIC_IPV6_OVERRIDE=2001:db8::10 VP_SKIP_SERVICE=1 \
 sh "$ROOT/vp.sh" edit renamed-node renamed-node 25433 www.microsoft.com ipv6 >/dev/null
-grep -q '^reality|renamed-node|25433|.*|ipv6$' "$TMP/dns-etc/nodes.db"
+grep -Eq '^reality\|renamed-node\|25433\|.*\|ipv6(\|direct\|25433)?$' "$TMP/dns-etc/nodes.db"
 grep -q "listen: '::'" "$TMP/dns-etc/generated/mihomo.yaml"
 ipv6_link="$(VP_CONFIG_DIR="$TMP/dns-etc" VP_DATA_DIR="$TMP/dns-lib" VP_LOG_DIR="$TMP/dns-log" \
   VP_LIB_DIR="$TMP/dns-usr" VP_PUBLIC_IPV6_OVERRIDE=2001:db8::10 sh "$ROOT/vp.sh" link renamed-node)"
@@ -2208,6 +2210,102 @@ if [ -n "${VP_TEST_MIHOMO_BIN:-}" ]; then
   VP_CONFIG_DIR="$TMP/core-etc" VP_DATA_DIR="$TMP/core-lib" VP_LOG_DIR="$TMP/core-log" \
   VP_LIB_DIR="$TMP/core-usr-lib" VP_CORE_BIN="$TMP/core-usr-lib/bin/mihomo" \
   sh "$ROOT/vp.sh" link test-reality | grep -q '^vless://'
+
+  VP_CONFIG_DIR="$TMP/core-etc" VP_DATA_DIR="$TMP/core-lib" VP_LOG_DIR="$TMP/core-log" \
+  VP_LIB_DIR="$TMP/core-usr-lib" VP_CORE_BIN="$TMP/core-usr-lib/bin/mihomo" \
+  VP_CORE_BACKUP_BIN="$TMP/core-usr-lib/bin/mihomo.previous" VP_SKIP_SERVICE=1 \
+  sh "$ROOT/vp.sh" reality-add nat-reality 25435 www.amd.com ipv4 nat 35435 >/dev/null
+  grep -Eq '^reality\|nat-reality\|25435\|.*\|ipv4\|nat\|35435$' "$TMP/core-etc/nodes.db"
+  grep -A3 "name: 'nat-reality'" "$TMP/core-etc/generated/mihomo.yaml" | grep -q 'port: 25435'
+  VP_CONFIG_DIR="$TMP/core-etc" VP_DATA_DIR="$TMP/core-lib" VP_LOG_DIR="$TMP/core-log" \
+  VP_LIB_DIR="$TMP/core-usr-lib" VP_CORE_BIN="$TMP/core-usr-lib/bin/mihomo" VP_PUBLIC_IPV4_OVERRIDE=198.51.100.10 \
+  sh "$ROOT/vp.sh" link nat-reality | grep -q '@198.51.100.10:35435?'
+  VP_CONFIG_DIR="$TMP/core-etc" VP_DATA_DIR="$TMP/core-lib" VP_LOG_DIR="$TMP/core-log" \
+  VP_LIB_DIR="$TMP/core-usr-lib" VP_CORE_BIN="$TMP/core-usr-lib/bin/mihomo" VP_SKIP_SERVICE=1 \
+  VP_ALLOW_TEST_HOOKS=1 VP_TEST_NAT_VERIFICATION_RESULT=pass VP_NAT_UPDATE_CONFIRM=APPLY \
+  sh "$ROOT/vp.sh" nat-port-update nat-reality 36435 >/dev/null
+  grep -Eq '^reality\|nat-reality\|25435\|.*\|ipv4\|nat\|36435$' "$TMP/core-etc/nodes.db"
+  nat_nodes_before_failed_update="$(sha256sum "$TMP/core-etc/nodes.db" | awk '{print $1}')"
+  if VP_CONFIG_DIR="$TMP/core-etc" VP_DATA_DIR="$TMP/core-lib" VP_LOG_DIR="$TMP/core-log" \
+    VP_LIB_DIR="$TMP/core-usr-lib" VP_CORE_BIN="$TMP/core-usr-lib/bin/mihomo" VP_SKIP_SERVICE=1 \
+    VP_ALLOW_TEST_HOOKS=1 VP_TEST_NAT_VERIFICATION_RESULT=fail VP_NAT_UPDATE_CONFIRM=APPLY \
+    sh "$ROOT/vp.sh" nat-port-update nat-reality 37435 >/dev/null 2>&1; then
+    printf 'failed NAT external-port verification unexpectedly committed\n' >&2; exit 1
+  fi
+  [ "$nat_nodes_before_failed_update" = "$(sha256sum "$TMP/core-etc/nodes.db" | awk '{print $1}')" ]
+
+  mkdir -p "$TMP/cf-api-bin"
+  cat > "$TMP/cf-api-bin/curl" <<'FAKE_CF_CURL'
+#!/bin/sh
+method=GET; url=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -X) method="$2"; shift 2 ;;
+    --data|-H|--max-time) shift 2 ;;
+    http://*|https://*) url="$1"; shift ;;
+    *) shift ;;
+  esac
+done
+[ -z "${VP_FAKE_CF_LOG:-}" ] || printf '%s %s\n' "$method" "$url" >> "$VP_FAKE_CF_LOG"
+case "$method $url" in
+  'GET '*'/user/tokens/verify') printf '%s\n' '{"success":true,"result":{"status":"active"}}' ;;
+  'GET '*'/zones?'*) printf '%s\n' '{"success":true,"result":[{"id":"zone_test_1","name":"example.com"}]}' ;;
+  'GET '*'/settings/ssl') printf '%s\n' '{"success":true,"result":{"value":"flexible"}}' ;;
+  'GET '*'/dns_records?'*) printf '%s\n' '{"success":true,"result":[]}' ;;
+  'POST '*'/dns_records') printf '%s\n' '{"success":true,"result":{"id":"dns_test_1"}}' ;;
+  'GET '*'/rulesets/phases/http_request_origin/entrypoint') printf '%s\n' '{"success":false,"errors":[{"code":10003}]}' ;;
+  'POST '*'/rulesets')
+    if [ "${VP_FAKE_CF_FAIL_RULE:-0}" = 1 ]; then printf '%s\n' '{"success":false,"errors":[{"code":10000}]}'
+    else printf '%s\n' '{"success":true,"result":{"id":"ruleset_test_1","rules":[{"id":"rule_test_1","description":"VPS-Node CDN test-cdn"}]}}'
+    fi ;;
+  'PUT '*'/rulesets/'*'/rules/'*) printf '%s\n' '{"success":true,"result":{"id":"ruleset_test_1","rules":[{"id":"rule_test_1"}]}}' ;;
+  'DELETE '*) printf '%s\n' '{"success":true,"result":null}' ;;
+  *) printf 'unexpected fake Cloudflare API call: %s %s\n' "$method" "$url" >&2; exit 1 ;;
+esac
+FAKE_CF_CURL
+  chmod +x "$TMP/cf-api-bin/curl"
+  printf 'scoped.test.token\n' > "$TMP/cf-token"
+  VP_CONFIG_DIR="$TMP/core-etc" VP_DATA_DIR="$TMP/core-lib" VP_LOG_DIR="$TMP/core-log" \
+  VP_LIB_DIR="$TMP/core-usr-lib" VP_CURL_BIN="$TMP/cf-api-bin/curl" \
+  sh "$ROOT/vp.sh" cf-token-set "$TMP/cf-token" >/dev/null
+  [ "$(stat -c '%a' "$TMP/core-etc/secrets/cloudflare-api.token")" = 600 ]
+  cdn_nodes_before_rule_failure="$(sha256sum "$TMP/core-etc/nodes.db" | awk '{print $1}')"
+  cdn_state_before_rule_failure="$(sha256sum "$TMP/core-etc/cloudflare-cdn.db" | awk '{print $1}')"
+  : > "$TMP/cf-api.log"
+  if VP_CONFIG_DIR="$TMP/core-etc" VP_DATA_DIR="$TMP/core-lib" VP_LOG_DIR="$TMP/core-log" \
+    VP_LIB_DIR="$TMP/core-usr-lib" VP_CORE_BIN="$TMP/core-usr-lib/bin/mihomo" VP_SKIP_SERVICE=1 \
+    VP_CURL_BIN="$TMP/cf-api-bin/curl" VP_PUBLIC_IPV4_OVERRIDE=198.51.100.20 VP_FAKE_CF_LOG="$TMP/cf-api.log" \
+    VP_FAKE_CF_FAIL_RULE=1 VP_ALLOW_TEST_HOOKS=1 VP_TEST_CDN_VERIFICATION_RESULT=pass VP_CDN_CREATE_CONFIRM=CREATE \
+    sh "$ROOT/vp.sh" cdn-add failed-cdn 25437 failed.example.com /failed-cdn nat 35437 >/dev/null 2>&1; then
+    printf 'failed Origin Rule creation unexpectedly committed CDN node\n' >&2; exit 1
+  fi
+  [ "$cdn_nodes_before_rule_failure" = "$(sha256sum "$TMP/core-etc/nodes.db" | awk '{print $1}')" ]
+  [ "$cdn_state_before_rule_failure" = "$(sha256sum "$TMP/core-etc/cloudflare-cdn.db" | awk '{print $1}')" ]
+  grep -q 'DELETE .*/dns_records/dns_test_1$' "$TMP/cf-api.log"
+  : > "$TMP/cf-api.log"
+  VP_CONFIG_DIR="$TMP/core-etc" VP_DATA_DIR="$TMP/core-lib" VP_LOG_DIR="$TMP/core-log" \
+  VP_LIB_DIR="$TMP/core-usr-lib" VP_CORE_BIN="$TMP/core-usr-lib/bin/mihomo" VP_SKIP_SERVICE=1 \
+  VP_CURL_BIN="$TMP/cf-api-bin/curl" VP_PUBLIC_IPV4_OVERRIDE=198.51.100.20 VP_FAKE_CF_LOG="$TMP/cf-api.log" \
+  VP_ALLOW_TEST_HOOKS=1 VP_TEST_CDN_VERIFICATION_RESULT=pass VP_CDN_CREATE_CONFIRM=CREATE \
+  sh "$ROOT/vp.sh" cdn-add test-cdn 25436 cdn.example.com /private-cdn nat 35436 >/dev/null
+  grep -Fq 'cdn|test-cdn|25436|' "$TMP/core-etc/nodes.db"
+  grep -Eq '^test-cdn\|zone_test_1\|dns_test_1\|created\|A\|0.0.0.0\|false\|ruleset_test_1\|rule_test_1\|created\|cdn.example.com$' "$TMP/core-etc/cloudflare-cdn.db"
+  grep -A3 "name: 'test-cdn'" "$TMP/core-etc/generated/mihomo.yaml" | grep -q 'port: 25436'
+  VP_CONFIG_DIR="$TMP/core-etc" VP_DATA_DIR="$TMP/core-lib" VP_LOG_DIR="$TMP/core-log" \
+  VP_LIB_DIR="$TMP/core-usr-lib" sh "$ROOT/vp.sh" link test-cdn | grep -q '@cdn.example.com:443?'
+  VP_CONFIG_DIR="$TMP/core-etc" VP_DATA_DIR="$TMP/core-lib" VP_LOG_DIR="$TMP/core-log" \
+  VP_LIB_DIR="$TMP/core-usr-lib" VP_CURL_BIN="$TMP/cf-api-bin/curl" \
+  VP_ALLOW_TEST_HOOKS=1 VP_TEST_CDN_VERIFICATION_RESULT=pass VP_NAT_UPDATE_CONFIRM=APPLY \
+  sh "$ROOT/vp.sh" cdn-port-update test-cdn 36436 >/dev/null
+  grep -Eq '^cdn\|test-cdn\|25436\|.*\|nat\|36436\|' "$TMP/core-etc/nodes.db"
+  VP_CONFIG_DIR="$TMP/core-etc" VP_DATA_DIR="$TMP/core-lib" VP_LOG_DIR="$TMP/core-log" \
+  VP_LIB_DIR="$TMP/core-usr-lib" VP_CORE_BIN="$TMP/core-usr-lib/bin/mihomo" VP_SKIP_SERVICE=1 \
+  VP_CURL_BIN="$TMP/cf-api-bin/curl" VP_FAKE_CF_LOG="$TMP/cf-api.log" VP_DELETE_CONFIRM=DELETE \
+  sh "$ROOT/vp.sh" delete test-cdn >/dev/null
+  ! grep -q '^cdn|test-cdn|' "$TMP/core-etc/nodes.db"
+  ! grep -q '^test-cdn|' "$TMP/core-etc/cloudflare-cdn.db"
+  grep -q 'DELETE .*/rulesets/ruleset_test_1$' "$TMP/cf-api.log"
+  grep -q 'DELETE .*/dns_records/dns_test_1$' "$TMP/cf-api.log"
 
   VP_CONFIG_DIR="$TMP/core-etc" VP_DATA_DIR="$TMP/core-lib" VP_LOG_DIR="$TMP/core-log" \
   VP_LIB_DIR="$TMP/core-usr-lib" VP_CORE_BIN="$TMP/core-usr-lib/bin/mihomo" \

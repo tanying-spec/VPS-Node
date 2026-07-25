@@ -29,7 +29,10 @@ vp version-status
 ```sh
 vp core-install
 vp reality-add home 443 www.amd.com ipv4
+vp reality-add nat-home 24443 www.amd.com ipv4 nat 34443
 vp argo-add backup 25443 tunnel.example.com /private-path
+vp cf-token-set /root/cloudflare-api.token
+vp cdn-add cdn-backup 26443 cdn.example.com /private-cdn nat 36443
 vp nodes
 vp link home
 vp test-node home
@@ -39,7 +42,18 @@ vp edit home new-name 8443 www.amd.com ipv4
 vp delete home
 ```
 
-`edit` 后面的参数依次为：原节点名、新节点名、新端口、新 SNI/域名、地址族或 WebSocket 路径。不想修改的参数可以传入空字符串 `''`。Reality 节点可将最后一个参数改为 `ipv6`，但 VPS 必须真实具备公网 IPv6。Cloudflare 备用节点还需要先安装 Tunnel 并准备 Token 与公网主机名。
+Reality 新增的第五、六个参数为网络模式和公网映射端口。旧写法仍按直连处理。`edit` 后面的参数依次为：原节点名、新节点名、新端口、新 SNI/域名、地址族或 WebSocket 路径。不想修改的参数可以传入空字符串 `''`。Reality IPv6 节点目前只支持直连。
+
+CDN 直连要求最小权限 Cloudflare API Token，以及专用的 Flexible SSL Zone。程序不会自动更改 Zone SSL 或安全设置。
+
+```sh
+vp nat-detect
+vp network-mode-set home nat 34443
+vp nat-port-update home 35443
+vp cdn-port-update cdn-backup 37443
+```
+
+公网端口更新不会重启 Mihomo。程序会临时应用新端口并执行节点测试，失败时恢复本地记录和 Cloudflare Origin Rule。
 
 ## 导出订阅
 
