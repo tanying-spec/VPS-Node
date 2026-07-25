@@ -2,7 +2,7 @@
 
 set -u
 
-VP_VERSION="0.2.0-dev.97"
+VP_VERSION="0.2.0-dev.98"
 VP_CONFIG_DIR="${VP_CONFIG_DIR:-/etc/vps-node}"
 VP_DATA_DIR="${VP_DATA_DIR:-/var/lib/vps-node}"
 VP_LOG_DIR="${VP_LOG_DIR:-/var/log/vps-node}"
@@ -1484,25 +1484,29 @@ cf_restore_cdn_objects() {
   cf_ruleset_disposition="$9"; cf_host="${10}"
   restore_status=0
   if [ "$cf_ruleset_disposition" = created ]; then
-    if ! cf_api_call DELETE "/zones/$cf_zone_id/rulesets/$cf_ruleset_id" >/dev/null 2>&1; then
+    ruleset_delete_response="$(cf_api_call DELETE "/zones/$cf_zone_id/rulesets/$cf_ruleset_id" 2>/dev/null || true)"
+    if ! printf '%s' "$ruleset_delete_response" | cf_response_ok; then
       ruleset_probe="$(cf_api_call GET "/zones/$cf_zone_id/rulesets/$cf_ruleset_id" 2>/dev/null || true)"
       printf '%s' "$ruleset_probe" | cf_response_ok && restore_status=1
     fi
   else
-    if ! cf_api_call DELETE "/zones/$cf_zone_id/rulesets/$cf_ruleset_id/rules/$cf_rule_id" >/dev/null 2>&1; then
+    rule_delete_response="$(cf_api_call DELETE "/zones/$cf_zone_id/rulesets/$cf_ruleset_id/rules/$cf_rule_id" 2>/dev/null || true)"
+    if ! printf '%s' "$rule_delete_response" | cf_response_ok; then
       ruleset_probe="$(cf_api_call GET "/zones/$cf_zone_id/rulesets/$cf_ruleset_id" 2>/dev/null || true)"
       printf '%s' "$ruleset_probe" | jq -e --arg id "$cf_rule_id" '.success and any(.result.rules[]?; .id==$id)' >/dev/null 2>&1 && restore_status=1
     fi
   fi
   if [ "$cf_dns_disposition" = created ]; then
-    if ! cf_api_call DELETE "/zones/$cf_zone_id/dns_records/$cf_dns_id" >/dev/null 2>&1; then
+    dns_delete_response="$(cf_api_call DELETE "/zones/$cf_zone_id/dns_records/$cf_dns_id" 2>/dev/null || true)"
+    if ! printf '%s' "$dns_delete_response" | cf_response_ok; then
       dns_probe_response="$(cf_api_call GET "/zones/$cf_zone_id/dns_records/$cf_dns_id" 2>/dev/null || true)"
       printf '%s' "$dns_probe_response" | cf_response_ok && restore_status=1
     fi
   else
     restore_payload="$(jq -nc --arg type "$cf_previous_type" --arg name "$cf_host" --arg content "$cf_previous_content" \
       --argjson proxied "$cf_previous_proxied" '{type:$type,name:$name,content:$content,proxied:$proxied,ttl:1}')"
-    cf_api_call PUT "/zones/$cf_zone_id/dns_records/$cf_dns_id" "$restore_payload" >/dev/null 2>&1 || restore_status=1
+    dns_restore_response="$(cf_api_call PUT "/zones/$cf_zone_id/dns_records/$cf_dns_id" "$restore_payload" 2>/dev/null || true)"
+    printf '%s' "$dns_restore_response" | cf_response_ok || restore_status=1
   fi
   return "$restore_status"
 }

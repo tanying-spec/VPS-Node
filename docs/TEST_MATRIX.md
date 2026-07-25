@@ -1,6 +1,6 @@
 # 测试矩阵与证据等级
 
-所有需要真实 Mihomo、OpenRC、网络出口或资源压力的实机测试只能在 `134.209.180.134` 运行。`dev.97` 已完成完整 smoke、安装测试、NAT/CDN API 隔离测试、整体卸载远端对象恢复测试、真实 CDN 验收器默认路径和实机隔离验收；真实 Cloudflare CDN 边缘仍需独立测试材料。原始脱敏证据摘要见 `REAL_HOST_EVIDENCE.md`。
+所有需要真实 Mihomo、OpenRC、网络出口或资源压力的实机测试只能在 `134.209.180.134` 运行。`dev.98` 已完成完整 smoke、安装测试、NAT/CDN API 隔离测试、整体卸载远端对象恢复测试、真实 CDN 验收器默认路径和实机隔离验收；真实 Cloudflare CDN 边缘仍需独立测试材料。原始脱敏证据摘要见 `REAL_HOST_EVIDENCE.md`。
 
 Windows 远程编排入口 `tests/run_authorized_host.ps1` 同样将主机和端口写死，禁用密码认证；上传前先执行只读能力预检，只上传验收白名单文件，并在下载后本地复核脱敏预检/验收证据 SHA-256 及语义；CI 对这些约束执行静态守卫。
 

@@ -2270,14 +2270,25 @@ case "$method $url" in
   'GET '*'/zones?'*) printf '%s\n' '{"success":true,"result":[{"id":"zone_test_1","name":"example.com"}]}' ;;
   'GET '*'/settings/ssl') printf '%s\n' '{"success":true,"result":{"value":"flexible"}}' ;;
   'GET '*'/dns_records?'*) printf '%s\n' '{"success":true,"result":[]}' ;;
+  'GET '*'/dns_records/dns_test_1')
+    if [ "${VP_FAKE_CF_SEMANTIC_DELETE_STUCK:-0}" = 1 ]; then printf '%s\n' '{"success":true,"result":{"id":"dns_test_1","type":"A","content":"198.51.100.20","proxied":true}}'
+    else printf '%s\n' '{"success":false,"errors":[{"code":10001}]}'
+    fi ;;
   'POST '*'/dns_records') printf '%s\n' '{"success":true,"result":{"id":"dns_test_1"}}' ;;
   'GET '*'/rulesets/phases/http_request_origin/entrypoint') printf '%s\n' '{"success":false,"errors":[{"code":10003}]}' ;;
+  'GET '*'/rulesets/ruleset_test_1')
+    if [ "${VP_FAKE_CF_SEMANTIC_DELETE_STUCK:-0}" = 1 ]; then printf '%s\n' '{"success":true,"result":{"id":"ruleset_test_1","rules":[{"id":"rule_test_1"}]}}'
+    else printf '%s\n' '{"success":false,"errors":[{"code":10001}]}'
+    fi ;;
   'POST '*'/rulesets')
     if [ "${VP_FAKE_CF_FAIL_RULE:-0}" = 1 ]; then printf '%s\n' '{"success":false,"errors":[{"code":10000}]}'
     else printf '%s\n' '{"success":true,"result":{"id":"ruleset_test_1","rules":[{"id":"rule_test_1","description":"VPS-Node CDN test-cdn"}]}}'
     fi ;;
   'PUT '*'/rulesets/'*'/rules/'*) printf '%s\n' '{"success":true,"result":{"id":"ruleset_test_1","rules":[{"id":"rule_test_1"}]}}' ;;
-  'DELETE '*) printf '%s\n' '{"success":true,"result":null}' ;;
+  'DELETE '*)
+    if [ "${VP_FAKE_CF_SEMANTIC_DELETE_STUCK:-0}" = 1 ]; then printf '%s\n' '{"success":false,"errors":[{"code":10000}]}'
+    else printf '%s\n' '{"success":true,"result":null}'
+    fi ;;
   *) printf 'unexpected fake Cloudflare API call: %s %s\n' "$method" "$url" >&2; exit 1 ;;
 esac
 FAKE_CF_CURL
@@ -2316,6 +2327,19 @@ FAKE_CF_CURL
   VP_ALLOW_TEST_HOOKS=1 VP_TEST_CDN_VERIFICATION_RESULT=pass VP_NAT_UPDATE_CONFIRM=APPLY \
   sh "$ROOT/vp.sh" cdn-port-update test-cdn 36436 >/dev/null
   grep -Eq '^cdn\|test-cdn\|25436\|.*\|nat\|36436\|' "$TMP/core-etc/nodes.db"
+  semantic_delete_nodes_hash="$(sha256sum "$TMP/core-etc/nodes.db" | awk '{print $1}')"
+  semantic_delete_cf_hash="$(sha256sum "$TMP/core-etc/cloudflare-cdn.db" | awk '{print $1}')"
+  if VP_CONFIG_DIR="$TMP/core-etc" VP_DATA_DIR="$TMP/core-lib" VP_LOG_DIR="$TMP/core-log" \
+    VP_LIB_DIR="$TMP/core-usr-lib" VP_CORE_BIN="$TMP/core-usr-lib/bin/mihomo" VP_SKIP_SERVICE=1 \
+    VP_CURL_BIN="$TMP/cf-api-bin/curl" VP_FAKE_CF_LOG="$TMP/cf-api.log" \
+    VP_FAKE_CF_SEMANTIC_DELETE_STUCK=1 VP_DELETE_CONFIRM=DELETE \
+    sh "$ROOT/vp.sh" delete test-cdn >/dev/null 2>&1; then
+    printf 'semantic Cloudflare delete failure unexpectedly removed CDN node\n' >&2; exit 1
+  fi
+  [ "$semantic_delete_nodes_hash" = "$(sha256sum "$TMP/core-etc/nodes.db" | awk '{print $1}')" ]
+  [ "$semantic_delete_cf_hash" = "$(sha256sum "$TMP/core-etc/cloudflare-cdn.db" | awk '{print $1}')" ]
+  grep -q 'GET .*/rulesets/ruleset_test_1$' "$TMP/cf-api.log"
+  grep -q 'GET .*/dns_records/dns_test_1$' "$TMP/cf-api.log"
   VP_CONFIG_DIR="$TMP/core-etc" VP_DATA_DIR="$TMP/core-lib" VP_LOG_DIR="$TMP/core-log" \
   VP_LIB_DIR="$TMP/core-usr-lib" VP_CORE_BIN="$TMP/core-usr-lib/bin/mihomo" VP_SKIP_SERVICE=1 \
   VP_CURL_BIN="$TMP/cf-api-bin/curl" VP_FAKE_CF_LOG="$TMP/cf-api.log" VP_DELETE_CONFIRM=DELETE \

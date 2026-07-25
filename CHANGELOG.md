@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.0-dev.98
+
+- Cloudflare rollback now validates the JSON `success` result for DNS, Ruleset and Rule deletion/restoration instead of treating every HTTP-success response as an applied change.
+- A semantic delete failure triggers an object-level read-back; an already absent object remains idempotent success, while an object still present aborts local deletion and preserves the recovery state.
+- Restoring a previously existing DNS record now also requires an explicit successful API result.
+- Added regression coverage for HTTP 200 `success:false` responses with DNS and Ruleset objects still present, proving that the CDN node and recovery database are retained.
+
 ## 0.2.0-dev.97
 
 - Fixed CDN direct-mode links: direct CDN records now generate valid VLESS-WS links instead of being rejected as NAT-only.
