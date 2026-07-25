@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.0-dev.97
+
+- Fixed CDN direct-mode links: direct CDN records now generate valid VLESS-WS links instead of being rejected as NAT-only.
+- CDN state validation now enforces that direct mode uses the internal listen port as its public port; NAT mode remains the only mode that supports independent public-port changes.
+- Direct CDN public-port updates now fail safely with an actionable migration message rather than changing Cloudflare or local state.
+- Added regression coverage for direct CDN creation, link generation and rejection of a separate public port.
+
 ## 0.2.0-dev.96
 
 - Improved the ordinary-user Cloudflare menu with a readiness summary showing Token state, Tunnel/CDN counts and the exact CDN prerequisites.

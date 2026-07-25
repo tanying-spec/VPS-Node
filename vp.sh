@@ -2,7 +2,7 @@
 
 set -u
 
-VP_VERSION="0.2.0-dev.96"
+VP_VERSION="0.2.0-dev.97"
 VP_CONFIG_DIR="${VP_CONFIG_DIR:-/etc/vps-node}"
 VP_DATA_DIR="${VP_DATA_DIR:-/var/lib/vps-node}"
 VP_LOG_DIR="${VP_LOG_DIR:-/var/log/vps-node}"
@@ -247,6 +247,7 @@ validate_nodes_database() {
         if (NF != 11 || $5 !~ /^\// || $5 ~ /[[:space:]\047\042]/ ||
             $6 !~ /^[A-Za-z0-9.-]+$/ || $6 !~ /\./ || ($7 != "direct" && $7 != "nat") ||
             $8 !~ /^[0-9]+$/ || $8 + 0 < 1 || $8 + 0 > 65535 ||
+            ($7 == "direct" && $8 != $3) ||
             $9 !~ /^[A-Za-z0-9_-]+$/ || $10 !~ /^[A-Za-z0-9_-]+$/ || $11 !~ /^[A-Za-z0-9_-]+$/) bad=1
       } else {
         bad=1
@@ -2391,6 +2392,14 @@ update_cdn_external_port() {
   IFS='|' read -r proto name listen_port uuid path host network_mode old_external_port zone_id dns_id rule_id <<EOF
 $record
 EOF
+  if [ "$network_mode" = direct ]; then
+    if [ "$new_external_port" = "$listen_port" ]; then
+      ok "CDN 节点 $target 当前是直连模式，公网端口已经与内部监听端口一致，无需修改。"
+      return 0
+    fi
+    error "CDN 节点 $target 当前是直连模式，公网端口必须等于内部监听端口 $listen_port。若 VPS 实际使用端口映射，请删除后按 CDN 向导以 NAT 模式重建。"
+    return 1
+  fi
   cf_record="$(awk -F'|' -v n="$target" '$1==n{print;exit}' "$VP_CF_CDN_DB")"
   IFS='|' read -r _ _ _ _ _ _ _ ruleset_id state_rule_id _ _ <<EOF
 $cf_record
@@ -2704,8 +2713,9 @@ EOF
     cdn)
       [ -n "$share_dest" ] || { error "节点 $share_name 缺少 CDN 公网域名。"; return 1; }
       case "$share_sni" in /*) ;; *) error "节点 $share_name 的 WebSocket 路径必须以 / 开头。"; return 1 ;; esac
-      [ "$share_private" = nat ] || { error "CDN 节点网络模式无效。"; return 1; }
+      case "$share_private" in direct|nat) ;; *) error "CDN 节点网络模式无效。"; return 1 ;; esac
       case "$share_public" in ''|*[!0-9]*) error "CDN 节点公网端口无效。"; return 1 ;; esac
+      [ "$share_private" != direct ] || [ "$share_public" = "$share_port" ] || { error "直连 CDN 节点的公网端口必须与内部监听端口一致。"; return 1; }
       ;;
     *) error "暂不支持该协议的分享链接。"; return 1 ;;
   esac

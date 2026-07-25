@@ -2325,6 +2325,28 @@ FAKE_CF_CURL
   grep -q 'DELETE .*/rulesets/ruleset_test_1$' "$TMP/cf-api.log"
   grep -q 'DELETE .*/dns_records/dns_test_1$' "$TMP/cf-api.log"
 
+  : > "$TMP/cf-api.log"
+  VP_CONFIG_DIR="$TMP/core-etc" VP_DATA_DIR="$TMP/core-lib" VP_LOG_DIR="$TMP/core-log" \
+  VP_LIB_DIR="$TMP/core-usr-lib" VP_CORE_BIN="$TMP/core-usr-lib/bin/mihomo" VP_SKIP_SERVICE=1 \
+  VP_CURL_BIN="$TMP/cf-api-bin/curl" VP_PUBLIC_IPV4_OVERRIDE=198.51.100.20 VP_FAKE_CF_LOG="$TMP/cf-api.log" \
+  VP_ALLOW_TEST_HOOKS=1 VP_TEST_CDN_VERIFICATION_RESULT=pass VP_CDN_CREATE_CONFIRM=CREATE \
+  sh "$ROOT/vp.sh" cdn-add direct-cdn 25438 direct.example.com /direct-cdn direct >/dev/null
+  grep -Eq '^cdn\|direct-cdn\|25438\|.*\|direct\|25438\|' "$TMP/core-etc/nodes.db"
+  VP_CONFIG_DIR="$TMP/core-etc" VP_DATA_DIR="$TMP/core-lib" VP_LOG_DIR="$TMP/core-log" \
+  VP_LIB_DIR="$TMP/core-usr-lib" sh "$ROOT/vp.sh" link direct-cdn | grep -q '@direct.example.com:443?'
+  direct_cdn_nodes_before_update="$(sha256sum "$TMP/core-etc/nodes.db" | awk '{print $1}')"
+  if VP_CONFIG_DIR="$TMP/core-etc" VP_DATA_DIR="$TMP/core-lib" VP_LOG_DIR="$TMP/core-log" \
+    VP_LIB_DIR="$TMP/core-usr-lib" VP_CURL_BIN="$TMP/cf-api-bin/curl" VP_NAT_UPDATE_CONFIRM=APPLY \
+    sh "$ROOT/vp.sh" cdn-port-update direct-cdn 35438 >/dev/null 2>&1; then
+    printf 'direct CDN unexpectedly accepted a separate public port\n' >&2; exit 1
+  fi
+  [ "$direct_cdn_nodes_before_update" = "$(sha256sum "$TMP/core-etc/nodes.db" | awk '{print $1}')" ]
+  VP_CONFIG_DIR="$TMP/core-etc" VP_DATA_DIR="$TMP/core-lib" VP_LOG_DIR="$TMP/core-log" \
+  VP_LIB_DIR="$TMP/core-usr-lib" VP_CORE_BIN="$TMP/core-usr-lib/bin/mihomo" VP_SKIP_SERVICE=1 \
+  VP_CURL_BIN="$TMP/cf-api-bin/curl" VP_FAKE_CF_LOG="$TMP/cf-api.log" VP_DELETE_CONFIRM=DELETE \
+  sh "$ROOT/vp.sh" delete direct-cdn >/dev/null
+  ! grep -q '^cdn|direct-cdn|' "$TMP/core-etc/nodes.db"
+
   VP_CONFIG_DIR="$TMP/core-etc" VP_DATA_DIR="$TMP/core-lib" VP_LOG_DIR="$TMP/core-log" \
   VP_LIB_DIR="$TMP/core-usr-lib" VP_CORE_BIN="$TMP/core-usr-lib/bin/mihomo" \
   VP_CORE_BACKUP_BIN="$TMP/core-usr-lib/bin/mihomo.previous" VP_SKIP_SERVICE=1 \
