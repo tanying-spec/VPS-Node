@@ -1,121 +1,167 @@
 # VPS-Node
 
-详细版本记录请查看 [CHANGELOG.md](CHANGELOG.md)。
+一个面向个人自用 VPS 的节点管理工具。安装后输入 `vp`，按中文菜单即可创建节点、查看链接、测速、修复、更新或卸载。
 
-面向个人自用 VPS 的轻量节点管理项目，核心目标是默认可用、故障可解释、修改可回滚。
+> 项目仍在开发中。建议先在自己的测试 VPS 上使用，再逐步迁移正式节点。
 
-当前已经具备：
+## 适合谁
 
-- Reality 主线路
-- VLESS WebSocket + Cloudflare Tunnel 备用线路
-- 可恢复状态事务
-- Mihomo 适配器与按 cgroup 内存自适应
-- 启动前自适应 DNS：公共 DNS 可用时优先使用，否则回退到系统有效 DNS
-- 分层健康检查和安全修复
-- 真实端到端测试
-- 凭据轮换、备份迁移、安全维护
-- 精确提交更新、SHA-256 校验和版本回滚
+- 想用 VPS 搭建自用节点，但不想手写复杂配置。
+- 希望低内存 VPS 也能自动选择合适参数。
+- 需要 Reality 主线路，并可选 Cloudflare Tunnel 备用线路。
+- 希望修改前有备份，失败时能回滚。
 
-## 安装
+目前支持使用 `apk` 或 `apt-get` 的 Linux 系统，例如 Alpine、Debian 和 Ubuntu。安装时需要使用 `root` 用户。
 
-安装前只检查，不修改系统：
+## 最快开始：只需 3 步
+
+### 1. 登录 VPS
+
+使用服务器商提供的 IP、SSH 端口和 root 密码登录 VPS。
+
+### 2. 安装 VPS-Node
+
+复制下面整行命令，在 VPS 中粘贴并回车：
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/tanying-spec/VPS-Node/main/install.sh | sh
+```
+
+看到安装完成后，输入：
+
+```sh
+vp
+```
+
+如果你已经是 `root`，不需要在命令里加 `sudo`。
+
+### 3. 创建并复制节点链接
+
+进入首页后：
+
+1. 输入 `1`，创建 Reality 主节点。
+2. 不确定如何填写时，直接回车使用默认值。
+3. 创建完成后，可按提示立即显示链接。
+4. 如果当时没有显示，回到首页输入 `3`。
+5. 选择节点编号，再输入 `1` 显示链接。
+6. 复制完整链接，导入 v2rayN、Shadowrocket 等客户端。
+
+到这里，第一次使用就完成了。
+
+## 日常怎么用
+
+以后登录 VPS，只需输入：
+
+```sh
+vp
+```
+
+首页常用入口：
+
+| 想做什么 | 首页选择 |
+| --- | ---: |
+| 创建 Reality 主节点 | `1` |
+| 配置 Cloudflare 备用节点 | `2` |
+| 查看节点、链接、测速或删除 | `3` |
+| 查看网络状态、一键测速和优化 | `4` |
+| 健康检查与安全修复 | `5` |
+| 一键安全维护 | `6` |
+| 备份、恢复或迁移旧项目 | `7` |
+| 检查更新、应用更新或回滚 | `8` |
+| 卸载 VPS-Node | `11` |
+
+首页顶部会显示核心服务、Cloudflare Tunnel、节点数量、网络优化和后台监测状态。看到异常时，优先进入 `5` 做健康检查。
+
+## Cloudflare 备用线路（可选）
+
+Reality 主节点不需要 Cloudflare Token。
+
+只有在配置 Cloudflare 备用节点时，才需要提前准备：
+
+- Cloudflare Tunnel Token。
+- 已接入 Cloudflare 的域名。
+- Tunnel 中已经配置好的公网主机名。
+
+没有这些内容可以先跳过，不影响 Reality 主节点使用。
+
+## 更新与卸载
+
+推荐直接从 `vp` 首页操作：
+
+- 输入 `8`：先检查更新，再决定是否应用；更新失败可回滚上一版本。
+- 输入 `11`：卸载项目前会先创建并校验恢复包，再停止和删除项目自己的服务与文件。
+
+也可以使用命令：
+
+```sh
+vp update --check
+vp uninstall
+```
+
+正式更新需要按提示确认。正式卸载需要输入 `DELETE`，避免误操作。
+
+## 常见问题
+
+### 提示 `sudo: not found`
+
+如果登录的是 `root`，直接运行安装命令，不要加 `sudo`：
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/tanying-spec/VPS-Node/main/install.sh | sh
+```
+
+### 提示必须使用 root
+
+先切换到 root 用户，再重新执行安装。不同服务商的切换方式可能不同；最简单的方式是登录时直接使用用户名 `root`。
+
+### 无法下载，或 GitHub 连接超时
+
+这通常是 VPS 到 GitHub 的网络问题，不是安装命令格式错误。可以稍后重试，或先确认 VPS 能否访问：
+
+```sh
+curl -I https://raw.githubusercontent.com
+```
+
+### 节点链接在哪里
+
+输入 `vp` → 首页选择 `3` → 选择节点 → 输入 `1` 显示链接。
+
+### 创建了节点但客户端连不上
+
+先在首页选择 `3`，对该节点执行端到端测试；再进入首页 `5` 做健康检查。Reality 端口还必须在服务商防火墙和系统防火墙中允许访问。
+
+### 低内存 VPS 能用吗
+
+项目会读取 VPS 或容器实际可用的内存与 CPU 限额，为 Mihomo 选择相应参数，而不是给所有机器写入同一套限制。极低内存环境仍可能受系统中其他程序影响，首页状态和健康检查会显示实际结果。
+
+### 会不会修改其他服务
+
+项目只管理自己确认拥有的文件和服务。网络优化会先测试、显示候选参数，并在应用后复测；卸载时会恢复项目保存的网络参数。正式使用前仍建议创建 VPS 快照。
+
+## 安装前先检查（可选）
+
+只检查环境，不安装或修改系统：
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/tanying-spec/VPS-Node/main/install.sh | sh -s -- --check
 ```
 
-预览正式安装会做什么：
+预览安装将执行的操作：
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/tanying-spec/VPS-Node/main/install.sh | sh -s -- --dry-run
 ```
 
-```sh
-curl -fsSL https://raw.githubusercontent.com/tanying-spec/VPS-Node/main/install.sh | sh
-vp
-```
+## 给高级用户
 
-安装后常用命令：
+普通用户无需记忆命令。需要自动化、备份恢复、迁移或凭据轮换时，可查看 [完整命令说明](docs/CLI.md)。
 
-```sh
-vp preflight
-vp core-install
-vp reality-add home 443 www.amd.com ipv4
-vp reality-add home-v6 8443 www.amd.com ipv6
-vp argo-add backup 25443 tunnel.example.com /private-path
-vp nodes
-vp link home
-vp subscription plain
-vp subscription base64
-vp test-node home
-vp test-node home 4
-vp test-all 4
-vp network
-vp network-optimize --dry-run
-vp network-optimize home 4
-vp network-repair
-vp network-rollback
-vp report
-vp self-heal
-vp monitor-install
-vp stability
-vp optimize
-vp rotate home 24
-# 验证新链接后执行；需要输入 FINALIZE：
-vp rotate-finalize home
-vp backup
-vp backups
-vp backup-prune --keep 5 --dry-run
-vp backup-prune --keep 5 --apply
-vp restore /path/to/backup.tar.gz --dry-run
-vp restore /path/to/backup.tar.gz --apply
-# 仅兼容确认可信但没有 SHA-256 的旧备份：
-vp restore /path/to/legacy-backup.tar.gz --dry-run --allow-unverified
-vp migrate-mh /etc/mihomo/nodes.db --dry-run
-vp migrate-mh /etc/mihomo/nodes.db --apply
-vp maintain --dry-run
-vp maintain
-vp version-status
-vp update --check
-# 正式更新会先显示候选信息，并要求输入 UPDATE：
-vp update
-vp update --allow-downgrade
-vp rollback
-vp uninstall
-```
+项目的测试与开发资料：
 
-`vp preflight` 是安装前的一键只读检查：集中显示 root 权限、系统与架构、服务管理方式、内存/CPU 自适应、磁盘、DNS、GitHub 连通性、默认端口和外部同名服务冲突，并给出“可以安装”或“暂不建议安装”的明确结论。它不会安装依赖、创建项目目录、读取 Tunnel Token 或修改服务和网络参数。
+- [版本更新记录](CHANGELOG.md)
+- [测试矩阵](docs/TEST_MATRIX.md)
+- [唯一实机验收方法](docs/ACCEPTANCE.md)
+- [当前完成度与证据等级](docs/COMPLETION_AUDIT.md)
+- [与旧项目的功能差距](docs/FEATURE_GAP.md)
 
-`vp maintain --dry-run` 会预览恢复点、事务恢复、安全修复、到期凭据、日志和临时项范围；正式 `vp maintain` 只有输入 `MAINTAIN` 后才先创建恢复点再执行，取消不会写入任何项目状态。
-
-普通用户可以直接运行 `vp`，首页菜单会引导创建主节点、备用节点、测试、修复、维护和迁移；命令参数适合高级用户和自动化。
-
-`vp optimize` 会根据当前 cgroup/主机内存重新计算已验证的 Mihomo 运行参数，必要时重启服务，并立即执行健康检查；不会修改节点地址、UUID 或 Tunnel Token。
-
-DNS 选择会在核心安装或优化时重新检测：优先验证 `1.1.1.1`、`8.8.8.8` 的解析和可用的 TCP 53；公共 DNS 不可达时才使用 `/etc/resolv.conf` 中当前有效的系统 DNS。健康检查会把 DNS 上游故障与节点协议故障分开报告。
-
-## 验证范围
-
-以下能力已有自动测试或早期隔离实机记录；早期实机结果不等同于当前版本验收。当前版本仍缺少的唯一测试机证据以 [完成度审计](docs/COMPLETION_AUDIT.md) 和 [测试矩阵](docs/TEST_MATRIX.md) 为准：
-
-- 事务正常提交、验证失败回滚、SIGKILL 中断恢复
-- Reality 和 VLESS-WS 独立客户端真实 HTTPS 代理
-- Cloudflare Tunnel 公网 hostname、边缘连接和 Tunnel 进程自动恢复
-- OpenRC 服务安装、启用、崩溃自动拉起和完整卸载
-- 64–2048 MiB 模拟 cgroup 内存档位
-- cgroup CPU quota、cpuset 与宿主可见核心数的联合限制
-- 凭据轮换宽限期、旧凭据移除和重启持久化
-- 备份 SHA-256、恢复验证和恢复失败回滚
-- 管理脚本精确提交下载、SHA-256、更新失败保留和版本回滚
-
-Reality 从 VPS 内部使用公网 IP 测试时，如果宿主网络不支持 NAT hairpin，程序会明确提示需要外部网络复核，不会误判为协议故障。
-
-项目仍处于开发阶段，建议先在自己的测试 VPS 上验证域名、Tunnel ingress 和防火墙策略。
-
-新旧项目的逐项能力取舍见 [docs/FEATURE_GAP.md](docs/FEATURE_GAP.md)。
-唯一测试机的隔离验收步骤见 [docs/ACCEPTANCE.md](docs/ACCEPTANCE.md)。
-当前版本逐项完成度、证据等级和剩余发布门槛见 [docs/COMPLETION_AUDIT.md](docs/COMPLETION_AUDIT.md)。
-
-只有设置 `VP_LOCAL_SOURCE=1` 时安装器才会读取当前目录的 `vp.sh`；普通远程一键安装始终从 GitHub 精确提交下载，避免误用当前目录中的旧文件。
-
-卸载可从首页选择“卸载 VPS-Node”，也可以执行 `vp uninstall`。输入 `DELETE` 后会先创建并校验外部恢复包，再停止项目服务、回滚项目应用的网络参数并删除自身数据。只有服务进程和全部管理路径均确认消失后才会提示成功；如有残留，会列出准确路径并保留恢复包。
+安全提醒：不要把服务器密码、Cloudflare Token、UUID 或完整节点链接提交到 GitHub Issue、日志或截图中。
