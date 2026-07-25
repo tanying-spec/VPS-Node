@@ -17,6 +17,13 @@ TEST_TUNNEL_TOKEN_FILE="${VP_TEST_TUNNEL_TOKEN_FILE:-}"
 TEST_ARGO_HOST="${VP_TEST_ARGO_HOST:-}"
 TEST_ARGO_PATH="${VP_TEST_ARGO_PATH:-}"
 TEST_ARGO_ORIGIN_PORT="${VP_TEST_ARGO_ORIGIN_PORT:-}"
+TEST_CDN_TOKEN_FILE="${VP_TEST_CDN_TOKEN_FILE:-}"
+TEST_CDN_HOST="${VP_TEST_CDN_HOST:-}"
+TEST_CDN_PATH="${VP_TEST_CDN_PATH:-}"
+TEST_CDN_ORIGIN_PORT="${VP_TEST_CDN_ORIGIN_PORT:-}"
+TEST_CDN_EXTERNAL_PORT="${VP_TEST_CDN_EXTERNAL_PORT:-}"
+TEST_CDN_ALTERNATE_PORT="${VP_TEST_CDN_ALTERNATE_PORT:-}"
+TEST_CDN_UNMAPPED_PORT="${VP_TEST_CDN_UNMAPPED_PORT:-}"
 
 [ "$(id -u)" = 0 ] || { printf 'acceptance requires root\n' >&2; exit 1; }
 [ -x "$MIHOMO_BIN" ] || { printf 'mihomo binary is not executable\n' >&2; exit 1; }
@@ -54,6 +61,39 @@ if [ "$argo_inputs" -eq 5 ]; then
     printf 'refusing to reuse a host present in the formal node database\n' >&2
     exit 1
   fi
+fi
+
+cdn_inputs=0
+for cdn_input in "$TEST_CDN_TOKEN_FILE" "$TEST_CDN_HOST" "$TEST_CDN_PATH" "$TEST_CDN_ORIGIN_PORT" \
+  "$TEST_CDN_EXTERNAL_PORT" "$TEST_CDN_ALTERNATE_PORT" "$TEST_CDN_UNMAPPED_PORT"; do
+  [ -n "$cdn_input" ] && cdn_inputs=$((cdn_inputs + 1))
+done
+[ "$cdn_inputs" -eq 0 ] || [ "$cdn_inputs" -eq 7 ] || {
+  printf 'independent CDN acceptance requires all seven inputs together\n' >&2
+  exit 1
+}
+if [ "$cdn_inputs" -eq 7 ]; then
+  case "$TEST_CDN_TOKEN_FILE" in /*) ;; *) printf 'test CDN token file must be absolute\n' >&2; exit 1 ;; esac
+  [ -r "$TEST_CDN_TOKEN_FILE" ] || { printf 'test CDN token file is not readable\n' >&2; exit 1; }
+  case "$TEST_CDN_HOST" in *.*) ;; *) printf 'test CDN host is invalid\n' >&2; exit 1 ;; esac
+  case "$TEST_CDN_PATH" in /*) ;; *) printf 'test CDN path must start with /\n' >&2; exit 1 ;; esac
+  for cdn_port in "$TEST_CDN_ORIGIN_PORT" "$TEST_CDN_EXTERNAL_PORT" "$TEST_CDN_ALTERNATE_PORT" "$TEST_CDN_UNMAPPED_PORT"; do
+    case "$cdn_port" in ''|*[!0-9]*) printf 'test CDN port is invalid\n' >&2; exit 1 ;; esac
+    [ "$cdn_port" -ge 1024 ] && [ "$cdn_port" -le 65535 ] || { printf 'test CDN port out of range\n' >&2; exit 1; }
+  done
+  [ "$TEST_CDN_EXTERNAL_PORT" != "$TEST_CDN_ALTERNATE_PORT" ] &&
+    [ "$TEST_CDN_EXTERNAL_PORT" != "$TEST_CDN_UNMAPPED_PORT" ] &&
+    [ "$TEST_CDN_ALTERNATE_PORT" != "$TEST_CDN_UNMAPPED_PORT" ] || { printf 'test CDN external ports must be distinct\n' >&2; exit 1; }
+  ss -ltnH 2>/dev/null | awk -v p="$TEST_CDN_ORIGIN_PORT" '$4 ~ (":" p "$") { found=1 } END { exit found ? 0 : 1 }' && { printf 'test CDN origin port is already occupied\n' >&2; exit 1; }
+  for formal_token in /etc/vps-node/secrets/cloudflare-api-token /etc/mihomo/secrets/cloudflare-api-token; do
+    if [ -r "$formal_token" ] && [ "$(sha256sum "$TEST_CDN_TOKEN_FILE" | awk '{print $1}')" = "$(sha256sum "$formal_token" | awk '{print $1}')" ]; then
+      printf 'refusing to reuse a formal Cloudflare API token\n' >&2
+      exit 1
+    fi
+  done
+  for formal_nodes in /etc/vps-node/nodes.db /etc/mihomo/nodes.db; do
+    [ ! -r "$formal_nodes" ] || ! grep -Fq "$TEST_CDN_HOST" "$formal_nodes" || { printf 'refusing to reuse a host present in a formal node database\n' >&2; exit 1; }
+  done
 fi
 
 service_active() {
@@ -240,6 +280,59 @@ if [ "$argo_inputs" -eq 5 ]; then
   vp_env env VP_TEST_BYTES=1048576 "$CLI" test-node acceptance-argo 2 | grep -q '2/2 路成功'
   argo_result=public-concurrency-and-respawn-passed
 fi
+cdn_result=not-requested
+if [ "$cdn_inputs" -eq 7 ]; then
+  vp_env "$CLI" cf-token-set "$TEST_CDN_TOKEN_FILE" >/dev/null
+  VP_CDN_CREATE_CONFIRM=CREATE VP_CDN_TEST_CONCURRENCY=2 \
+    vp_env "$CLI" cdn-add acceptance-cdn "$TEST_CDN_ORIGIN_PORT" "$TEST_CDN_HOST" "$TEST_CDN_PATH" nat "$TEST_CDN_EXTERNAL_PORT" >/dev/null
+  vp_env env VP_TEST_BYTES=1048576 "$CLI" test-node acceptance-cdn 2 | grep -q '2/2'
+  cdn_mihomo_pids_before_update="$(process_ids mihomo)"
+  VP_NAT_UPDATE_CONFIRM=APPLY VP_CDN_TEST_CONCURRENCY=2 \
+    vp_env "$CLI" cdn-port-update acceptance-cdn "$TEST_CDN_ALTERNATE_PORT" >/dev/null
+  [ "$cdn_mihomo_pids_before_update" = "$(process_ids mihomo)" ]
+  vp_env env VP_TEST_BYTES=1048576 "$CLI" test-node acceptance-cdn 2 | grep -q '2/2'
+  cdn_nodes_before_failed_update="$(file_digest "$BASE/etc/nodes.db")"
+  cdn_state_before_failed_update="$(file_digest "$BASE/etc/cloudflare-cdn.db")"
+  if VP_NAT_UPDATE_CONFIRM=APPLY VP_CDN_TEST_CONCURRENCY=2 \
+    vp_env "$CLI" cdn-port-update acceptance-cdn "$TEST_CDN_UNMAPPED_PORT" >/dev/null 2>&1; then
+    printf 'unmapped CDN port unexpectedly passed public verification\n' >&2
+    exit 1
+  fi
+  [ "$cdn_nodes_before_failed_update" = "$(file_digest "$BASE/etc/nodes.db")" ]
+  [ "$cdn_state_before_failed_update" = "$(file_digest "$BASE/etc/cloudflare-cdn.db")" ]
+  [ "$cdn_mihomo_pids_before_update" = "$(process_ids mihomo)" ]
+  [ "$(awk -F'|' '$1=="cdn"&&$2=="acceptance-cdn"{print $8}' "$BASE/etc/nodes.db")" = "$TEST_CDN_ALTERNATE_PORT" ]
+  vp_env env VP_TEST_BYTES=1048576 "$CLI" test-node acceptance-cdn 2 | grep -q '2/2'
+
+  cdn_restore_record="$(awk -F'|' '$1=="acceptance-cdn"{print;exit}' "$BASE/etc/cloudflare-cdn.db")"
+  IFS='|' read -r _cdn_name cdn_zone_id cdn_dns_id cdn_dns_disposition cdn_previous_type cdn_previous_content \
+    cdn_previous_proxied cdn_ruleset_id cdn_rule_id cdn_ruleset_disposition _cdn_host <<EOF
+$cdn_restore_record
+EOF
+  VP_DELETE_CONFIRM=DELETE vp_env "$CLI" delete acceptance-cdn >/dev/null
+  ! grep -q '^cdn|acceptance-cdn|' "$BASE/etc/nodes.db"
+  ! grep -q '^acceptance-cdn|' "$BASE/etc/cloudflare-cdn.db"
+  cdn_api_token="$(awk 'NR==1{print;exit}' "$TEST_CDN_TOKEN_FILE")"
+  cdn_api() {
+    curl -fsS --max-time 25 -H "Authorization: Bearer $cdn_api_token" -H 'Content-Type: application/json' \
+      "https://api.cloudflare.com/client/v4$1"
+  }
+  cdn_dns_after="$(cdn_api "/zones/$cdn_zone_id/dns_records/$cdn_dns_id" 2>/dev/null || true)"
+  if [ "$cdn_dns_disposition" = created ]; then
+    ! printf '%s' "$cdn_dns_after" | jq -e '.success == true' >/dev/null 2>&1
+  else
+    printf '%s' "$cdn_dns_after" | jq -e --arg type "$cdn_previous_type" --arg content "$cdn_previous_content" \
+      --argjson proxied "$cdn_previous_proxied" '.success and .result.type==$type and .result.content==$content and .result.proxied==$proxied' >/dev/null
+  fi
+  cdn_rules_after="$(cdn_api "/zones/$cdn_zone_id/rulesets/$cdn_ruleset_id" 2>/dev/null || true)"
+  if [ "$cdn_ruleset_disposition" = created ]; then
+    ! printf '%s' "$cdn_rules_after" | jq -e '.success == true' >/dev/null 2>&1
+  else
+    ! printf '%s' "$cdn_rules_after" | jq -e --arg id "$cdn_rule_id" '.success and any(.result.rules[]?; .id==$id)' >/dev/null 2>&1
+  fi
+  unset cdn_api_token
+  cdn_result=create-switch-rollback-restore-passed
+fi
 vp_env "$CLI" rotate acceptance-reality 1 >/dev/null
 expected_rotation_links=2
 [ "$ipv6_result" = loopback-passed ] && expected_rotation_links=3
@@ -329,6 +422,7 @@ evidence_file="$EVIDENCE_DIR/vps-node-acceptance-$(date -u '+%Y%m%dT%H%M%SZ').tx
   printf 'reality_ipv4_loopback_concurrency=2/2\n'
   printf 'reality_ipv6=%s\n' "$ipv6_result"
   printf 'independent_cloudflare_tunnel=%s\n' "$argo_result"
+  printf 'independent_cloudflare_cdn=%s\n' "$cdn_result"
   printf 'credential_rotation=passed\n'
   printf 'backup_restore_roundtrip=passed\n'
   printf 'config_drift_self_heal=passed\n'

@@ -1,6 +1,6 @@
 # 测试矩阵与证据等级
 
-所有需要真实 Mihomo、OpenRC、网络出口或资源压力的实机测试只能在 `134.209.180.134` 运行。`dev.94` 已完成完整 smoke、安装测试、NAT/CDN API 隔离测试、整体卸载远端对象恢复测试和实机隔离验收；真实 Cloudflare CDN 边缘仍需独立测试凭据。原始脱敏证据摘要见 `REAL_HOST_EVIDENCE.md`。
+所有需要真实 Mihomo、OpenRC、网络出口或资源压力的实机测试只能在 `134.209.180.134` 运行。`dev.95` 已完成完整 smoke、安装测试、NAT/CDN API 隔离测试、整体卸载远端对象恢复测试、真实 CDN 验收器默认路径和实机隔离验收；真实 Cloudflare CDN 边缘仍需独立测试材料。原始脱敏证据摘要见 `REAL_HOST_EVIDENCE.md`。
 
 Windows 远程编排入口 `tests/run_authorized_host.ps1` 同样将主机和端口写死，禁用密码认证；上传前先执行只读能力预检，只上传验收白名单文件，并在下载后本地复核脱敏预检/验收证据 SHA-256 及语义；CI 对这些约束执行静态守卫。
 
@@ -27,8 +27,8 @@ Windows 远程编排入口 `tests/run_authorized_host.ps1` 同样将主机和端
 | 安装、更新、回滚、来源与降级保护 | 零写入候选预览与取消、命令级 `UPDATE` 确认、本地候选源、顶层 SHA 样本、同版本异内容/隐式降级拒绝、显式降级、孤立恢复点保留、安装/更新/回滚状态绑定与原子不覆盖、两阶段故障恢复及 SHA-256 篡改注入 | 已通过 |
 | 可恢复卸载及文件残留 | 外部恢复包与 SHA-256、服务停止失败零删除/零网络回滚、Mihomo/cloudflared 进程级退出门槛、孤立 Tunnel 拒绝、OpenRC watchdog 暂存恢复、项目与服务定义最终残留审计、部分删除失败明确报错 | 已通过自动验证 |
 | Reality 真实认证与并发 | `tests/isolated_acceptance.sh` | `dev.92` IPv4 2/2 路通过 |
-| NAT 内外端口与更新回滚 | 真实 Mihomo 候选配置、链接端口、成功提交、验证失败数据库哈希恢复 | `dev.94` 唯一主机完整 smoke 通过 |
-| Cloudflare CDN API 对象生命周期 | 伪 API 验证 Token、Zone/SSL、DNS、Origin Rule、失败清理、端口更新、单节点删除及整体卸载精确恢复；真实 Mihomo 配置验证 | `dev.94` 唯一主机完整 smoke 通过；不代表公网边缘通过 |
+| NAT 内外端口与更新回滚 | 真实 Mihomo 候选配置、链接端口、成功提交、验证失败数据库哈希恢复 | `dev.95` 唯一主机完整 smoke 通过 |
+| Cloudflare CDN API 对象生命周期 | 伪 API 验证 Token、Zone/SSL、DNS、Origin Rule、失败清理、端口更新、单节点删除及整体卸载精确恢复；真实 Mihomo 配置验证 | `dev.95` 唯一主机完整 smoke 通过；不代表公网边缘通过 |
 | Alpine/OpenRC 服务生命周期 | `tests/isolated_acceptance.sh` | `dev.92` 创建、运行、维护、CLI 更新/回滚、监控定义和卸载闭环通过 |
 | 正式 Mihomo/cloudflared 前后不变 | 状态及配置/init 哈希对比 | `dev.92` PID、镜像、命令行及全部受检摘要不变 |
 | 64–2048 MiB 真实 Mihomo 档位 | 十五个 cgroup v2 硬上限覆盖 96/160/320/640 MiB 边界前后、十五次真实内核启动、代理出口、每档 4×1 MiB 并发完整传输、`memory.peak`、零 `oom_kill`、结构化证据（不可绕过主机锁） | 测试机未委派 memory controller，明确失败且未降级模拟 |
@@ -36,7 +36,7 @@ Windows 远程编排入口 `tests/run_authorized_host.ps1` 同样将主机和端
 | 真实 DNS 自适应 | 公共 DNS 实际查询+TCP 53 正常则保留；不可达公共地址触发系统 DNS 回退；两个模式分别由真实 Mihomo 域名代理验证且不记录解析器地址 | `dev.89` 两场景真实内核验证通过 |
 | 网络优化事务 | 同节点同并发前后门槛、性能回退；快照提交后/配置提交前故障注入；回滚第二项写入失败时补偿两项并保留重试文件；原参数恢复、无残缺目标或暂存文件；实时参数与持久化目标一致性六态检查 | 已通过自动验证 |
 | Cloudflare Tunnel 独立公网入口 | 需要独立测试 Tunnel 凭据和域名 | 尚缺当前版本证据 |
-| Cloudflare CDN 独立公网入口 | 需要最小权限 API Token、专用 Flexible Zone、测试子域名和可映射端口 | 尚缺当前版本证据 |
+| Cloudflare CDN 独立公网入口 | 锁定主机验收器支持独立 Token、专用 Flexible Zone、测试子域名、同源双映射端口和未映射回滚端口；验证创建、并发代理、无重启切换、失败回滚、删除及 DNS/Origin Rule 恢复 | 验收器与默认隔离回归已通过；尚缺独立测试材料产生的公网边缘证据 |
 | IPv6 Reality 外部可达性 | 需要测试机公网 IPv6 与外部复核 | 尚缺当前版本证据 |
 
 ## 历史结果的处理

@@ -44,6 +44,13 @@ jobs:
           grep -Fq '[string]$TunnelHost' tests/run_authorized_host.ps1
           grep -Fq '[string]$TunnelPath' tests/run_authorized_host.ps1
           grep -Fq '[int]$TunnelOriginPort' tests/run_authorized_host.ps1
+          grep -Fq '[string]$CdnApiTokenFile' tests/run_authorized_host.ps1
+          grep -Fq '[string]$CdnHost' tests/run_authorized_host.ps1
+          grep -Fq '[string]$CdnPath' tests/run_authorized_host.ps1
+          grep -Fq '[int]$CdnOriginPort' tests/run_authorized_host.ps1
+          grep -Fq '[int]$CdnExternalPort' tests/run_authorized_host.ps1
+          grep -Fq '[int]$CdnAlternateExternalPort' tests/run_authorized_host.ps1
+          grep -Fq '[int]$CdnUnmappedExternalPort' tests/run_authorized_host.ps1
           grep -Fq '[switch]$SelfTestEvidence' tests/run_authorized_host.ps1
           grep -Fq '[switch]$ValidateOnly' tests/run_authorized_host.ps1
           grep -Fq '[switch]$PreflightOnly' tests/run_authorized_host.ps1
@@ -88,6 +95,7 @@ jobs:
           & $runner -ValidateOnly
 
           & $runner -ValidateOnly -TunnelTokenFile /root/independent-test.token -TunnelHost test.example.com -TunnelPath /private-test -TunnelOriginPort 25443
+          & $runner -ValidateOnly -CdnApiTokenFile /root/independent-cdn.token -CdnHost cdn-test.example.com -CdnPath /private-cdn -CdnOriginPort 25436 -CdnExternalPort 35436 -CdnAlternateExternalPort 36436 -CdnUnmappedExternalPort 37436
 
           $invalidCases = @(
             @('-ValidateOnly', '-TunnelHost', 'test.example.com'),
@@ -95,7 +103,10 @@ jobs:
             @('-ValidateOnly', '-TunnelTokenFile', '/etc/cloudflared/token', '-TunnelHost', 'test.example.com', '-TunnelPath', '/private-test', '-TunnelOriginPort', '25443'),
             @('-ValidateOnly', '-TunnelTokenFile', '/root/independent-test.token', '-TunnelHost', 'bad..example.com', '-TunnelPath', '/private-test', '-TunnelOriginPort', '25443'),
             @('-ValidateOnly', '-TunnelTokenFile', '/root/independent-test.token', '-TunnelHost', 'test.example.com', '-TunnelPath', 'private-test', '-TunnelOriginPort', '25443'),
-            @('-ValidateOnly', '-TunnelTokenFile', '/root/independent-test.token', '-TunnelHost', 'test.example.com', '-TunnelPath', '/private-test', '-TunnelOriginPort', '53')
+            @('-ValidateOnly', '-TunnelTokenFile', '/root/independent-test.token', '-TunnelHost', 'test.example.com', '-TunnelPath', '/private-test', '-TunnelOriginPort', '53'),
+            @('-ValidateOnly', '-CdnHost', 'cdn-test.example.com', '-CdnPath', '/private-cdn', '-CdnOriginPort', '25436', '-CdnExternalPort', '35436', '-CdnAlternateExternalPort', '36436', '-CdnUnmappedExternalPort', '37436'),
+            @('-ValidateOnly', '-CdnApiTokenFile', '/root/independent-cdn.token', '-CdnHost', 'cdn-test.example.com', '-CdnPath', '/private-cdn', '-CdnOriginPort', '25436', '-CdnExternalPort', '35436', '-CdnAlternateExternalPort', '35436', '-CdnUnmappedExternalPort', '37436'),
+            @('-ValidateOnly', '-CdnApiTokenFile', '/root/independent-cdn.token', '-CdnHost', 'cdn-test.example.com', '-CdnPath', '/private-cdn', '-CdnOriginPort', '53', '-CdnExternalPort', '35436', '-CdnAlternateExternalPort', '36436', '-CdnUnmappedExternalPort', '37436')
           )
           foreach ($case in $invalidCases) {
             $failedAsExpected = $false

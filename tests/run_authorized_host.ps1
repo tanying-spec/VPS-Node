@@ -6,6 +6,13 @@ param(
     [string]$TunnelHost = "",
     [string]$TunnelPath = "",
     [int]$TunnelOriginPort = 0,
+    [string]$CdnApiTokenFile = "",
+    [string]$CdnHost = "",
+    [string]$CdnPath = "",
+    [int]$CdnOriginPort = 0,
+    [int]$CdnExternalPort = 0,
+    [int]$CdnAlternateExternalPort = 0,
+    [int]$CdnUnmappedExternalPort = 0,
     [switch]$SelfTestEvidence,
     [switch]$ValidateOnly,
     [switch]$PreflightOnly,
@@ -99,7 +106,7 @@ function Assert-EvidenceChecksums([string]$Directory) {
     }
 }
 
-function Assert-AcceptanceEvidence([string]$Directory, [bool]$TunnelRequested) {
+function Assert-AcceptanceEvidence([string]$Directory, [bool]$TunnelRequested, [bool]$CdnRequested) {
     $acceptanceFiles = @(Get-ChildItem -LiteralPath $Directory -Filter 'vps-node-acceptance-*.txt' -File)
     if ($acceptanceFiles.Count -ne 1) {
         throw "Expected exactly one acceptance evidence file; found $($acceptanceFiles.Count)."
@@ -137,6 +144,7 @@ function Assert-AcceptanceEvidence([string]$Directory, [bool]$TunnelRequested) {
         formal_sensitive_state_digests_unchanged = 'yes'
         formal_process_images_and_cmdlines_unchanged = 'yes'
         independent_cloudflare_tunnel = $(if ($TunnelRequested) { 'public-concurrency-and-respawn-passed' } else { 'not-requested' })
+        independent_cloudflare_cdn = $(if ($CdnRequested) { 'create-switch-rollback-restore-passed' } else { 'not-requested' })
     }
     foreach ($key in $required.Keys) {
         if (-not $values.ContainsKey($key) -or $values[$key] -ne $required[$key]) {
@@ -281,7 +289,7 @@ function Assert-DnsEvidence([string]$Directory) {
         [int]$fallback.selected_count -lt 1 -or $fallback.proxy_result -ne 'passed') { throw 'Forced public-DNS failure did not fall back to a working system resolver.' }
 }
 
-function Assert-PreflightResult([string[]]$Output, [bool]$MemoryRequested, [bool]$CpuRequested, [bool]$DnsRequested, [bool]$TunnelRequested) {
+function Assert-PreflightResult([string[]]$Output, [bool]$MemoryRequested, [bool]$CpuRequested, [bool]$DnsRequested, [bool]$TunnelRequested, [bool]$CdnRequested) {
     $values = @{}
     foreach ($line in $Output) {
         if ($line -notmatch '^preflight_([a-z0-9_]+)=(.*)$') { continue }
@@ -321,6 +329,13 @@ function Assert-PreflightResult([string[]]$Output, [bool]$MemoryRequested, [bool
         $required.independent_tunnel_inputs = 'yes'
         $required.tunnel_edge = 'reachable'
     }
+    if ($CdnRequested) {
+        $required.cdn_mode = 'required'
+        $required.independent_cdn_inputs = 'yes'
+        $required.cdn_token_isolated = 'yes'
+        $required.cdn_host_isolated = 'yes'
+        $required.cdn_origin_port_free = 'yes'
+    }
     foreach ($key in $required.Keys) {
         if (-not $values.ContainsKey($key) -or $values[$key] -ne $required[$key]) {
             throw "Authorized-host preflight did not prove required result: $key"
@@ -353,6 +368,22 @@ if ($TunnelInputCount -eq 4) {
     if (-not $TunnelPath.StartsWith('/') -or $TunnelPath -match "[\r\n]") { throw 'TunnelPath must begin with / and contain no newline.' }
     if ($TunnelOriginPort -lt 1024 -or $TunnelOriginPort -gt 65535) { throw 'TunnelOriginPort must be between 1024 and 65535.' }
 }
+$CdnValues = @($CdnApiTokenFile, $CdnHost, $CdnPath, $CdnOriginPort, $CdnExternalPort, $CdnAlternateExternalPort, $CdnUnmappedExternalPort)
+$CdnInputCount = @($CdnValues | Where-Object { if ($_ -is [int]) { $_ -ne 0 } else { -not [string]::IsNullOrWhiteSpace([string]$_) } }).Count
+if ($CdnInputCount -ne 0 -and $CdnInputCount -ne 7) {
+    throw 'Independent CDN acceptance requires CdnApiTokenFile, CdnHost, CdnPath, CdnOriginPort, CdnExternalPort, CdnAlternateExternalPort and CdnUnmappedExternalPort together.'
+}
+if ($CdnInputCount -eq 7) {
+    if ($CdnApiTokenFile -notmatch '^/') { throw 'CdnApiTokenFile must be an absolute path on the authorized host.' }
+    if ($CdnApiTokenFile -match "[\r\n]" -or $CdnApiTokenFile -eq '/etc/cloudflared/token') { throw 'CdnApiTokenFile is invalid or references the formal Tunnel token.' }
+    if ($CdnHost -notmatch '^[A-Za-z0-9.-]+\.[A-Za-z]{2,63}$' -or $CdnHost.Contains('..') -or $CdnHost.StartsWith('.') -or $CdnHost.EndsWith('.')) { throw 'CdnHost is invalid.' }
+    if (-not $CdnPath.StartsWith('/') -or $CdnPath -match "[\r\n]") { throw 'CdnPath must begin with / and contain no newline.' }
+    foreach ($port in @($CdnOriginPort, $CdnExternalPort, $CdnAlternateExternalPort, $CdnUnmappedExternalPort)) {
+        if ($port -lt 1024 -or $port -gt 65535) { throw 'CDN ports must be between 1024 and 65535.' }
+    }
+    $CdnDistinctPortCount = @($CdnExternalPort, $CdnAlternateExternalPort, $CdnUnmappedExternalPort | Sort-Object -Unique).Count
+    if ($CdnDistinctPortCount -ne 3) { throw 'CDN external ports must be distinct.' }
+}
 if ($SelfTestEvidence) {
     $selfTestDirectory = Join-Path ([IO.Path]::GetTempPath()) "vps-node-evidence-self-test-$RunId"
     try {
@@ -369,6 +400,7 @@ if ($SelfTestEvidence) {
             "authorized_host=$AuthorizedHost",
             'reality_ipv4_loopback_concurrency=2/2',
             'independent_cloudflare_tunnel=not-requested',
+            'independent_cloudflare_cdn=not-requested',
             'credential_rotation=passed',
             'backup_restore_roundtrip=passed',
             'config_drift_self_heal=passed',
@@ -392,7 +424,7 @@ if ($SelfTestEvidence) {
         $hash = (Get-FileHash -LiteralPath $evidencePath -Algorithm SHA256).Hash.ToLowerInvariant()
         "$hash  $evidenceName" | Set-Content -LiteralPath $sidecarPath -Encoding ascii
         Assert-EvidenceChecksums $selfTestDirectory
-        Assert-AcceptanceEvidence $selfTestDirectory $false
+        Assert-AcceptanceEvidence $selfTestDirectory $false $false
 
         Add-Content -LiteralPath $evidencePath -Value 'tampered=yes' -Encoding ascii
         $checksumRejected = $false
@@ -405,7 +437,7 @@ if ($SelfTestEvidence) {
         "$hash  $evidenceName" | Set-Content -LiteralPath $sidecarPath -Encoding ascii
         Assert-EvidenceChecksums $selfTestDirectory
         $metadataRejected = $false
-        try { Assert-AcceptanceEvidence $selfTestDirectory $false } catch { $metadataRejected = $true }
+        try { Assert-AcceptanceEvidence $selfTestDirectory $false $false } catch { $metadataRejected = $true }
         if (-not $metadataRejected) { throw 'Evidence self-test failed to reject mismatched source metadata.' }
 
         $validLines | Set-Content -LiteralPath $evidencePath -Encoding ascii
@@ -494,10 +526,10 @@ if ($SelfTestEvidence) {
             'preflight_tcp_53_tool=yes',
             'preflight_tunnel_mode=skipped'
         )
-        Assert-PreflightResult $validPreflight $true $true $true $false | Out-Null
+        Assert-PreflightResult $validPreflight $true $true $true $false $false | Out-Null
         $badPreflight = $validPreflight -replace 'preflight_speed_endpoint=yes', 'preflight_speed_endpoint=no'
         $preflightRejected = $false
-        try { Assert-PreflightResult $badPreflight $true $true $true $false | Out-Null } catch { $preflightRejected = $true }
+        try { Assert-PreflightResult $badPreflight $true $true $true $false $false | Out-Null } catch { $preflightRejected = $true }
         if (-not $preflightRejected) { throw 'Evidence self-test failed to reject an unavailable transfer endpoint.' }
 
         $cpuSummary = Join-Path $selfTestDirectory 'cpu-profiles-summary.txt'
@@ -721,6 +753,21 @@ if [ "$PREFLIGHT_TUNNEL" = 1 ]; then
 else
   printf 'preflight_tunnel_mode=skipped\n'
 fi
+if [ "$PREFLIGHT_CDN" = 1 ]; then
+  [ -r "$PREFLIGHT_CDN_TOKEN_FILE" ] || { printf 'preflight CDN token file is not readable\n' >&2; exit 1; }
+  case "$PREFLIGHT_CDN_TOKEN_FILE" in /etc/cloudflared/token) printf 'preflight refuses formal Tunnel token\n' >&2; exit 1 ;; esac
+  token_hash="$(sha256sum "$PREFLIGHT_CDN_TOKEN_FILE" | awk '{print $1}')"
+  for formal_token in /etc/vps-node/secrets/cloudflare-api-token /etc/mihomo/secrets/cloudflare-api-token; do
+    if [ -r "$formal_token" ] && [ "$token_hash" = "$(sha256sum "$formal_token" | awk '{print $1}')" ]; then printf 'preflight refuses formal CDN token\n' >&2; exit 1; fi
+  done
+  for formal_nodes in /etc/vps-node/nodes.db /etc/mihomo/nodes.db; do
+    [ ! -r "$formal_nodes" ] || ! grep -Fq "$PREFLIGHT_CDN_HOST" "$formal_nodes" || { printf 'preflight refuses formal CDN host\n' >&2; exit 1; }
+  done
+  if ss -ltnH 2>/dev/null | awk -v p="$PREFLIGHT_CDN_ORIGIN_PORT" '$4 ~ (":" p "$") { found=1 } END { exit found ? 0 : 1 }'; then printf 'preflight CDN origin port is occupied\n' >&2; exit 1; fi
+  printf 'preflight_cdn_mode=required\npreflight_independent_cdn_inputs=yes\npreflight_cdn_token_isolated=yes\npreflight_cdn_host_isolated=yes\npreflight_cdn_origin_port_free=yes\n'
+else
+  printf 'preflight_cdn_mode=skipped\n'
+fi
 '@
 $preflightCommand = "PREFLIGHT_MEMORY=$(if ($SkipMemoryProfiles) { '0' } else { '1' }); " +
     "PREFLIGHT_CPU=$(if ($SkipCpuProfiles) { '0' } else { '1' }); " +
@@ -730,10 +777,14 @@ $preflightCommand = "PREFLIGHT_MEMORY=$(if ($SkipMemoryProfiles) { '0' } else { 
     "PREFLIGHT_HOST=$(Quote-Sh $TunnelHost); " +
     "PREFLIGHT_PATH=$(Quote-Sh $TunnelPath); " +
     "PREFLIGHT_PORT=$(Quote-Sh ([string]$TunnelOriginPort)); " +
-    "export PREFLIGHT_MEMORY PREFLIGHT_CPU PREFLIGHT_DNS PREFLIGHT_TUNNEL PREFLIGHT_TOKEN_FILE PREFLIGHT_HOST PREFLIGHT_PATH PREFLIGHT_PORT; " +
+    "PREFLIGHT_CDN=$(if ($CdnInputCount -eq 7) { '1' } else { '0' }); " +
+    "PREFLIGHT_CDN_TOKEN_FILE=$(Quote-Sh $CdnApiTokenFile); " +
+    "PREFLIGHT_CDN_HOST=$(Quote-Sh $CdnHost); " +
+    "PREFLIGHT_CDN_ORIGIN_PORT=$(Quote-Sh ([string]$CdnOriginPort)); " +
+    "export PREFLIGHT_MEMORY PREFLIGHT_CPU PREFLIGHT_DNS PREFLIGHT_TUNNEL PREFLIGHT_TOKEN_FILE PREFLIGHT_HOST PREFLIGHT_PATH PREFLIGHT_PORT PREFLIGHT_CDN PREFLIGHT_CDN_TOKEN_FILE PREFLIGHT_CDN_HOST PREFLIGHT_CDN_ORIGIN_PORT; " +
     $preflightScript
 $preflight = Invoke-AuthorizedSsh $preflightCommand
-$PreflightLines = Assert-PreflightResult $preflight.Output (-not $SkipMemoryProfiles) (-not $SkipCpuProfiles) (-not $SkipDnsProfiles) ($TunnelInputCount -eq 4)
+$PreflightLines = Assert-PreflightResult $preflight.Output (-not $SkipMemoryProfiles) (-not $SkipCpuProfiles) (-not $SkipDnsProfiles) ($TunnelInputCount -eq 4) ($CdnInputCount -eq 7)
 $PreflightLines | ForEach-Object { Write-Host $_ }
 if ($PreflightOnly) {
     Write-Host 'Authorized-host preflight passed; no files were uploaded and no test was started.'
@@ -801,6 +852,16 @@ exit 1
             "VP_TEST_ARGO_ORIGIN_PORT=$(Quote-Sh ([string]$TunnelOriginPort)) "
         Write-Host 'Independent Cloudflare Tunnel inputs validated; public edge acceptance is enabled.'
     }
+    if ($CdnInputCount -eq 7) {
+        $acceptanceEnvironment += "VP_TEST_CDN_TOKEN_FILE=$(Quote-Sh $CdnApiTokenFile) " +
+            "VP_TEST_CDN_HOST=$(Quote-Sh $CdnHost) " +
+            "VP_TEST_CDN_PATH=$(Quote-Sh $CdnPath) " +
+            "VP_TEST_CDN_ORIGIN_PORT=$(Quote-Sh ([string]$CdnOriginPort)) " +
+            "VP_TEST_CDN_EXTERNAL_PORT=$(Quote-Sh ([string]$CdnExternalPort)) " +
+            "VP_TEST_CDN_ALTERNATE_PORT=$(Quote-Sh ([string]$CdnAlternateExternalPort)) " +
+            "VP_TEST_CDN_UNMAPPED_PORT=$(Quote-Sh ([string]$CdnUnmappedExternalPort)) "
+        Write-Host 'Independent Cloudflare CDN inputs validated; public edge acceptance is enabled.'
+    }
 
     $acceptanceCommand = "set -eu; cd $(Quote-Sh "$RemoteRoot/source"); " +
         $acceptanceEnvironment +
@@ -838,8 +899,8 @@ exit 1
     $preflightHash = (Get-FileHash -LiteralPath $preflightEvidence -Algorithm SHA256).Hash.ToLowerInvariant()
     "$preflightHash  authorized-host-preflight.txt" | Set-Content -LiteralPath "$preflightEvidence.sha256" -Encoding ascii
     Assert-EvidenceChecksums $EvidenceDirectory
-    Assert-PreflightResult (Get-Content -LiteralPath $preflightEvidence) (-not $SkipMemoryProfiles) (-not $SkipCpuProfiles) (-not $SkipDnsProfiles) ($TunnelInputCount -eq 4) | Out-Null
-    Assert-AcceptanceEvidence $EvidenceDirectory ($TunnelInputCount -eq 4)
+    Assert-PreflightResult (Get-Content -LiteralPath $preflightEvidence) (-not $SkipMemoryProfiles) (-not $SkipCpuProfiles) (-not $SkipDnsProfiles) ($TunnelInputCount -eq 4) ($CdnInputCount -eq 7) | Out-Null
+    Assert-AcceptanceEvidence $EvidenceDirectory ($TunnelInputCount -eq 4) ($CdnInputCount -eq 7)
     if (-not $SkipMemoryProfiles) { Assert-MemoryEvidence $EvidenceDirectory }
     if (-not $SkipCpuProfiles) { Assert-CpuEvidence $EvidenceDirectory }
     if (-not $SkipDnsProfiles) { Assert-DnsEvidence $EvidenceDirectory }

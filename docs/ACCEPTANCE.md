@@ -1,5 +1,24 @@
 # 唯一测试机隔离验收
 
+## 独立 Cloudflare CDN 公网闭环
+
+真实 CDN 验收必须使用专用 Flexible 测试 Zone、独立最小权限 API Token 和不会出现在正式节点库中的测试子域名。测试机还需要准备三个公网映射：前两个都映射到同一个内部源站端口，第三个必须确定未映射。
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\tests\run_authorized_host.ps1 `
+  -SkipMemoryProfiles -SkipCpuProfiles -SkipDnsProfiles `
+  -CdnApiTokenFile /root/independent-cdn.token `
+  -CdnHost cdn-test.example.com `
+  -CdnPath /private-cdn `
+  -CdnOriginPort 25436 `
+  -CdnExternalPort 35436 `
+  -CdnAlternateExternalPort 36436 `
+  -CdnUnmappedExternalPort 37436
+```
+
+七项 CDN 参数必须成组提供。Token 参数是测试机上的绝对文件路径，不是 Token 内容。验收器会拒绝正式 Token、正式节点域名、已占用的内部端口和重复的公网端口，然后依次验证：创建并发代理、无重启切换到第二公网端口、切到未映射端口时失败并恢复第二端口、删除节点后恢复原 DNS 和精确移除项目 Origin Rule。脱敏证据只记录结论，不记录 Token、域名、路径或端口。
+
+
 允许的实机只有 `134.209.180.134`。不得在其他主机运行本验收。
 
 在 Windows 项目目录中推荐使用固定入口：

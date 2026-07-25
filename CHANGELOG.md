@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.0-dev.95
+
+- Added an opt-in real Cloudflare CDN acceptance path locked to the authorized host, with seven all-or-nothing inputs for a dedicated API Token, test hostname/path, one internal origin port, two working NAT mappings and one deliberately unmapped rollback port.
+- Preflight rejects reused formal API Tokens, hostnames present in formal node databases, occupied internal ports, malformed inputs and duplicate public ports before uploading or starting isolated services.
+- Public acceptance now proves two-way proxy traffic, a successful public-port switch without Mihomo PID changes, a failed unmapped-port update with local and remote rollback, and successful traffic after rollback.
+- CDN deletion is followed by direct Cloudflare API verification that the prior DNS value was restored or the project-created record disappeared, and that only the tracked Origin Rule or project-created ruleset was removed.
+- Evidence records only the pass/skip conclusion and never includes the Token, hostname, path or any test port; default no-credential isolated acceptance remains supported.
+
 ## 0.2.0-dev.94
 
 - Full uninstall now restores every tracked Cloudflare CDN DNS record and project Origin Rule before removing local state, so deleting VPS-Node cannot leave managed edge objects behind.
