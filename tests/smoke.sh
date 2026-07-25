@@ -2330,6 +2330,24 @@ FAKE_CF_CURL
     sh "$ROOT/vp.sh" tunnel-install "$TMP/tunnel.token" >/dev/null
     [ "$(stat -c '%a' "$TMP/core-etc/secrets/cloudflared.token")" = "600" ]
   fi
+
+  : > "$TMP/cf-api.log"
+  VP_CONFIG_DIR="$TMP/core-etc" VP_DATA_DIR="$TMP/core-lib" VP_LOG_DIR="$TMP/core-log" \
+  VP_LIB_DIR="$TMP/core-usr-lib" VP_CORE_BIN="$TMP/core-usr-lib/bin/mihomo" VP_SKIP_SERVICE=1 \
+  VP_CURL_BIN="$TMP/cf-api-bin/curl" VP_PUBLIC_IPV4_OVERRIDE=198.51.100.20 VP_FAKE_CF_LOG="$TMP/cf-api.log" \
+  VP_ALLOW_TEST_HOOKS=1 VP_TEST_CDN_VERIFICATION_RESULT=pass VP_CDN_CREATE_CONFIRM=CREATE \
+  sh "$ROOT/vp.sh" cdn-add test-cdn 25436 cdn.example.com /private-cdn nat 35436 >/dev/null
+  mkdir -p "$TMP/core-cli" "$TMP/core-uninstall-backup"
+  cp "$ROOT/vp.sh" "$TMP/core-cli/vp"; chmod 755 "$TMP/core-cli/vp"
+  VP_CONFIG_DIR="$TMP/core-etc" VP_DATA_DIR="$TMP/core-lib" VP_LOG_DIR="$TMP/core-log" \
+  VP_LIB_DIR="$TMP/core-usr-lib" VP_CORE_BIN="$TMP/core-usr-lib/bin/mihomo" VP_SKIP_SERVICE=1 \
+  VP_CURL_BIN="$TMP/cf-api-bin/curl" VP_FAKE_CF_LOG="$TMP/cf-api.log" \
+  VP_CLI_PATH="$TMP/core-cli/vp" VP_CLI_BACKUP_PATH="$TMP/core-cli/vp.previous" \
+  VP_UNINSTALL_BACKUP_DIR="$TMP/core-uninstall-backup" VP_UNINSTALL_CONFIRM=DELETE \
+  sh "$ROOT/vp.sh" uninstall >/dev/null
+  [ ! -e "$TMP/core-etc" ]
+  grep -q 'DELETE .*/rulesets/ruleset_test_1$' "$TMP/cf-api.log"
+  grep -q 'DELETE .*/dns_records/dns_test_1$' "$TMP/cf-api.log"
 fi
 
 service_owner_root="$TMP/service-ownership"

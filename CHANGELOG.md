@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.0-dev.94
+
+- Full uninstall now restores every tracked Cloudflare CDN DNS record and project Origin Rule before removing local state, so deleting VPS-Node cannot leave managed edge objects behind.
+- Cloudflare object restoration is retry-safe and idempotent: a failed delete is verified with a follow-up read, and an object already absent is treated as successfully restored.
+- If the scoped API Token is unavailable or any tracked remote object still exists, uninstall stops before local deletion and retains the recovery package and object IDs for a safe retry.
+- Regression coverage now proves exact DNS and ruleset deletion during full uninstall while preserving unrelated Cloudflare objects; isolated authorized-host acceptance remains clean with formal Mihomo and cloudflared unchanged.
+
 ## 0.2.0-dev.93
 
 - Added backward-compatible direct/NAT Reality records with separate internal listen and public mapped ports; legacy records remain direct without migration.

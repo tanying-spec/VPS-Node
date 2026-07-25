@@ -2,7 +2,7 @@
 
 set -u
 
-VP_VERSION="0.2.0-dev.93"
+VP_VERSION="0.2.0-dev.94"
 VP_CONFIG_DIR="${VP_CONFIG_DIR:-/etc/vps-node}"
 VP_DATA_DIR="${VP_DATA_DIR:-/var/lib/vps-node}"
 VP_LOG_DIR="${VP_LOG_DIR:-/var/log/vps-node}"
@@ -1481,12 +1481,21 @@ cf_restore_cdn_objects() {
   cf_ruleset_disposition="$9"; cf_host="${10}"
   restore_status=0
   if [ "$cf_ruleset_disposition" = created ]; then
-    cf_api_call DELETE "/zones/$cf_zone_id/rulesets/$cf_ruleset_id" >/dev/null 2>&1 || restore_status=1
+    if ! cf_api_call DELETE "/zones/$cf_zone_id/rulesets/$cf_ruleset_id" >/dev/null 2>&1; then
+      ruleset_probe="$(cf_api_call GET "/zones/$cf_zone_id/rulesets/$cf_ruleset_id" 2>/dev/null || true)"
+      printf '%s' "$ruleset_probe" | cf_response_ok && restore_status=1
+    fi
   else
-    cf_api_call DELETE "/zones/$cf_zone_id/rulesets/$cf_ruleset_id/rules/$cf_rule_id" >/dev/null 2>&1 || restore_status=1
+    if ! cf_api_call DELETE "/zones/$cf_zone_id/rulesets/$cf_ruleset_id/rules/$cf_rule_id" >/dev/null 2>&1; then
+      ruleset_probe="$(cf_api_call GET "/zones/$cf_zone_id/rulesets/$cf_ruleset_id" 2>/dev/null || true)"
+      printf '%s' "$ruleset_probe" | jq -e --arg id "$cf_rule_id" '.success and any(.result.rules[]?; .id==$id)' >/dev/null 2>&1 && restore_status=1
+    fi
   fi
   if [ "$cf_dns_disposition" = created ]; then
-    cf_api_call DELETE "/zones/$cf_zone_id/dns_records/$cf_dns_id" >/dev/null 2>&1 || restore_status=1
+    if ! cf_api_call DELETE "/zones/$cf_zone_id/dns_records/$cf_dns_id" >/dev/null 2>&1; then
+      dns_probe_response="$(cf_api_call GET "/zones/$cf_zone_id/dns_records/$cf_dns_id" 2>/dev/null || true)"
+      printf '%s' "$dns_probe_response" | cf_response_ok && restore_status=1
+    fi
   else
     restore_payload="$(jq -nc --arg type "$cf_previous_type" --arg name "$cf_host" --arg content "$cf_previous_content" \
       --argjson proxied "$cf_previous_proxied" '{type:$type,name:$name,content:$content,proxied:$proxied,ttl:1}')"
@@ -5779,6 +5788,23 @@ uninstall_plan() {
   printf '将停止并移除可证明属于 VPS-Node 的服务：%s、%s、%s\n' "$VP_CORE_SERVICE" "$VP_TUNNEL_SERVICE" "$VP_WATCHDOG_SERVICE"
   printf '将删除项目路径：\n'
   printf '  %s\n' "$VP_CONFIG_DIR" "$VP_DATA_DIR" "$VP_LOG_DIR" "$VP_LIB_DIR" "$VP_CLI_PATH" "$VP_CLI_BACKUP_PATH" "$VP_CLI_BACKUP_SHA256"
+  cdn_uninstall_count="$(awk 'NF{n++}END{print n+0}' "$VP_CF_CDN_DB" 2>/dev/null)"
+  [ "$cdn_uninstall_count" -eq 0 ] || printf '  Cloudflare CDN：精确删除 %s 组项目规则并恢复原 DNS（需要原 API Token）\n' "$cdn_uninstall_count"
+}
+
+uninstall_restore_cdn_objects() {
+  [ -s "$VP_CF_CDN_DB" ] || return 0
+  cf_api_token >/dev/null 2>&1 || { error "存在 CDN 节点但缺少 Cloudflare API Token，拒绝留下远端残留。"; return 1; }
+  restored_cdn_count=0
+  while IFS='|' read -r cf_name zone_id dns_id dns_disposition previous_type previous_content previous_proxied ruleset_id rule_id ruleset_disposition host; do
+    [ -n "$cf_name" ] || continue
+    if ! cf_restore_cdn_objects "$zone_id" "$dns_id" "$dns_disposition" "$previous_type" "$previous_content" "$previous_proxied" "$ruleset_id" "$rule_id" "$ruleset_disposition" "$host"; then
+      error "Cloudflare CDN 节点 $cf_name 的远端对象恢复失败。"
+      return 1
+    fi
+    restored_cdn_count=$((restored_cdn_count + 1))
+  done < "$VP_CF_CDN_DB"
+  [ "$restored_cdn_count" -eq 0 ] || ok "已恢复 $restored_cdn_count 个 CDN 节点对应的 Cloudflare DNS/规则。"
 }
 
 uninstall_restore_services() {
@@ -5964,6 +5990,11 @@ uninstall_project() {
   if ! network_rollback --quiet; then
     [ "$uninstall_manager" = skip ] || uninstall_restore_services
     error "无法恢复项目应用前的网络参数，已恢复原服务并中止卸载。"
+    return 1
+  fi
+  if ! uninstall_restore_cdn_objects; then
+    [ "$uninstall_manager" = skip ] || uninstall_restore_services
+    error "Cloudflare CDN 远端清理失败，已中止本地删除并保留恢复包。"
     return 1
   fi
   if [ "$uninstall_manager" != skip ]; then

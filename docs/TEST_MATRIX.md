@@ -1,6 +1,6 @@
 # 测试矩阵与证据等级
 
-所有需要真实 Mihomo、OpenRC、网络出口或资源压力的实机测试只能在 `134.209.180.134` 运行。`dev.93` 已完成完整 smoke、安装测试、NAT/CDN API 隔离测试和实机隔离验收；真实 Cloudflare CDN 边缘仍需独立测试凭据。原始脱敏证据摘要见 `REAL_HOST_EVIDENCE.md`。
+所有需要真实 Mihomo、OpenRC、网络出口或资源压力的实机测试只能在 `134.209.180.134` 运行。`dev.94` 已完成完整 smoke、安装测试、NAT/CDN API 隔离测试、整体卸载远端对象恢复测试和实机隔离验收；真实 Cloudflare CDN 边缘仍需独立测试凭据。原始脱敏证据摘要见 `REAL_HOST_EVIDENCE.md`。
 
 Windows 远程编排入口 `tests/run_authorized_host.ps1` 同样将主机和端口写死，禁用密码认证；上传前先执行只读能力预检，只上传验收白名单文件，并在下载后本地复核脱敏预检/验收证据 SHA-256 及语义；CI 对这些约束执行静态守卫。
 
@@ -27,8 +27,8 @@ Windows 远程编排入口 `tests/run_authorized_host.ps1` 同样将主机和端
 | 安装、更新、回滚、来源与降级保护 | 零写入候选预览与取消、命令级 `UPDATE` 确认、本地候选源、顶层 SHA 样本、同版本异内容/隐式降级拒绝、显式降级、孤立恢复点保留、安装/更新/回滚状态绑定与原子不覆盖、两阶段故障恢复及 SHA-256 篡改注入 | 已通过 |
 | 可恢复卸载及文件残留 | 外部恢复包与 SHA-256、服务停止失败零删除/零网络回滚、Mihomo/cloudflared 进程级退出门槛、孤立 Tunnel 拒绝、OpenRC watchdog 暂存恢复、项目与服务定义最终残留审计、部分删除失败明确报错 | 已通过自动验证 |
 | Reality 真实认证与并发 | `tests/isolated_acceptance.sh` | `dev.92` IPv4 2/2 路通过 |
-| NAT 内外端口与更新回滚 | 真实 Mihomo 候选配置、链接端口、成功提交、验证失败数据库哈希恢复 | `dev.93` 唯一主机完整 smoke 通过 |
-| Cloudflare CDN API 对象生命周期 | 伪 API 验证 Token、Zone/SSL、DNS、Origin Rule、失败清理、端口更新与精确删除请求；真实 Mihomo 配置验证 | `dev.93` 唯一主机完整 smoke 通过；不代表公网边缘通过 |
+| NAT 内外端口与更新回滚 | 真实 Mihomo 候选配置、链接端口、成功提交、验证失败数据库哈希恢复 | `dev.94` 唯一主机完整 smoke 通过 |
+| Cloudflare CDN API 对象生命周期 | 伪 API 验证 Token、Zone/SSL、DNS、Origin Rule、失败清理、端口更新、单节点删除及整体卸载精确恢复；真实 Mihomo 配置验证 | `dev.94` 唯一主机完整 smoke 通过；不代表公网边缘通过 |
 | Alpine/OpenRC 服务生命周期 | `tests/isolated_acceptance.sh` | `dev.92` 创建、运行、维护、CLI 更新/回滚、监控定义和卸载闭环通过 |
 | 正式 Mihomo/cloudflared 前后不变 | 状态及配置/init 哈希对比 | `dev.92` PID、镜像、命令行及全部受检摘要不变 |
 | 64–2048 MiB 真实 Mihomo 档位 | 十五个 cgroup v2 硬上限覆盖 96/160/320/640 MiB 边界前后、十五次真实内核启动、代理出口、每档 4×1 MiB 并发完整传输、`memory.peak`、零 `oom_kill`、结构化证据（不可绕过主机锁） | 测试机未委派 memory controller，明确失败且未降级模拟 |
